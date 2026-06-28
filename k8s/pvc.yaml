@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: media
+  namespace: zaentrum
+  labels:
+    value-stream: zaentrum
+    role: media-mount
+spec:
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: 53Ti
+  volumeName: zaentrum-media-nfs
+  # Empty storageClassName + named volumeName binds to a static, pre-provisioned
+  # PV. Provide your own NFS (or other RWX) export and matching PV.
+  storageClassName: ""
+---
+# Packages PVC: analyzer-built CMAF + trickplay sprites under
+# /var/lib/katalog/packages/{movies,shows,…}/{shard}/{itemId}/. Bound to a
+# pre-provisioned PV backed by an NFS export. RWX so the catalog and stream
+# namespaces can mount it concurrently.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: packages
+  namespace: zaentrum
+  labels:
+    value-stream: zaentrum
+    role: packages-mount
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Ti
+  volumeName: zaentrum-packages-nfs
+  storageClassName: ""

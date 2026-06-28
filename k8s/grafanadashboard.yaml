@@ -1,0 +1,17 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: chino-stream
+  labels:
+    app: chino-stream
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: grafana-platform
+  json: |
+    {
+      "title": "chino-stream (scaffold)",
+      "schemaVersion": 38,
+      "version": 0,
+      "panels": []
+    }

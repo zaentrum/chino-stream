@@ -1,0 +1,15 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: chino-stream
+  labels:
+    app: chino-stream
+    prometheus: platform
+spec:
+  selector:
+    matchLabels:
+      app: chino-stream
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s

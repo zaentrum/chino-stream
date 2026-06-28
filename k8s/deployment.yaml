@@ -1,0 +1,183 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chino-stream
+  namespace: zaentrum
+  labels:
+    app: chino-stream
+    product: chino
+    value-stream: zaentrum
+    role: stream
+    env: prod
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: chino-stream
+  template:
+    metadata:
+      labels:
+        app: chino-stream
+        product: chino
+        value-stream: zaentrum
+        role: stream
+        env: prod
+    spec:
+      imagePullSecrets:
+        - name: gitlab-registry
+      # GPU nodes (worker6, worker7) are tainted to keep general workloads
+      # off them. We pin chino-stream there because the NVENC pipeline
+      # collapses HEVC transcode latency from ~realtime to ~10× realtime.
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      affinity:
+        # De-colocation hint: prefer NOT to land on the same node as the
+        # transcoder. chino-stream and the transcoder both hammer the
+        # same NFS-backed `packages`/`media` exports; sharing a node
+        # means sharing one kernel NFS client, and the transcoder's
+        # sustained read/write traffic was measured contending with
+        # chino-stream's cold packaged reads (init.mp4 stalled 18.4s,
+        # segment p90 1.35s / max 17.7s). Spreading them onto different
+        # GPU workers (worker6/worker7) gives each its own NFS client.
+        #
+        # PREFERRED only (never required): chino-stream still hard-pins
+        # to GPU nodes via the nodeSelector above for its own NVENC
+        # pipeline, and there are only 2 GPU workers — a required rule
+        # would make chino-stream Pending whenever it can't avoid the
+        # transcoder's node. Preferred lets the scheduler honour the
+        # split when a free GPU node exists and fall back to co-location
+        # rather than going unschedulable.
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    # Matches the transcoder Deployment pod template so the
+                    # stream and transcoder pods co-schedule on a GPU node.
+                    app: transcoder
+      containers:
+        - name: chino-stream
+          image: zaentrum/chino-stream:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: LISTEN_ADDR
+              value: ":8080"
+            # katalog-api lives next door in the same namespace. Service is
+            # ClusterIP, so this never leaves the cluster.
+            - name: KATALOG_API_BASE_URL
+              value: "http://katalog-api.zaentrum.svc.cluster.local"
+            - name: MEDIA_ROOT
+              value: "/var/lib/katalog/media"
+            - name: OIDC_ISSUER
+              value: "https://sso.example.com/realms/zaentrum"
+            # chino-stream is reached via chino-web's token (aud=chino-web);
+            # OIDC_AUDIENCE is what the local verifier requires. Forwarding the
+            # same token onward to katalog-api works because katalog-api's
+            # audience allowlist includes chino-web.
+            - name: OIDC_AUDIENCE
+              value: "chino-web"
+            - name: AUTH_ENABLED
+              value: "true"
+            # Shared with chino-api for ?stream=<token> validation. Optional —
+            # without it both services fall back to ephemeral per-pod keys and
+            # cross-pod stream tokens won't validate. OIDC bearer still works.
+            - name: STREAM_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: chino-stream-signing
+                  key: key
+                  optional: true
+            - name: TRANSCODE_PRESET
+              value: "veryfast"
+            - name: HLS_CACHE_DIR
+              value: "/var/cache/katalog-hls"
+            # NVENC pipeline (cuda hwaccel decode → h264_nvenc encode).
+            # Set when the pod has nvidia.com/gpu attached. Without this
+            # the runtime falls back to libx264 (~real-time on 1080p,
+            # unworkable on 4K). NVENC presets follow katalog-transcoder
+            # conventions — p5 is the "balanced" preset, slightly slower
+            # than p1 but much higher quality at the same bitrate.
+            - name: USE_NVENC
+              value: "true"
+            - name: NVENC_PRESET
+              value: "p5"
+            - name: NVENC_CQ
+              value: "23"
+            # Cap of in-flight ffmpeg invocations across all routes
+            # (video windows, audio windows, passthrough segments,
+            # subtitle extracts). A user scrubbing rapidly can fan out
+            # 8+ window requests in seconds — without the cap the pod
+            # OOMs at the 4 GiB ceiling. 4 in flight × ~600 MB each =
+            # ~2.5 GiB transient, leaves room for the Go heap +
+            # page cache.
+            - name: FFMPEG_MAX_CONCURRENT
+              value: "4"
+            # libcuda.so.1 is provided by the NVIDIA container toolkit at
+            # /usr/local/nvidia/lib64. Without this env the dynamic
+            # linker can't find it and h264_nvenc init fails at runtime.
+            - name: LD_LIBRARY_PATH
+              value: "/usr/local/nvidia/lib64:/usr/local/nvidia/lib"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+              # GPU request gates scheduling — the pod will only land on
+              # a node that advertises nvidia.com/gpu capacity. Match
+              # `limits` so the NVIDIA device plugin admits the request.
+              nvidia.com/gpu: "1"
+            limits:
+              # CPU stays modest — NVENC encode is GPU-bound, the host
+              # cores only orchestrate ffmpeg and demux audio.
+              cpu: "2"
+              # Memory headroom for the FFMPEG_MAX_CONCURRENT semaphore
+              # below. libx264 1080p ~400-700 MB per run; allow 4 in
+              # flight + Go heap + page cache. The OOMKill at 2 GiB
+              # came from a single user scrubbing across multiple
+              # items in a few seconds and spawning ~8 windows at once.
+              memory: 4Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: media
+              mountPath: /var/lib/katalog/media
+              readOnly: true
+            - name: packages
+              mountPath: /var/lib/katalog/packages
+              readOnly: true
+            - name: hls-cache
+              mountPath: /var/cache/katalog-hls
+      volumes:
+        # PV-backed mounts. Restrictive SCCs forbid inline `nfs:` volume
+        # sources, so we bind PVCs against pre-provisioned PVs (create the
+        # backing PVs out-of-band for your environment).
+        - name: media
+          persistentVolumeClaim:
+            claimName: media
+            readOnly: true
+        - name: packages
+          persistentVolumeClaim:
+            claimName: packages
+            readOnly: true
+        - name: hls-cache
+          emptyDir:
+            sizeLimit: 5Gi

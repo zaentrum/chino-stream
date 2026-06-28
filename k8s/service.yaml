@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: chino-stream
+  namespace: zaentrum
+  labels:
+    app: chino-stream
+    value-stream: zaentrum
+spec:
+  type: ClusterIP
+  selector:
+    app: chino-stream
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

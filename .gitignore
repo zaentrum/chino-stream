@@ -1,0 +1,31 @@
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+/bin/
+/build/
+/dist/
+/vendor/
+coverage.txt
+coverage.html
+go.work
+go.work.sum
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Media / transcode scratch — never commit
+/var/
+*.mp4
+*.mkv
+*.ts
+*.m4s
+hls-cache/
