@@ -410,8 +410,8 @@ func (h *HLSHandler) Master(w http.ResponseWriter, r *http.Request) {
 			videoCodec = "hvc1.1.6.L120.B0"
 		}
 		sb.WriteString(fmt.Sprintf(
-			"#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%s,CODECS=\"%s,mp4a.40.2\"\n",
-			bw, res, videoCodec,
+			"#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%s,CODECS=\"%s,mp4a.40.2\",VIDEO-RANGE=%s\n",
+			bw, res, videoCodec, videoRange(probe),
 		))
 		sb.WriteString(fmt.Sprintf("copy/index.m3u8%s\n", q))
 	} else {
@@ -423,7 +423,7 @@ func (h *HLSHandler) Master(w http.ResponseWriter, r *http.Request) {
 			audioAttr = fmt.Sprintf(",AUDIO=%q", audioGroup)
 		}
 		sb.WriteString(fmt.Sprintf(
-			"#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%s,CODECS=\"avc1.640028,mp4a.40.2\"%s\n",
+			"#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%s,CODECS=\"avc1.640028,mp4a.40.2\",VIDEO-RANGE=SDR%s\n",
 			bw, res, audioAttr,
 		))
 		sb.WriteString(fmt.Sprintf("%s/index.m3u8%s\n", ql.Name, q))
@@ -824,12 +824,34 @@ func (h *HLSHandler) transcodeVideoWindow(ctx context.Context, itemID, src, qual
 	}
 	defer os.RemoveAll(tmpDir)
 
+	// Source dims drive the rung's scale filter for sources larger than
+	// the rung's nominal target. Without this, a 4K source fed through
+	// the "high" rung would try to encode at native 3840×1606 in
+	// libx264/NVENC with -level 4.0 (max 1920×1088) and ffmpeg bails
+	// with "InitializeEncoder failed: Invalid Level".
+	srcW, srcH := 0, 0
+	if probe != nil {
+		srcW, srcH = probe.Width, probe.Height
+	}
+	// HDR->SDR tone-mapping only exists on the libx264 path (see
+	// videoEncoderArgs); the NVENC path skips it and produces a desaturated,
+	// too-dark picture. Route HDR to libx264 so it tone-maps — but ONLY at
+	// ≤1080p, where libx264 keeps up with the 60s-window deadline in real time.
+	// A 4K HDR source stays on NVENC (still desaturated) because CPU
+	// tone-mapping 4K under real-time serving pressure would stall playback at
+	// every window seam; the GPU tonemap_cuda path (follow-up) fixes 4K.
+	// useNvenc gates BOTH the input hwaccel flags AND the encoder args so
+	// CUDA-decoded frames are never handed to the software filter/encoder
+	// chain (which fails with a "no path between colorspaces"/"Impossible to
+	// convert" error).
+	useNvenc := h.UseNVENC && !(isHDR && srcH > 0 && srcH <= 1080)
+
 	args := []string{
 		"-y", "-hide_banner", "-loglevel", "warning",
 		"-fflags", "+genpts+igndts+discardcorrupt",
 		"-err_detect", "ignore_err",
 	}
-	if h.UseNVENC {
+	if useNvenc {
 		// CUDA hwaccel decode keeps frames on the GPU; the matching
 		// scale_cuda + h264_nvenc in videoEncoderArgs reads them straight
 		// from device memory. Without -hwaccel_output_format cuda the
@@ -843,16 +865,7 @@ func (h *HLSHandler) transcodeVideoWindow(ctx context.Context, itemID, src, qual
 		"-t", strconv.Itoa(windowDurSec),
 		"-map", "0:v:0",
 	)
-	// Source dims drive the rung's scale filter for sources larger than
-	// the rung's nominal target. Without this, a 4K source fed through
-	// the "high" rung would try to encode at native 3840×1606 in
-	// libx264/NVENC with -level 4.0 (max 1920×1088) and ffmpeg bails
-	// with "InitializeEncoder failed: Invalid Level".
-	srcW, srcH := 0, 0
-	if probe != nil {
-		srcW, srcH = probe.Width, probe.Height
-	}
-	args = append(args, videoEncoderArgs(ql, h.TranscodePreset, isHDR, h.UseNVENC, h.NVENCPreset, h.NVENCCQ, srcW, srcH, maxHeight)...)
+	args = append(args, videoEncoderArgs(ql, h.TranscodePreset, isHDR, useNvenc, h.NVENCPreset, h.NVENCCQ, srcW, srcH, maxHeight)...)
 	args = append(args,
 		// Shift output PTS so segments declare absolute timeline.
 		"-output_ts_offset", strconv.Itoa(windowStartSec),
@@ -1604,6 +1617,26 @@ func audioEncoderArgs() []string {
 		"-ar", "48000",
 		"-ac", "2",
 		"-b:a", "128k",
+	}
+}
+
+// videoRange maps a source's transfer function to the HLS EXT-X-STREAM-INF
+// VIDEO-RANGE attribute (RFC 8216bis §4.4.4.2): smpte2084 -> PQ (HDR10),
+// arib-std-b67 -> HLG; everything else (including a nil probe) -> SDR. The
+// on-the-fly master omitted this, so a passed-through HDR HEVC variant was
+// mis-signalled as SDR and HDR displays never engaged HDR mode. A transcoded
+// variant is always tagged SDR by the caller (its output is BT.709 H.264).
+func videoRange(p *Probe) string {
+	if p == nil {
+		return "SDR"
+	}
+	switch strings.ToLower(p.ColorTransfer) {
+	case "smpte2084":
+		return "PQ"
+	case "arib-std-b67":
+		return "HLG"
+	default:
+		return "SDR"
 	}
 }
 
