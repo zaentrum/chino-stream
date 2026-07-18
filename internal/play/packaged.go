@@ -316,6 +316,15 @@ var playlistCache sync.Map // map[string]*playlistCacheEntry (cacheKey -> entry)
 // serves it with an ETag and a short max-age so browser revisits
 // short-circuit at the cache layer.
 func servePlaylistCached(w http.ResponseWriter, r *http.Request, path string) {
+	servePlaylistCachedTransform(w, r, path, nil)
+}
+
+// servePlaylistCachedTransform is servePlaylistCached with an optional
+// post-rewrite transform applied to the playlist body before it's cached and
+// served. Used to stamp VIDEO-RANGE onto the packaged master for HDR titles
+// (shaka omits it). The transform runs once per (path, query) cache miss; cache
+// hits serve the already-transformed body.
+func servePlaylistCachedTransform(w http.ResponseWriter, r *http.Request, path string, transform func(string) string) {
 	st, err := os.Stat(path)
 	if err != nil {
 		http.Error(w, "playlist not found", http.StatusNotFound)
@@ -350,7 +359,11 @@ func servePlaylistCached(w http.ResponseWriter, r *http.Request, path string) {
 		http.Error(w, "playlist not found", http.StatusNotFound)
 		return
 	}
-	out := []byte(rewriteM3U8URIs(string(raw), r.URL.RawQuery))
+	body := rewriteM3U8URIs(string(raw), r.URL.RawQuery)
+	if transform != nil {
+		body = transform(body)
+	}
+	out := []byte(body)
 	sum := sha1.Sum(out)
 	etag := `"` + hex.EncodeToString(sum[:]) + `"`
 	playlistCache.Store(cacheKey, &playlistCacheEntry{body: out, etag: etag, mtime: st.ModTime()})
@@ -371,7 +384,78 @@ func servePlaylistCached(w http.ResponseWriter, r *http.Request, path string) {
 // fetches unauthenticated.
 func (h *HLSHandler) PackagedMaster(w http.ResponseWriter, r *http.Request) {
 	itemID := chi.URLParam(r, "itemId")
-	servePlaylistCached(w, r, packagePath(itemID, "hls", "master.m3u8"))
+	masterPath := packagePath(itemID, "hls", "master.m3u8")
+	// Shaka doesn't emit VIDEO-RANGE, so a packaged HDR HEVC rendition is
+	// mis-signalled as SDR and HDR displays never engage HDR mode. The package
+	// manifest carries a per-rendition HDR flag from a LOCAL file (no OIDC
+	// bearer needed — unlike re-resolving the source via katalog-api, which
+	// this stream-token'd path can't do), so stamp VIDEO-RANGE onto the variant
+	// lines when the package has any HDR rendition. Pure-SDR packages serve
+	// verbatim (byte-identical to before this change).
+	if mf, err := ReadPackageManifest(itemID); err == nil && manifestHasHDR(mf) {
+		servePlaylistCachedTransform(w, r, masterPath, injectVideoRangeTransform(mf))
+		return
+	}
+	servePlaylistCached(w, r, masterPath)
+}
+
+// manifestHasHDR reports whether any packaged video rendition is HDR.
+func manifestHasHDR(mf *pkgmanifest.Manifest) bool {
+	if mf == nil {
+		return false
+	}
+	for _, v := range mf.Renditions.Video {
+		if v.HDR {
+			return true
+		}
+	}
+	return false
+}
+
+// injectVideoRangeTransform returns a playlist transform that appends a
+// VIDEO-RANGE attribute to each #EXT-X-STREAM-INF line, keyed by the rendition
+// the variant points at: PQ for an HDR rendition, SDR otherwise. The package
+// manifest records HDR only as a bool, so HDR maps to PQ (HDR10 — the common
+// case); a HLG title would be a rare mislabel, and the display still reads the
+// true transfer curve from the stream's own colr/SEI. Lines that already carry
+// VIDEO-RANGE are left untouched.
+func injectVideoRangeTransform(mf *pkgmanifest.Manifest) func(string) string {
+	hdr := make(map[string]bool, len(mf.Renditions.Video))
+	for _, v := range mf.Renditions.Video {
+		hdr[v.ID] = v.HDR
+	}
+	return func(body string) string {
+		lines := strings.Split(body, "\n")
+		for i := range lines {
+			if !strings.HasPrefix(lines[i], "#EXT-X-STREAM-INF:") || strings.Contains(lines[i], "VIDEO-RANGE=") {
+				continue
+			}
+			// The variant URI is the next non-empty, non-comment line; its
+			// first path segment is the rendition id (e.g. "v0/playlist.m3u8").
+			rendID := ""
+			for j := i + 1; j < len(lines); j++ {
+				t := strings.TrimSpace(lines[j])
+				if t == "" || strings.HasPrefix(t, "#") {
+					continue
+				}
+				if k := strings.IndexByte(t, '/'); k >= 0 {
+					t = t[:k]
+				}
+				rendID = t
+				break
+			}
+			vr := "SDR"
+			if hdr[rendID] {
+				vr = "PQ"
+			}
+			line, cr := lines[i], ""
+			if strings.HasSuffix(line, "\r") {
+				line, cr = strings.TrimSuffix(line, "\r"), "\r"
+			}
+			lines[i] = line + ",VIDEO-RANGE=" + vr + cr
+		}
+		return strings.Join(lines, "\n")
+	}
 }
 
 // PackagedRenditionPlaylist serves the per-rendition playlist.m3u8
