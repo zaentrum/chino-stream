@@ -83,7 +83,12 @@ func (h *Handler) Play(w http.ResponseWriter, r *http.Request) {
 	clean := filepath.Clean(path)
 	if h.MediaRoot != "" && !strings.HasPrefix(clean, filepath.Clean(h.MediaRoot)+string(os.PathSeparator)) {
 		log.Printf("play: refusing out-of-root path %q (root=%q)", clean, h.MediaRoot)
-		http.Error(w, "path outside media root", http.StatusForbidden)
+		// A server-side misconfiguration, not a client error: the asset is
+		// registered at a path the stream service was not told to serve from.
+		// Returning 403 made it read as a permissions problem and sent people
+		// looking in entirely the wrong place.
+		http.Error(w, "this file is stored outside the configured media root — "+
+			"check MEDIA_ROOT on chino-stream", http.StatusInternalServerError)
 		return
 	}
 	if _, err := os.Stat(clean); err != nil {
@@ -267,7 +272,12 @@ func (h *Handler) EmbeddedSubtitle(w http.ResponseWriter, r *http.Request) {
 	}
 	clean := filepath.Clean(path)
 	if h.MediaRoot != "" && !strings.HasPrefix(clean, filepath.Clean(h.MediaRoot)+string(os.PathSeparator)) {
-		http.Error(w, "path outside media root", http.StatusForbidden)
+		// A server-side misconfiguration, not a client error: the asset is
+		// registered at a path the stream service was not told to serve from.
+		// Returning 403 made it read as a permissions problem and sent people
+		// looking in entirely the wrong place.
+		http.Error(w, "this file is stored outside the configured media root — "+
+			"check MEDIA_ROOT on chino-stream", http.StatusInternalServerError)
 		return
 	}
 	if _, err := os.Stat(clean); err != nil {
@@ -380,12 +390,12 @@ func (h *Handler) ensureSubtitleCached(ctx context.Context, src string, idx, sta
 //
 // Three modes are reported:
 //   - "packaged"   → the analyzer has built a pre-segmented CMAF tree
-//                    under /var/lib/katalog/packages/{id}/. The player
-//                    serves video + audio as static byte-range fetches
-//                    from disk. No request-time ffmpeg.
+//     under /var/lib/katalog/packages/{id}/. The player
+//     serves video + audio as static byte-range fetches
+//     from disk. No request-time ffmpeg.
 //   - "transcode"  → legacy on-demand path. Source codec isn't browser-
-//                    compatible, so chino-stream runs ffmpeg per
-//                    window to produce HLS segments on the fly.
+//     compatible, so chino-stream runs ffmpeg per
+//     window to produce HLS segments on the fly.
 //   - "remux" / "passthrough" → legacy CMAF/MP4 served byte-range.
 //
 // The packaged check is cheap (a single stat per cached itemRoot) and
@@ -408,7 +418,12 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 	}
 	clean := filepath.Clean(path)
 	if h.MediaRoot != "" && !strings.HasPrefix(clean, filepath.Clean(h.MediaRoot)+string(os.PathSeparator)) {
-		http.Error(w, "path outside media root", http.StatusForbidden)
+		// A server-side misconfiguration, not a client error: the asset is
+		// registered at a path the stream service was not told to serve from.
+		// Returning 403 made it read as a permissions problem and sent people
+		// looking in entirely the wrong place.
+		http.Error(w, "this file is stored outside the configured media root — "+
+			"check MEDIA_ROOT on chino-stream", http.StatusInternalServerError)
 		return
 	}
 
@@ -465,20 +480,20 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"filename":          filepath.Base(clean),
-		"container":         probe.Container,
-		"video_codec":       probe.VideoCodec,
-		"audio_codec":       probe.AudioCodec,
-		"width":             probe.Width,
-		"height":            probe.Height,
-		"duration_ms":       probe.DurationMs,
-		"mode":              mode,
-		"reason":            reason,
-		"qualities":         ladder,
-		"default_quality":   "high",
-		"audio_tracks":      probe.AudioTracks,
-		"subtitle_tracks":   probe.SubtitleTracks,
-		"encoder":           encoder,
+		"filename":        filepath.Base(clean),
+		"container":       probe.Container,
+		"video_codec":     probe.VideoCodec,
+		"audio_codec":     probe.AudioCodec,
+		"width":           probe.Width,
+		"height":          probe.Height,
+		"duration_ms":     probe.DurationMs,
+		"mode":            mode,
+		"reason":          reason,
+		"qualities":       ladder,
+		"default_quality": "high",
+		"audio_tracks":    probe.AudioTracks,
+		"subtitle_tracks": probe.SubtitleTracks,
+		"encoder":         encoder,
 	})
 }
 

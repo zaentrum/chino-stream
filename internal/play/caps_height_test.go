@@ -89,7 +89,7 @@ func TestVideoCacheQuality(t *testing.T) {
 		maxHeight int
 		want      string
 	}{
-		{"high", 0, "high"},      // uncapped: unchanged namespace (backward compat)
+		{"high", 0, "high"}, // uncapped: unchanged namespace (backward compat)
 		{"high", 1080, "high-h1080"},
 		{"medium", 480, "medium-h480"},
 		{"low", 0, "low"},

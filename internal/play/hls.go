@@ -209,7 +209,12 @@ func (h *HLSHandler) resolveSource(ctx context.Context, itemID, bearer string) (
 	}
 	clean := filepath.Clean(path)
 	if h.MediaRoot != "" && !strings.HasPrefix(clean, filepath.Clean(h.MediaRoot)+string(os.PathSeparator)) {
-		return "", nil, errors.New("path outside media root")
+		// Name both sides. This message was the only symptom of a
+		// misconfiguration that made playback impossible for every asset, and
+		// it said neither which path nor which root.
+		return "", nil, fmt.Errorf(
+			"asset path %q is outside the configured media root %q — "+
+				"chino-stream cannot open it", clean, filepath.Clean(h.MediaRoot))
 	}
 	st, err := os.Stat(clean)
 	if err != nil {
