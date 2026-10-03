@@ -332,9 +332,25 @@ func (h *HLSHandler) Master(w http.ResponseWriter, r *http.Request) {
 	//   probe + caps → mode → pipeline
 	//   ─────────────────────────────────────────────────────────────
 	//   video OK, audio OK + ≤2ch  passthrough  → /copy/   -c copy
-	//   video OK, audio NOT OK     remux        → /{q}/    -c:v copy + audio re-encode
-	//                                              (transcode.go's mode=="remux" branch)
+	//   video OK, audio or         remux        → /{q}/    full libx264/NVENC ladder:
+	//   container NOT OK                                   video is re-encoded too
 	//   video NOT OK               transcode    → /{q}/    full libx264/NVENC ladder
+	//
+	// Remux re-encodes video here: the window transcoder has no
+	// video-copy mode. Only the progressive /api/play stream
+	// (BuildFFmpeg's remux branch) stream-copies video. Routing remux
+	// through /copy/ with only the audio re-encoded is not a contained
+	// change. It needs:
+	//   - a video-only copy variant beside the windowed audio
+	//     renditions — the copy segments mux the first audio track, so
+	//     language switching would go;
+	//   - real CODECS strings — the copy variant hard-codes avc1 / hvc1
+	//     Main, wrong for VP9/AV1 (the WebM sources, most of remux) and
+	//     HEVC Main10 — and `-tag:v hvc1` for HEVC out of MKV (Safari
+	//     rejects hev1);
+	//   - a keyframe index for MKV/WebM: buildPassPlan's ffprobe
+	//     fallback reads the whole file, minutes for a large remux on NFS.
+	// Until then DecideWith's reason says what happens.
 	//
 	// Client signals what it can decode via ?caps=avc,hvc,aacmc,... so
 	// the first pick is right the first time (no circuit-breaker round
@@ -343,11 +359,10 @@ func (h *HLSHandler) Master(w http.ResponseWriter, r *http.Request) {
 	qParam := r.URL.Query().Get("q")
 	ql := ResolveQuality(qParam)
 	mode, _ := probe.DecideWith(caps)
-	// useCopy is reserved for TRUE stream-copy of both tracks. The
-	// remux case (video copy, audio re-encode) shares the transcode
-	// pipeline because that's where the audio-only re-encode branch
-	// lives. Forcing q != high also takes the transcode path (the
-	// quality switcher only makes sense when we're actually encoding).
+	// useCopy is reserved for TRUE stream-copy of both tracks. Remux
+	// takes the transcode ladder (see above). Forcing q != high also
+	// takes the transcode path (the quality switcher only makes sense
+	// when we're actually encoding).
 	useCopy := (qParam == "" || qParam == "high") && mode == "passthrough"
 	isHEVCSource := probe.VideoCodec == "hevc" || probe.VideoCodec == "h265"
 	q := r.URL.RawQuery

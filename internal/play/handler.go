@@ -391,7 +391,7 @@ func (h *Handler) ensureSubtitleCached(ctx context.Context, src string, idx, sta
 // Info returns the codec probe + dispatch decision as JSON so the player
 // can show the user why (or why not) the file is being transcoded.
 //
-// Three modes are reported:
+// Four modes are reported:
 //   - "packaged"   → the analyzer has built a pre-segmented CMAF tree
 //     under /var/lib/katalog/packages/{id}/. The player
 //     serves video + audio as static byte-range fetches
@@ -399,7 +399,10 @@ func (h *Handler) ensureSubtitleCached(ctx context.Context, src string, idx, sta
 //   - "transcode"  → legacy on-demand path. Source codec isn't browser-
 //     compatible, so chino-stream runs ffmpeg per
 //     window to produce HLS segments on the fly.
-//   - "remux" / "passthrough" → legacy CMAF/MP4 served byte-range.
+//   - "remux"      → video is client-OK but audio or container isn't.
+//     The HLS fallback runs the same window transcoder
+//     as "transcode", video included (see Master).
+//   - "passthrough" → everything client-OK: /copy/ stream copy.
 //
 // The packaged check is cheap (a single stat per cached itemRoot) and
 // runs first so a packaged item doesn't kick off an ffprobe just to be
@@ -465,8 +468,10 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 	// going to be routed to remux because of multichannel audio.
 	mode, reason := probe.DecideWith(infoCaps)
 	// Surface the available quality rungs so the client can render a
-	// picker. Remux / passthrough modes ignore the q parameter, so
-	// there's no ladder for them.
+	// picker. Passthrough ignores the q parameter. Remux honours it on
+	// the HLS path (it runs the same ladder) but is not offered the
+	// picker: that would change what clients show for these titles,
+	// and remux should stream-copy video eventually (see Master).
 	var ladder []map[string]string
 	if mode == "transcode" {
 		for _, name := range []string{"high", "medium", "low"} {
@@ -474,9 +479,9 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 			ladder = append(ladder, map[string]string{"name": ql.Name, "label": ql.Label})
 		}
 	}
-	// Encoder hint for the Playback info dialog. Only meaningful for
-	// the transcode path; for passthrough/remux the encoder is the
-	// source itself (no re-encode happens).
+	// Encoder hint for the Playback info dialog. Meaningful for the
+	// transcode and remux paths (both run the video encoder on HLS);
+	// for passthrough nothing is re-encoded.
 	encoder := "libx264"
 	if h.UseNVENC {
 		encoder = "h264_nvenc"

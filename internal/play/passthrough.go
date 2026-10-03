@@ -334,7 +334,8 @@ func (h *HLSHandler) ensurePassthroughInit(ctx context.Context, src, initPath st
 	// True passthrough: -c copy on both tracks. The caller (Master)
 	// only routes here when the dispatch decided the audio is also
 	// browser-OK at the client's reported channel count; multichannel
-	// AAC and AC-3/EAC-3/DTS sources get the remux pipeline instead.
+	// AAC and AC-3/EAC-3/DTS sources are remux, which takes the window
+	// transcoder instead (video re-encoded too, see Master).
 	args := []string{
 		"-y", "-hide_banner", "-loglevel", "warning",
 		"-ss", "0",
@@ -430,9 +431,9 @@ func (h *HLSHandler) ensurePassthroughSegment(ctx context.Context, itemID, src s
 	// symptom.
 	// True stream-copy on both tracks. Master only dispatches here
 	// when the client's caps allow the source audio as-is (codec OK
-	// AND ≤2ch OR aacmc opt-in). Sources that don't fit go through
-	// the remux pipeline in transcode.go which re-encodes audio to
-	// stereo while keeping video lossless.
+	// AND ≤2ch OR aacmc opt-in). Sources that don't fit are remux and
+	// go through the window transcoder, which re-encodes the video as
+	// well as the audio (see the note in Master).
 	args := []string{
 		"-y", "-hide_banner", "-loglevel", "warning",
 		"-copyts",

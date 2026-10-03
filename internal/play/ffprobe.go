@@ -30,9 +30,9 @@ type Caps struct {
 	Audio map[string]bool
 	// AACMultichannel is the result of the spec-extension probe
 	// `isTypeSupported('audio/mp4; codecs="mp4a.40.2"; channels="6"')`.
-	// When false, sources with >2 audio channels go through path C
-	// (audio re-encode to stereo, video stream-copy) even if the
-	// codec itself is browser-OK.
+	// When false, sources with >2 audio channels go through remux
+	// (audio re-encoded to stereo) even if the codec itself is
+	// browser-OK.
 	AACMultichannel bool
 	// VideoMaxHeight is the per-codec-family ceiling (in frame pixels)
 	// the device HARDWARE decoder can handle for that codec. Keys match
@@ -272,13 +272,15 @@ func (p Probe) Decide() (mode, reason string) {
 }
 
 // DecideWith returns the dispatch mode tailored to a specific
-// client's capabilities. Four modes, ordered by cost:
+// client's capabilities. Three modes, ordered by cost:
 //
 //	"passthrough" — video + audio + container all client-OK.
 //	                Server runs `-c copy` on both tracks.
 //	"remux"       — video client-OK but audio or container isn't.
-//	                Server stream-copies video, re-encodes audio to
-//	                stereo AAC LC, repackages as fmp4.
+//	                The HLS fallback runs the transcode ladder, so
+//	                video is re-encoded as well as the audio (see the
+//	                note in hls.go::Master); only the progressive
+//	                /api/play stream copies the video.
 //	"transcode"   — video codec not client-OK (HEVC on most desktop
 //	                Chromes, or anything exotic). libx264/NVENC +
 //	                audio re-encode at the requested quality rung.
@@ -286,7 +288,8 @@ func (p Probe) Decide() (mode, reason string) {
 // Decision order matters: video drives the pipeline (transcode is
 // the expensive part), audio just sets the audio sub-mode. The
 // resulting `mode` is what hls.go::Master uses to choose between
-// /copy/ and /{q}/ routes.
+// /copy/ and /{q}/ routes. The reason is what /play/info shows the
+// user, so it describes the HLS pipeline the player gets.
 func (p Probe) DecideWith(caps Caps) (mode, reason string) {
 	videoOK := caps.Video[p.VideoCodec]
 	audioCodecOK := caps.Audio[p.AudioCodec]
@@ -307,18 +310,20 @@ func (p Probe) DecideWith(caps Caps) (mode, reason string) {
 			return "transcode", "video codec " + q(p.VideoCodec) + " is not in the client's decoder set"
 		}
 	}
-	// Video is client-OK from here.
+	// Video is client-OK from here. The remux reasons say that the
+	// video is re-encoded as well: the on-the-fly HLS pipeline cannot
+	// stream-copy video next to re-encoded audio yet (hls.go::Master).
 	if !audioOK {
 		why := "audio codec " + q(p.AudioCodec) + " is not in the client's decoder set"
 		if audioCodecOK && p.AudioCodec == "aac" && channels > 2 {
-			why = fmt.Sprintf("source audio is %d-channel AAC and the client didn't signal multichannel support — downmixing to stereo", channels)
+			why = fmt.Sprintf("source audio is %d-channel AAC and the client didn't signal multichannel support", channels)
 		}
-		return "remux", why + " — video stream-copied, audio re-encoded to stereo AAC LC"
+		return "remux", why + " — audio re-encoded to stereo AAC LC, and the video too (on-the-fly streaming cannot stream-copy video yet)"
 	}
 	if p.containerNeedsRepackaging() {
-		return "remux", "container (" + p.Container + ") needs repackaging to fragmented MP4; codecs stream-copied"
+		return "remux", "container (" + p.Container + ") needs repackaging to fragmented MP4 — video and audio are re-encoded (on-the-fly streaming cannot stream-copy video yet)"
 	}
-	return "passthrough", "codecs, channels and container are all client-compatible — file streamed directly with byte-range support"
+	return "passthrough", "codecs, channels and container are all client-compatible — stream-copied, nothing re-encoded"
 }
 
 func q(s string) string {

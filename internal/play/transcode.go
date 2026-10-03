@@ -9,8 +9,9 @@ import (
 	"strconv"
 )
 
-// Quality describes one rung of the adaptive ladder. Used only in transcode
-// mode (remux is always stream-copy at source bitrate).
+// Quality describes one rung of the adaptive ladder. The HLS fallback runs it
+// for transcode and remux alike; only the progressive stream copies remux
+// video at source bitrate.
 type Quality struct {
 	Name  string // "high" | "medium" | "low"
 	CRF   string // x264 quality (lower = better)
