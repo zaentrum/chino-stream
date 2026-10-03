@@ -36,10 +36,10 @@ const CurrentVersion = 2
 // optional for backwards compatibility with v1 packages still on
 // disk from before the rewrite.
 type Manifest struct {
-	Version    int        `json:"version"`
-	ItemID     string     `json:"itemId"`
-	PackagedAt time.Time  `json:"packagedAt"`
-	Packager   string     `json:"packager"`
+	Version    int       `json:"version"`
+	ItemID     string    `json:"itemId"`
+	PackagedAt time.Time `json:"packagedAt"`
+	Packager   string    `json:"packager"`
 
 	// v2 catalog identity. All optional in v1 (zero-valued); always
 	// populated in v2.
@@ -102,24 +102,24 @@ type Renditions struct {
 // directory under the item root holding init.mp4 / playlist.m3u8 /
 // seg-*.m4s for this rendition.
 type VideoRendition struct {
-	ID              string `json:"id"`              // e.g. "v0"
-	Dir             string `json:"dir"`             // relative to item root, e.g. "hls/v0"
-	Codec           string `json:"codec"`           // e.g. "hev1.1.6.L120.B0"
-	Width           int    `json:"width"`
-	Height          int    `json:"height"`
-	BitrateBps      int    `json:"bitrateBps"`
-	HDR             bool   `json:"hdr"`
-	FrameRate       string `json:"frameRate"`       // e.g. "24000/1001"
-	Segments        int    `json:"segments"`
-	TargetDuration  int    `json:"targetDuration"`  // seconds, for #EXT-X-TARGETDURATION
+	ID             string `json:"id"`    // e.g. "v0"
+	Dir            string `json:"dir"`   // relative to item root, e.g. "hls/v0"
+	Codec          string `json:"codec"` // e.g. "hev1.1.6.L120.B0"
+	Width          int    `json:"width"`
+	Height         int    `json:"height"`
+	BitrateBps     int    `json:"bitrateBps"`
+	HDR            bool   `json:"hdr"`
+	FrameRate      string `json:"frameRate"` // e.g. "24000/1001"
+	Segments       int    `json:"segments"`
+	TargetDuration int    `json:"targetDuration"` // seconds, for #EXT-X-TARGETDURATION
 }
 
 // AudioRendition describes one packaged audio track.
 type AudioRendition struct {
-	ID         string `json:"id"`         // e.g. "a0"
-	Dir        string `json:"dir"`        // e.g. "hls/a0"
-	Codec      string `json:"codec"`      // e.g. "mp4a.40.2"
-	Language   string `json:"language"`   // ISO 639-2/3
+	ID         string `json:"id"`       // e.g. "a0"
+	Dir        string `json:"dir"`      // e.g. "hls/a0"
+	Codec      string `json:"codec"`    // e.g. "mp4a.40.2"
+	Language   string `json:"language"` // ISO 639-2/3
 	Title      string `json:"title,omitempty"`
 	Default    bool   `json:"default"`
 	Channels   int    `json:"channels"`
@@ -131,12 +131,12 @@ type AudioRendition struct {
 // "webvtt" in v1 (extracted via ffmpeg -c:s webvtt at package time).
 type Subtitle struct {
 	ID       string `json:"id"`
-	Path     string `json:"path"`     // relative, e.g. "subs/0.vtt"
+	Path     string `json:"path"` // relative, e.g. "subs/0.vtt"
 	Language string `json:"language"`
 	Title    string `json:"title,omitempty"`
 	Default  bool   `json:"default,omitempty"`
 	Forced   bool   `json:"forced,omitempty"`
-	Format   string `json:"format"`   // "webvtt"
+	Format   string `json:"format"` // "webvtt"
 }
 
 // Trickplay holds scrub-preview thumbnail metadata. The player loads
@@ -148,8 +148,8 @@ type Trickplay struct {
 	IntervalSec   int    `json:"intervalSec"`   // seconds between consecutive thumbnails
 	ThumbWidth    int    `json:"thumbWidth"`
 	ThumbHeight   int    `json:"thumbHeight"`
-	GridCols      int    `json:"gridCols"`      // thumbnails per sprite-sheet row
-	GridRows      int    `json:"gridRows"`      // rows per sprite sheet
+	GridCols      int    `json:"gridCols"` // thumbnails per sprite-sheet row
+	GridRows      int    `json:"gridRows"` // rows per sprite sheet
 }
 
 // Trailer is one packaged trailer (typically TMDB-sourced YouTube
@@ -158,7 +158,7 @@ type Trickplay struct {
 // same HLS pipeline as the main feature.
 type Trailer struct {
 	ID           string `json:"id"`
-	Source       string `json:"source"`       // e.g. "tmdb:603692" or "local:/path/to/trailer.mp4"
+	Source       string `json:"source"` // e.g. "tmdb:603692" or "local:/path/to/trailer.mp4"
 	DurationMs   int64  `json:"durationMs"`
 	ManifestPath string `json:"manifestPath"` // relative, e.g. "trailers/0/manifest.json"
 }
