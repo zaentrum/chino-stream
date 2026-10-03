@@ -40,6 +40,9 @@ func fakeBin(t *testing.T, name, body string) string {
 // last argument), as `ffmpeg -f hls` does.
 func windowFFmpeg(t *testing.T, state string, fails, segs int, stderr string) string {
 	t.Helper()
+	if err := os.WriteFile(filepath.Join(state, "stderr"), []byte(stderr+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	return fakeBin(t, "ffmpeg", `
 state='`+state+`'
 for a; do printf '%s\n' "$a"; done >> "$state/args"
@@ -48,7 +51,7 @@ n=$(cat "$state/runs" 2>/dev/null || echo 0)
 n=$((n+1))
 echo "$n" > "$state/runs"
 if [ "$n" -le `+itoa(fails)+` ]; then
-  printf '%s\n' '`+stderr+`' >&2
+  cat "$state/stderr" >&2
   exit 1
 fi
 for last; do :; done

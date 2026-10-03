@@ -75,16 +75,10 @@ type HLSHandler struct {
 	// the same live-shared moment).
 	segmentLocks sync.Map // map[string]*sync.Mutex
 
-	// windowAttempts caps the number of ffmpeg runs per (item, quality,
-	// windowIdx) over this process's lifetime. NVENC/hwaccel decode
-	// races have been observed to silently truncate a window mid-encode
-	// (process exits 0 but writes < windowSize segments). We retry once
-	// to clear the race; further partial outputs are most likely
-	// deterministic (corrupt source, encoder rejecting the GOP), so we
-	// cap and let the player ABR-fall to a lower rung. Keyed
-	// `{itemID}/{quality}/{windowIdx}` — same key shape used for
-	// segmentLocks so the two are easy to correlate in logs.
-	windowAttempts sync.Map // map[string]int
+	// windowFails is the per-window failure budget (see windowbudget.go):
+	// at most maxWindowAttempts failed runs per windowRetryCooldown, after
+	// which requests answer 404 and the player ABR-falls to a lower rung.
+	windowFails windowFailures
 }
 
 // segmentSec is the target HLS segment length. 6s is the canonical HLS
@@ -112,16 +106,6 @@ const segmentSec = 6
 // enough that the first segment of a window arrives well inside the
 // player's 5 min buffer budget.
 const windowSize = 10
-
-// maxWindowAttempts is the upper bound on ffmpeg invocations for a
-// single video/audio window across this process's lifetime. First
-// attempt is the cold transcode; one retry covers the
-// NVENC/hwaccel-decode silent-truncation case we've seen in the wild
-// for 4K HEVC sources. Beyond that, the source/encoder pair likely
-// can't produce the requested segment at all and we surface 404 so
-// the client falls back to a lower quality rung (the auto-fallback
-// machinery in chino-androidtv / chino-web handles it gracefully).
-const maxWindowAttempts = 2
 
 // copyPipelineVersion is the on-disk schema version for the /copy/
 // stream-copy cache. Bump this when the ffmpeg arguments produce
@@ -666,7 +650,7 @@ func (h *HLSHandler) InitSegment(w http.ResponseWriter, r *http.Request) {
 	isHDR := probe != nil && probe.IsHDR()
 	if err := h.ensureVideoWindow(r.Context(), itemID, src, quality, ql, isHDR, probe, 0, 0, maxHeight); err != nil {
 		log.Printf("hls init %s/%s: %v", itemID, quality, err)
-		http.Error(w, "init segment failed", http.StatusBadGateway)
+		windowError(w, err, "init segment")
 		return
 	}
 	h.serveCached(w, r, h.cachePath(itemID, videoCacheQuality(quality, maxHeight), "init"), "video/mp4")
@@ -707,14 +691,12 @@ func (h *HLSHandler) Segment(w http.ResponseWriter, r *http.Request) {
 	windowIdx := seg / windowSize
 	if err := h.ensureVideoWindow(r.Context(), itemID, src, quality, ql, isHDR, probe, windowIdx, seg, maxHeight); err != nil {
 		log.Printf("hls seg %s/%s/%d (win %d): %v", itemID, quality, seg, windowIdx, err)
-		http.Error(w, "segment failed", http.StatusBadGateway)
+		windowError(w, err, "segment")
 		return
 	}
 	cachePath := h.cachePath(itemID, videoCacheQuality(quality, maxHeight), strconv.Itoa(seg))
 	if _, err := os.Stat(cachePath); err != nil {
-		// ensureVideoWindow ran (possibly with one retry) and the
-		// segment still isn't on disk. Either past source EOF or the
-		// encoder can't produce it deterministically — let the client
+		// Produced and gone again (the sweeper raced us): let the client
 		// ABR-fall to a lower rung rather than blocking the player.
 		http.Error(w, "segment unavailable", http.StatusNotFound)
 		return
@@ -731,10 +713,11 @@ func (h *HLSHandler) Segment(w http.ResponseWriter, r *http.Request) {
 // fast-path check is keyed on it (not just on the first segment of
 // the window) because the NVENC/hwaccel path has been seen to exit 0
 // with a partially-populated window. If ffmpeg ran and the specific
-// segment didn't land, we retry once with a fresh tmpdir (cap:
-// maxWindowAttempts) — that clears the silent-truncation race for
-// most 4K HEVC sources. Beyond the cap, return without error and let
-// the caller 404 so the client can fall back to a lower rung.
+// segment didn't land, we retry once with a fresh tmpdir — that clears
+// the silent-truncation race for most 4K HEVC sources. Failed runs
+// count against the window's budget (produceWindow); out of budget it
+// returns errWindowUnavailable and the caller 404s so the client can
+// fall back to a lower rung.
 //
 // Concurrent requests for any segment in the same window dedupe on
 // the per-window mutex, so we never burn N× CPU on the same transcode.
@@ -759,35 +742,13 @@ func (h *HLSHandler) ensureVideoWindow(ctx context.Context, itemID, src, quality
 	}
 
 	windowKey := fmt.Sprintf("%s/%s/%d", itemID, capQuality, windowIdx)
-	for {
-		// Bail before kicking off another ffmpeg run if we've already
-		// burned our budget. This is the "give up gracefully" case —
-		// caller sees the requestedSeg still missing and 404s.
-		prev, _ := h.windowAttempts.Load(windowKey)
-		attempts, _ := prev.(int)
-		if attempts >= maxWindowAttempts {
-			log.Printf("hls vwin %s: cap reached (%d attempts), seg %d unavailable",
-				windowKey, attempts, requestedSeg)
-			return nil
-		}
-		// On a retry, wipe the partial install so the next runFFmpeg
-		// can write into a clean slate. We never delete init.bin (init
-		// is shared across windows and was patched on first install).
-		if attempts > 0 {
-			log.Printf("hls vwin %s: partial transcode (seg %d missing), retry %d",
-				windowKey, requestedSeg, attempts+1)
-			if err := h.invalidateWindowSegments(itemID, capQuality, windowIdx); err != nil {
-				return err
-			}
-		}
-		h.windowAttempts.Store(windowKey, attempts+1)
-		if err := h.transcodeVideoWindow(ctx, itemID, src, quality, ql, isHDR, probe, windowIdx, maxHeight); err != nil {
-			return err
-		}
-		if statOK(requestedSegPath) {
-			return nil
-		}
-	}
+	return h.produceWindow(ctx, "vwin", windowKey, requestedSeg,
+		func() bool { return statOK(initPath) && statOK(requestedSegPath) },
+		func() (string, error) {
+			return h.transcodeVideoWindow(ctx, itemID, src, quality, ql, isHDR, probe, windowIdx, maxHeight)
+		},
+		func() error { return h.invalidateWindowSegments(itemID, capQuality, windowIdx) },
+	)
 }
 
 // videoCacheQuality is the cache-dir namespace for a transcode rung.
@@ -803,10 +764,10 @@ func videoCacheQuality(quality string, maxHeight int) string {
 }
 
 // transcodeVideoWindow runs ffmpeg once for windowIdx and installs the
-// produced segments into the cache. Split out from ensureVideoWindow
-// so the partial-install retry loop can re-invoke it without
-// duplicating the arg-building code.
-func (h *HLSHandler) transcodeVideoWindow(ctx context.Context, itemID, src, quality string, ql Quality, isHDR bool, probe *Probe, windowIdx, maxHeight int) error {
+// produced segments into the cache, returning the tail of ffmpeg's
+// stderr. Split out from ensureVideoWindow so the partial-install retry
+// loop can re-invoke it without duplicating the arg-building code.
+func (h *HLSHandler) transcodeVideoWindow(ctx context.Context, itemID, src, quality string, ql Quality, isHDR bool, probe *Probe, windowIdx, maxHeight int) (string, error) {
 	capQuality := videoCacheQuality(quality, maxHeight)
 	initPath := h.cachePath(itemID, capQuality, "init")
 	windowStartSec := windowIdx * windowSize * segmentSec
@@ -820,15 +781,15 @@ func (h *HLSHandler) transcodeVideoWindow(ctx context.Context, itemID, src, qual
 		}
 	}
 	if windowDurSec < 1 {
-		return fmt.Errorf("window %d past source end", windowIdx)
+		return "", fmt.Errorf("window %d past source end", windowIdx)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(initPath), 0o755); err != nil {
-		return err
+		return "", err
 	}
 	tmpDir, err := os.MkdirTemp(filepath.Dir(initPath), fmt.Sprintf("vwin%d-", windowIdx))
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer os.RemoveAll(tmpDir)
 
@@ -888,10 +849,11 @@ func (h *HLSHandler) transcodeVideoWindow(ctx context.Context, itemID, src, qual
 		"-hls_segment_filename", filepath.Join(tmpDir, "seg_%d.m4s"),
 		filepath.Join(tmpDir, "playlist.m3u8"),
 	)
-	if err := h.runFFmpeg(ctx, args, fmt.Sprintf("vwin %d %s/%s", windowIdx, capQuality, filepath.Base(src))); err != nil {
-		return err
+	tail, err := h.runFFmpeg(ctx, args, fmt.Sprintf("vwin %d %s/%s", windowIdx, capQuality, filepath.Base(src)))
+	if err != nil {
+		return tail, err
 	}
-	return h.installWindow(tmpDir, itemID, capQuality, windowIdx)
+	return tail, h.installWindow(tmpDir, itemID, capQuality, windowIdx)
 }
 
 // invalidateWindowSegments removes every cached segment for one
@@ -929,32 +891,16 @@ func (h *HLSHandler) ensureAudioWindow(ctx context.Context, itemID, src string, 
 	}
 
 	windowKey := fmt.Sprintf("%s/%s/%d", itemID, audioKey, windowIdx)
-	for {
-		prev, _ := h.windowAttempts.Load(windowKey)
-		attempts, _ := prev.(int)
-		if attempts >= maxWindowAttempts {
-			log.Printf("hls awin %s: cap reached (%d attempts), seg %d unavailable",
-				windowKey, attempts, requestedSeg)
-			return nil
-		}
-		if attempts > 0 {
-			log.Printf("hls awin %s: partial transcode (seg %d missing), retry %d",
-				windowKey, requestedSeg, attempts+1)
-			if err := h.invalidateWindowSegments(itemID, audioKey, windowIdx); err != nil {
-				return err
-			}
-		}
-		h.windowAttempts.Store(windowKey, attempts+1)
-		if err := h.transcodeAudioWindow(ctx, itemID, src, audioIdx, audioKey, probe, windowIdx); err != nil {
-			return err
-		}
-		if statOK(requestedSegPath) {
-			return nil
-		}
-	}
+	return h.produceWindow(ctx, "awin", windowKey, requestedSeg,
+		func() bool { return statOK(initPath) && statOK(requestedSegPath) },
+		func() (string, error) {
+			return h.transcodeAudioWindow(ctx, itemID, src, audioIdx, audioKey, probe, windowIdx)
+		},
+		func() error { return h.invalidateWindowSegments(itemID, audioKey, windowIdx) },
+	)
 }
 
-func (h *HLSHandler) transcodeAudioWindow(ctx context.Context, itemID, src string, audioIdx int, audioKey string, probe *Probe, windowIdx int) error {
+func (h *HLSHandler) transcodeAudioWindow(ctx context.Context, itemID, src string, audioIdx int, audioKey string, probe *Probe, windowIdx int) (string, error) {
 	initPath := h.cachePath(itemID, audioKey, "init")
 	windowStartSec := windowIdx * windowSize * segmentSec
 	windowDurSec := windowSize * segmentSec
@@ -965,15 +911,15 @@ func (h *HLSHandler) transcodeAudioWindow(ctx context.Context, itemID, src strin
 		}
 	}
 	if windowDurSec < 1 {
-		return fmt.Errorf("audio window %d past source end", windowIdx)
+		return "", fmt.Errorf("audio window %d past source end", windowIdx)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(initPath), 0o755); err != nil {
-		return err
+		return "", err
 	}
 	tmpDir, err := os.MkdirTemp(filepath.Dir(initPath), fmt.Sprintf("awin%d-", windowIdx))
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer os.RemoveAll(tmpDir)
 
@@ -1001,10 +947,11 @@ func (h *HLSHandler) transcodeAudioWindow(ctx context.Context, itemID, src strin
 		"-hls_segment_filename", filepath.Join(tmpDir, "seg_%d.m4s"),
 		filepath.Join(tmpDir, "playlist.m3u8"),
 	)
-	if err := h.runFFmpeg(ctx, args, fmt.Sprintf("awin %d/%d %s", audioIdx, windowIdx, filepath.Base(src))); err != nil {
-		return err
+	tail, err := h.runFFmpeg(ctx, args, fmt.Sprintf("awin %d/%d %s", audioIdx, windowIdx, filepath.Base(src)))
+	if err != nil {
+		return tail, err
 	}
-	return h.installWindow(tmpDir, itemID, audioKey, windowIdx)
+	return tail, h.installWindow(tmpDir, itemID, audioKey, windowIdx)
 }
 
 // installWindow patches each per-window segment's tfdt to land in the
@@ -1317,25 +1264,92 @@ func acquireFFmpegSlot(ctx context.Context) (release func(), err error) {
 	}
 }
 
-// runFFmpeg executes ffmpeg with the given args, draining stderr to
-// the log. Used by the windowed transcoders. Gated by ffmpegSlots
-// so concurrent window requests can't OOM-kill the pod.
-func (h *HLSHandler) runFFmpeg(ctx context.Context, args []string, label string) error {
+// runFFmpeg executes ffmpeg with the given args, logging its stderr as
+// it arrives (prefixed with label). Used by the windowed transcoders and
+// the passthrough path. Gated by ffmpegSlots so concurrent window
+// requests can't OOM-kill the pod.
+//
+// It returns the tail of stderr — with -loglevel warning, the lines that
+// say why a run failed or came up short — and on a failure an error
+// carrying the same tail, so the line that logs the failed request names
+// the cause ("ffmpeg: exit status 1: Unknown encoder 'libfdk_aac'")
+// instead of a bare exit status.
+func (h *HLSHandler) runFFmpeg(ctx context.Context, args []string, label string) (string, error) {
 	release, err := acquireFFmpegSlot(ctx)
 	if err != nil {
-		return fmt.Errorf("ffmpeg slot wait: %w", err)
+		return "", fmt.Errorf("ffmpeg slot wait: %w", err)
 	}
 	defer release()
+	tail := &tailBuffer{max: stderrTailBytes}
 	cmd := exec.CommandContext(ctx, h.FFmpegBin, args...)
-	stderr, _ := cmd.StderrPipe()
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("ffmpeg start: %w", err)
+	// A writer, not StderrPipe: Wait returns only after all of stderr has
+	// been copied, so the tail is complete (with a pipe, Wait closes it
+	// while the reader may still be draining — losing the last lines,
+	// which are the ones that matter).
+	cmd.Stderr = io.MultiWriter(stderrLog(label), tail)
+	if err := cmd.Run(); err != nil {
+		if t := tail.String(); t != "" {
+			return t, fmt.Errorf("ffmpeg: %w: %s", err, t)
+		}
+		return "", fmt.Errorf("ffmpeg: %w", err)
 	}
-	go drainTo(stderr, label)
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("ffmpeg wait: %w", err)
+	return tail.String(), nil
+}
+
+// stderrTailBytes bounds the stderr kept per ffmpeg run for errors and
+// logs: the fatal line and a few warnings before it.
+const stderrTailBytes = 1024
+
+// tailBuffer keeps the last max bytes written to it.
+type tailBuffer struct {
+	max     int
+	buf     []byte
+	partial bool // buf starts mid-line: the front was dropped there
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.buf = append(t.buf, p...)
+	if over := len(t.buf) - t.max; over > 0 {
+		t.partial = !isLineBreak(rune(t.buf[over-1]))
+		t.buf = append(t.buf[:0], t.buf[over:]...)
 	}
-	return nil
+	return len(p), nil
+}
+
+func isLineBreak(r rune) bool { return r == '\n' || r == '\r' }
+
+// String is the tail on one line of at most max bytes: its last
+// non-empty lines, trimmed, joined with " | ". A line whose start was
+// dropped goes too.
+func (t *tailBuffer) String() string {
+	s := string(t.buf)
+	if t.partial {
+		if i := strings.IndexFunc(s, isLineBreak); i >= 0 {
+			s = s[i+1:]
+		}
+	}
+	lines := strings.FieldsFunc(s, isLineBreak)
+	out := lines[:0]
+	for _, l := range lines {
+		if l = strings.TrimSpace(l); l != "" {
+			out = append(out, l)
+		}
+	}
+	s = strings.Join(out, " | ")
+	for len(s) > t.max && len(out) > 1 {
+		out = out[1:]
+		s = strings.Join(out, " | ")
+	}
+	return s
+}
+
+// stderrLog is an io.Writer logging each chunk of ffmpeg stderr with
+// label.
+type stderrLog string
+
+func (label stderrLog) Write(p []byte) (int, error) {
+	log.Printf("ffmpeg %s: %s", string(label), strings.TrimRight(string(p), "\n"))
+	return len(p), nil
 }
 
 func statOK(p string) bool {
@@ -1408,7 +1422,7 @@ func (h *HLSHandler) AudioInitSegment(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.ensureAudioWindow(r.Context(), itemID, src, audioIdx, probe, 0, 0); err != nil {
 		log.Printf("hls audio init %s/%d: %v", itemID, audioIdx, err)
-		http.Error(w, "audio init failed", http.StatusBadGateway)
+		windowError(w, err, "audio init")
 		return
 	}
 	h.serveCached(w, r, h.cachePath(itemID, "audio-"+audioStr, "init"), "video/mp4")
@@ -1446,7 +1460,7 @@ func (h *HLSHandler) AudioSegment(w http.ResponseWriter, r *http.Request) {
 	windowIdx := seg / windowSize
 	if err := h.ensureAudioWindow(r.Context(), itemID, src, audioIdx, probe, windowIdx, seg); err != nil {
 		log.Printf("hls audio seg %s/%d/%d (win %d): %v", itemID, audioIdx, seg, windowIdx, err)
-		http.Error(w, "audio segment failed", http.StatusBadGateway)
+		windowError(w, err, "audio segment")
 		return
 	}
 	cachePath := h.cachePath(itemID, "audio-"+audioStr, strconv.Itoa(seg))
@@ -1702,20 +1716,6 @@ func (h *HLSHandler) serveCached(w http.ResponseWriter, r *http.Request, path, c
 	_, _ = io.Copy(w, f)
 }
 
-// drainTo logs ffmpeg stderr per-line.
-func drainTo(rc io.Reader, label string) {
-	buf := make([]byte, 4096)
-	for {
-		n, err := rc.Read(buf)
-		if n > 0 {
-			log.Printf("ffmpeg %s: %s", label, strings.TrimRight(string(buf[:n]), "\n"))
-		}
-		if err != nil {
-			return
-		}
-	}
-}
-
 // StartCacheSweeper deletes cached HLS files older than maxAge every
 // `every` interval. Cheap time-based eviction — fine for the current
 // scale; a per-pod LRU is overkill at one user.
@@ -1735,6 +1735,7 @@ func (h *HLSHandler) StartCacheSweeper(ctx context.Context, every, maxAge time.D
 }
 
 func (h *HLSHandler) sweep(maxAge time.Duration) {
+	h.windowFails.prune()
 	cutoff := time.Now().Add(-maxAge)
 	_ = filepath.Walk(h.CacheDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {

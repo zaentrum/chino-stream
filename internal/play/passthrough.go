@@ -352,7 +352,7 @@ func (h *HLSHandler) ensurePassthroughInit(ctx context.Context, src, initPath st
 		"-hls_segment_filename", filepath.Join(tmpDir, "seg_%d.m4s"),
 		filepath.Join(tmpDir, "playlist.m3u8"),
 	}
-	if err := h.runFFmpeg(ctx, args, "passthrough-init "+filepath.Base(src)); err != nil {
+	if _, err := h.runFFmpeg(ctx, args, "passthrough-init "+filepath.Base(src)); err != nil {
 		return err
 	}
 	produced := filepath.Join(tmpDir, "init.mp4")
@@ -451,7 +451,7 @@ func (h *HLSHandler) ensurePassthroughSegment(ctx context.Context, itemID, src s
 		"-hls_segment_filename", filepath.Join(tmpDir, "seg_%d.m4s"),
 		filepath.Join(tmpDir, "playlist.m3u8"),
 	}
-	if err := h.runFFmpeg(ctx, args, fmt.Sprintf("passthrough seg %d %s", seg, filepath.Base(src))); err != nil {
+	if _, err := h.runFFmpeg(ctx, args, fmt.Sprintf("passthrough seg %d %s", seg, filepath.Base(src))); err != nil {
 		return err
 	}
 	produced := filepath.Join(tmpDir, "seg_0.m4s")
