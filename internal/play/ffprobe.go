@@ -194,6 +194,9 @@ type Probe struct {
 	Height     int
 	DurationMs int64
 	AudioCodec string
+	// BitRate is the container's overall bitrate in bit/s (ffprobe's
+	// format.bit_rate); 0 when unknown.
+	BitRate int64
 
 	// Video color metadata. Only set for the first video stream. Empty
 	// strings mean ffprobe didn't report the field (typical of SDR
@@ -378,6 +381,7 @@ func RunFFprobe(ctx context.Context, ffprobeBin, path string) (Probe, error) {
 		Format struct {
 			FormatName string `json:"format_name"`
 			Duration   string `json:"duration"`
+			BitRate    string `json:"bit_rate"`
 		} `json:"format"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil {
@@ -385,6 +389,7 @@ func RunFFprobe(ctx context.Context, ffprobeBin, path string) (Probe, error) {
 	}
 
 	p := Probe{Container: raw.Format.FormatName}
+	p.BitRate, _ = strconv.ParseInt(raw.Format.BitRate, 10, 64)
 	// Track the running per-kind index. ffmpeg's `-map 0:a:N` uses the
 	// audio-stream ordinal (0-based within audio streams), not the global
 	// stream index — so we maintain separate counters.

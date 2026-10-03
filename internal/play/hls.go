@@ -364,7 +364,6 @@ func (h *HLSHandler) Master(w http.ResponseWriter, r *http.Request) {
 	// takes the transcode path (the quality switcher only makes sense
 	// when we're actually encoding).
 	useCopy := (qParam == "" || qParam == "high") && mode == "passthrough"
-	isHEVCSource := probe.VideoCodec == "hevc" || probe.VideoCodec == "h265"
 	q := r.URL.RawQuery
 	if q != "" {
 		q = "?" + q
@@ -400,39 +399,19 @@ func (h *HLSHandler) Master(w http.ResponseWriter, r *http.Request) {
 			audioGroup, name, lang, def, t.Index, q,
 		))
 	}
+	// The single variant, advertised at what it really is: the copy at
+	// the source's size and bitrate, a transcode rung at the size it
+	// encodes (rung.go — the encoder uses the same geometry).
 	if useCopy {
-		// Stream-copy passthrough variant. CODECS string switches between
-		// avc1 (H.264 source) and hvc1 (HEVC source); we use permissive
-		// profile/level values since the actual config comes from the
-		// source's avcC/hvcC verbatim and browsers tolerate looser
-		// advertised levels than what they can decode.
-		bw := nominalBitrate("high")
-		res := nominalResolution("high")
-		videoCodec := "avc1.640028"
-		if isHEVCSource {
-			// Main profile, Level 4.0 — covers Intouchables-class 1080p
-			// remuxes and most BD HEVC content. 4K Main10 sources
-			// (hvc1.2.4.L153.B0) still play because the avcC/hvcC is
-			// authoritative; the master string is just gating.
-			videoCodec = "hvc1.1.6.L120.B0"
-		}
-		sb.WriteString(fmt.Sprintf(
-			"#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%s,CODECS=\"%s,mp4a.40.2\",VIDEO-RANGE=%s\n",
-			bw, res, videoCodec, videoRange(probe),
-		))
+		sb.WriteString(fallbackStreamInf(probe, ql, 0, true, "") + "\n")
 		sb.WriteString(fmt.Sprintf("copy/index.m3u8%s\n", q))
 	} else {
 		// Transcode variant — single rung matching ?q=.
-		bw := nominalBitrate(ql.Name)
-		res := nominalResolution(ql.Name)
-		audioAttr := ""
+		group := ""
 		if len(probe.AudioTracks) > 0 {
-			audioAttr = fmt.Sprintf(",AUDIO=%q", audioGroup)
+			group = audioGroup
 		}
-		sb.WriteString(fmt.Sprintf(
-			"#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%s,CODECS=\"avc1.640028,mp4a.40.2\",VIDEO-RANGE=SDR%s\n",
-			bw, res, audioAttr,
-		))
+		sb.WriteString(fallbackStreamInf(probe, ql, caps.MaxVideoHeight(), false, group) + "\n")
 		sb.WriteString(fmt.Sprintf("%s/index.m3u8%s\n", ql.Name, q))
 	}
 	// Pre-warm: kick off the first window's transcode / first-segment plan
@@ -1521,54 +1500,11 @@ func scaleTargetHeight(scale string) int {
 //     is touchy with the bundled ffmpeg build and the source pool
 //     skews heavily SDR; if a HDR source lands here it'll just look
 //     desaturated, which beats failing to play.
+//
+// The frame size comes from transcodeGeometry, the same numbers the
+// master playlist advertises.
 func videoEncoderArgs(ql Quality, preset string, isHDR, useNvenc bool, nvencPreset, nvencCQ string, srcW, srcH, maxHeight int) []string {
-	// than that — 4K, 1440p, ultrawide 21:9 — must be downscaled into
-	// a 1920×1080 box or the encoder rejects them with "Invalid Level".
-	// On the explicit ladder rungs (medium/low) ql.Scale already
-	// targets ≤720p; the "high" rung's empty Scale meant passthrough
-	// size, which only works for ≤1080p.
-	//
-	// maxHeight is the device HW decoder ceiling threaded from the
-	// request's ?caps= (0 = no cap). The fit box height is the SMALLER
-	// of the 1080 level limit and maxHeight, so a device that can only
-	// HW-decode 1080 never gets a taller H.264 frame than it can play —
-	// otherwise the source-resolution "high" rung re-serves the same 4K
-	// frame the device couldn't HW-decode in the first place (the reason
-	// it fell through from packaged to transcode). The width companion
-	// (16:9 of the box height) keeps us inside Level 4.0's pixel budget.
-	capH := 1080
-	if maxHeight > 0 && maxHeight < capH {
-		capH = maxHeight
-	}
-	capW := capH * 16 / 9 // 16:9 companion of the box height
-	//
-	// Aspect-preserving "fit within capW×capH":
-	//   - width-limited (srcW/srcH > 16/9): w=capW, h=srcH*capW/srcW
-	//   - height-limited:                   h=capH, w=srcW*capH/srcH
-	// Round both to even pixels — h264 requires even dims, scale_cuda
-	// errors on odd numbers.
-	needsDownscale := srcW > capW || srcH > capH
-	fitW, fitH := 0, 0
-	if needsDownscale && srcW > 0 && srcH > 0 {
-		if srcW*capH > srcH*capW {
-			// Width-limited (e.g. 21:9 ultrawide). 3840×1606 → capW×….
-			fitW = capW
-			fitH = (srcH*capW/srcW + 1) &^ 1
-		} else {
-			fitH = capH
-			fitW = (srcW*capH/srcH + 1) &^ 1
-		}
-	}
-	// On the explicit ladder rungs (medium/low) ql.Scale already targets
-	// a fixed height (720/480). If the device HW ceiling is even lower
-	// than the rung's height, tighten the rung's scale to the ceiling so
-	// the output never exceeds what the device can HW-decode.
-	rungScale := ql.Scale
-	if rungScale != "" && maxHeight > 0 {
-		if rungH := scaleTargetHeight(rungScale); rungH > maxHeight {
-			rungScale = "scale=-2:" + strconv.Itoa(maxHeight)
-		}
-	}
+	g := transcodeGeometry(ql, srcW, srcH, maxHeight)
 	if useNvenc {
 		// nv12 is NVENC's native 8-bit pixel format. Forcing the
 		// post-scale frame into nv12 also downconverts 10-bit HEVC
@@ -1579,12 +1515,10 @@ func videoEncoderArgs(ql Quality, preset string, isHDR, useNvenc bool, nvencPres
 		// can't read them.
 		var vf string
 		switch {
-		case rungScale != "":
-			// rungScale is "scale=-2:720"; rewrite to scale_cuda=-2:720.
-			h := rungScale[len("scale=-2:"):]
-			vf = "scale_cuda=-2:" + h + ":format=nv12"
-		case needsDownscale:
-			vf = fmt.Sprintf("scale_cuda=%d:%d:format=nv12", fitW, fitH)
+		case g.scaleH > 0:
+			vf = fmt.Sprintf("scale_cuda=-2:%d:format=nv12", g.scaleH)
+		case g.fitW > 0:
+			vf = fmt.Sprintf("scale_cuda=%d:%d:format=nv12", g.fitW, g.fitH)
 		default:
 			// Source ≤1080p — no resize, just the format conversion.
 			// scale_cuda needs w/h params; iw:ih = "input width
@@ -1621,10 +1555,10 @@ func videoEncoderArgs(ql Quality, preset string, isHDR, useNvenc bool, nvencPres
 		vf = "zscale=transfer=linear:npl=100,format=gbrpf32le,tonemap=tonemap=hable:desat=0,zscale=primaries=709:transfer=709:matrix=709:range=tv,format=yuv420p"
 	}
 	switch {
-	case rungScale != "":
-		vf = rungScale + "," + vf
-	case needsDownscale:
-		vf = fmt.Sprintf("scale=%d:%d,", fitW, fitH) + vf
+	case g.scaleH > 0:
+		vf = fmt.Sprintf("scale=-2:%d,", g.scaleH) + vf
+	case g.fitW > 0:
+		vf = fmt.Sprintf("scale=%d:%d,", g.fitW, g.fitH) + vf
 	}
 	return []string{
 		"-vf", vf,
@@ -1761,27 +1695,4 @@ func (h *HLSHandler) sweep(maxAge time.Duration) {
 		}
 		return nil
 	})
-}
-
-// nominalBitrate / nominalResolution are advertised hints for ABR.
-func nominalBitrate(q string) int {
-	switch q {
-	case "high":
-		return 6_500_000
-	case "medium":
-		return 3_000_000
-	default:
-		return 1_400_000
-	}
-}
-
-func nominalResolution(q string) string {
-	switch q {
-	case "high":
-		return "1920x1080"
-	case "medium":
-		return "1280x720"
-	default:
-		return "854x480"
-	}
 }

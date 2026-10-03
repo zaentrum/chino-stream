@@ -39,6 +39,10 @@ const (
 // efficient than libfdk_aac) enough room.
 const windowAudioBitrate = "160k"
 
+// windowAudioBitrateBps is windowAudioBitrate in bit/s, for the BANDWIDTH a
+// master playlist advertises.
+const windowAudioBitrateBps = 160_000
+
 // DetectAACEncoder lists ffmpeg's encoders and returns the AAC encoder the
 // pipelines use: libfdk_aac when the build has it, else the native aac
 // encoder. It fails when ffmpeg cannot be run or lists neither; then no
