@@ -31,7 +31,8 @@ Dockerfile
 
 | Method | Path                                         | Purpose                             |
 |--------|----------------------------------------------|-------------------------------------|
-| GET    | `/healthz`, `/readyz`                        | liveness / readiness                |
+| GET    | `/healthz`                                   | liveness                            |
+| GET    | `/readyz`                                    | readiness: 503 while ffmpeg has no AAC encoder |
 | GET    | `/metrics`                                   | Prometheus metrics                  |
 | GET    | `/api/play/{itemId}`                         | playback (packaged or transcoded)   |
 | GET    | `/api/play/{itemId}/info`                    | playback info / capabilities        |
@@ -67,7 +68,9 @@ curl -fsS http://localhost:8080/healthz
 
 `ffmpeg` and `ffprobe` must be on `$PATH` for transcoding. NVENC paths
 additionally need an NVIDIA GPU plus an ffmpeg build with the NVIDIA
-encoders linked in.
+encoders linked in. Audio is re-encoded to AAC-LC stereo with whichever AAC
+encoder the ffmpeg build has: `libfdk_aac` when it was built with it, otherwise
+ffmpeg's native `aac` encoder. The choice is logged at startup.
 
 ## Build the container
 

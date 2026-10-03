@@ -126,9 +126,13 @@ spec:
             # linker can't find it and h264_nvenc init fails at runtime.
             - name: LD_LIBRARY_PATH
               value: "/usr/local/nvidia/lib64:/usr/local/nvidia/lib"
+          # /readyz fails while ffmpeg has no usable AAC encoder (the
+          # on-the-fly pipelines could not produce audio), so a rollout of
+          # such an image never takes over from a working pod. Liveness
+          # stays on /healthz: a restart would not fix it.
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: http
             initialDelaySeconds: 3
             periodSeconds: 10

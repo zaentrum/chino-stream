@@ -63,6 +63,10 @@ type HLSHandler struct {
 	NVENCPreset string
 	NVENCCQ     string
 
+	// AACEncoder is the ffmpeg AAC encoder the audio renditions use, as
+	// DetectAACEncoder found it ("" = the native aac encoder).
+	AACEncoder string
+
 	// segmentLocks dedupes concurrent ffmpeg runs for the same
 	// (item, quality, segment) — the first request transcodes and
 	// writes to disk, others wait on the same mutex and read the
@@ -983,7 +987,7 @@ func (h *HLSHandler) transcodeAudioWindow(ctx context.Context, itemID, src strin
 		"-vn",
 		"-map", fmt.Sprintf("0:a:%d", audioIdx),
 	}
-	args = append(args, audioEncoderArgs()...)
+	args = append(args, aacArgs(h.AACEncoder, windowAudioBitrate)...)
 	args = append(args,
 		"-output_ts_offset", strconv.Itoa(windowStartSec),
 		"-f", "hls",
@@ -1606,21 +1610,6 @@ func videoEncoderArgs(ql Quality, preset string, isHDR, useNvenc bool, nvencPres
 		"-color_trc", "bt709",
 		"-colorspace", "bt709",
 		"-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%d)", segmentSec),
-	}
-}
-
-// audioEncoderArgs is shared by every audio init + segment of every
-// rendition. Pinned to AAC-LC 48 kHz stereo 128 kbps — matches the
-// "mp4a.40.2" codec advertised in the master playlist. Stereo
-// downmix is unconditional: 5.1 / 7.1 sources are mixed to 2.0 so
-// the same pipeline applies regardless of source channel layout.
-func audioEncoderArgs() []string {
-	return []string{
-		"-c:a", "libfdk_aac",
-		"-profile:a", "aac_low",
-		"-ar", "48000",
-		"-ac", "2",
-		"-b:a", "128k",
 	}
 }
 

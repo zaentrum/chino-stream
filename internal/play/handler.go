@@ -38,6 +38,9 @@ type Handler struct {
 	// GPU (h264_nvenc) or CPU (libx264). Set from the same env var as
 	// HLSHandler.UseNVENC.
 	UseNVENC bool
+	// AACEncoder is the ffmpeg AAC encoder the progressive pipeline uses,
+	// as DetectAACEncoder found it ("" = the native aac encoder).
+	AACEncoder string
 	// CacheDir is the on-disk root for subtitle .vtt extracts. Shared
 	// with HLSHandler.CacheDir so existing sweeper / disk budget logic
 	// covers subtitle output too. Empty disables the disk cache and
@@ -562,7 +565,7 @@ func (h *Handler) transcode(w http.ResponseWriter, r *http.Request, path, mode, 
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 
-	cmd := BuildFFmpeg(r.Context(), h.FFmpegBin, h.TranscodePreset, path, mode, q, startSec, audioIdx)
+	cmd := BuildFFmpeg(r.Context(), h.FFmpegBin, h.TranscodePreset, h.AACEncoder, path, mode, q, startSec, audioIdx)
 	log.Printf("play %s: %s q=%s start=%ds audio=%d", itemID, mode, q.Name, startSec, audioIdx)
 
 	metrics.TranscodesActive.Inc()

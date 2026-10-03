@@ -33,7 +33,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # that links the NVIDIA encoders (set --build-arg to point at your own
 # mirror) — the Go service shells out to `ffmpeg`/`ffprobe` on $PATH and
 # does not care which build provides them, only that NVENC is present
-# when `-c:v h264_nvenc` is requested.
+# when `-c:v h264_nvenc` is requested. Audio is encoded with whichever AAC
+# encoder the build has (libfdk_aac in a nonfree build, else ffmpeg's
+# native aac — what the distro package ships); /readyz fails when ffmpeg
+# has neither.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates ffmpeg \
     && rm -rf /var/lib/apt/lists/*

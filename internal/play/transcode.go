@@ -45,10 +45,12 @@ func ResolveQuality(q string) Quality {
 // audio track on the file is index 0; the player overrides this when
 // the user picks a different language in the audio switcher.
 //
+// aacEncoder is the AAC encoder DetectAACEncoder found ("" = native aac).
+//
 // Always downmix audio to stereo and emit fragmented MP4 (frag_keyframe +
 // empty_moov + default_base_moof) so the browser can start decoding
 // before transcoding completes.
-func BuildFFmpeg(ctx context.Context, ffmpegBin, preset, path, mode string, q Quality, startSec int, audioIdx int) *exec.Cmd {
+func BuildFFmpeg(ctx context.Context, ffmpegBin, preset, aacEncoder, path, mode string, q Quality, startSec int, audioIdx int) *exec.Cmd {
 	args := []string{
 		"-y",
 		"-hide_banner",
@@ -92,21 +94,11 @@ func BuildFFmpeg(ctx context.Context, ffmpegBin, preset, path, mode string, q Qu
 		// Always re-encode audio: source tracks are commonly AC-3 /
 		// E-AC-3 / DTS, which Chromium can't decode in fragmented MP4.
 		// Video stream-copy keeps remux cheap.
+		args = append(args, "-c:v", "copy")
+		// AAC-LC stereo with whichever AAC encoder this ffmpeg has (see
+		// aac.go: libfdk_aac only where the build carries it).
+		args = append(args, aacArgs(aacEncoder, "192k")...)
 		args = append(args,
-			"-c:v", "copy",
-			// libfdk_aac is Fraunhofer's reference AAC encoder
-			// (--enable-libfdk_aac --enable-nonfree in our ffmpeg).
-			// Built-in `aac` occasionally produced AAC LC frames that
-			// Chromium rejected with PIPELINE_ERROR_DECODE even though
-			// the frame structure looked valid (observed on 5.1→2.0
-			// downmix outputs from this file at source-times 52.9 s,
-			// 96.5 s, 99.75 s). fdk_aac is stricter about the bitstream
-			// shape and avoids those edge cases.
-			"-c:a", "libfdk_aac",
-			"-profile:a", "aac_low",
-			"-ar", "48000",
-			"-ac", "2",
-			"-b:a", "192k",
 			// Soft async: stretch/compress audio to track wall time;
 			// only fall back to silence padding when drift exceeds
 			// 100 ms (min_hard_comp). Avoids the duplicate-frame /
@@ -127,19 +119,9 @@ func BuildFFmpeg(ctx context.Context, ffmpegBin, preset, path, mode string, q Qu
 			"-tune", "zerolatency",
 			"-crf", q.CRF,
 			"-pix_fmt", "yuv420p",
-			// libfdk_aac is Fraunhofer's reference AAC encoder
-			// (--enable-libfdk_aac --enable-nonfree in our ffmpeg).
-			// Built-in `aac` occasionally produced AAC LC frames that
-			// Chromium rejected with PIPELINE_ERROR_DECODE even though
-			// the frame structure looked valid (observed on 5.1→2.0
-			// downmix outputs from this file at source-times 52.9 s,
-			// 96.5 s, 99.75 s). fdk_aac is stricter about the bitstream
-			// shape and avoids those edge cases.
-			"-c:a", "libfdk_aac",
-			"-profile:a", "aac_low",
-			"-ar", "48000",
-			"-ac", "2",
-			"-b:a", q.Audio,
+		)
+		args = append(args, aacArgs(aacEncoder, q.Audio)...)
+		args = append(args,
 			// Soft async: stretch audio for drifts < 100 ms; only
 			// silence-pad past that threshold. `-async 1` was
 			// emitting duplicate/non-monotonic AAC frames at drift

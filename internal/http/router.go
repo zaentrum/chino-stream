@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"time"
 
@@ -50,6 +51,18 @@ func NewRouter(d Deps) (http.Handler, error) {
 	}
 	verifier = verifier.WithStreamSigner(signer)
 
+	// The on-the-fly pipelines re-encode audio to AAC with whichever AAC
+	// encoder this ffmpeg has. With none (ffmpeg missing or broken) they
+	// cannot produce any audio, so /readyz reports not ready: a rollout of
+	// such an image never replaces a working pod. /healthz stays up — a
+	// restart would not add an encoder.
+	aacEncoder, aacErr := play.DetectAACEncoder(context.Background(), d.FFmpegBin)
+	if aacErr != nil {
+		log.Printf("ERROR: %v — on-the-fly audio cannot be encoded, /readyz answers 503", aacErr)
+	} else {
+		log.Printf("on-the-fly audio: AAC-LC via %s", aacEncoder)
+	}
+
 	playH := &play.Handler{
 		Catalog:         d.Catalog,
 		MediaRoot:       d.MediaRoot,
@@ -57,6 +70,7 @@ func NewRouter(d Deps) (http.Handler, error) {
 		FFprobeBin:      d.FFprobeBin,
 		TranscodePreset: d.TranscodePreset,
 		UseNVENC:        d.UseNVENC,
+		AACEncoder:      aacEncoder,
 		// Share the HLS cache root so subtitle .vtt extracts go
 		// through the same disk budget + sweeper as HLS segments.
 		CacheDir: d.HLSCacheDir,
@@ -71,6 +85,7 @@ func NewRouter(d Deps) (http.Handler, error) {
 		UseNVENC:        d.UseNVENC,
 		NVENCPreset:     d.NVENCPreset,
 		NVENCCQ:         d.NVENCCQ,
+		AACEncoder:      aacEncoder,
 	}
 	// Sweep cached segments older than 2 h every 10 min. Tunable later
 	// when usage scales past one user.
@@ -87,7 +102,13 @@ func NewRouter(d Deps) (http.Handler, error) {
 	r.Use(middleware.Recoverer)
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
-	r.Get("/readyz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
+	r.Get("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if aacErr != nil {
+			http.Error(w, "not ready: "+aacErr.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte("ok\n"))
+	})
 
 	// Prometheus scrape target — un-authed because the chino-stream
 	// Service is cluster-internal; only hyperv-prometheus (grafana ns)
