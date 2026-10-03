@@ -152,12 +152,16 @@ func fallbackStreamInf(p *Probe, ql Quality, maxHeight int, useCopy bool, audioG
 		// Main, Level 4.0 covers 1080p remuxes and most BD HEVC; 4K Main10
 		// sources (hvc1.2.4.L153.B0) still play because the hvcC is
 		// authoritative — the master string is just gating.
-		videoCodec := "avc1.640028"
+		codecs := "avc1.640028"
 		if p.VideoCodec == "hevc" || p.VideoCodec == "h265" {
-			videoCodec = "hvc1.1.6.L120.B0"
+			codecs = "hvc1.1.6.L120.B0"
 		}
-		return fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d%s,CODECS=\"%s,mp4a.40.2\",VIDEO-RANGE=%s",
-			copyBandwidth(p), resolutionAttr(p.Width, p.Height), videoCodec, videoRange(p))
+		// The audio is the source's, copied: declare its real codec.
+		if a := copyAudioCodec(p); a != "" {
+			codecs += "," + a
+		}
+		return fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d%s,CODECS=\"%s\",VIDEO-RANGE=%s",
+			copyBandwidth(p), resolutionAttr(p.Width, p.Height), codecs, videoRange(p))
 	}
 	g := transcodeGeometry(ql, p.Width, p.Height, maxHeight)
 	audioAttr := ""

@@ -91,8 +91,8 @@ func TestTranscodeBandwidthScalesWithTheFrame(t *testing.T) {
 }
 
 func TestFallbackStreamInf(t *testing.T) {
-	sdr720 := &Probe{VideoCodec: "h264", Width: 1280, Height: 720, BitRate: 2_500_000}
-	hdr4K := &Probe{VideoCodec: "hevc", Width: 3840, Height: 2160, ColorTransfer: "smpte2084"}
+	sdr720 := &Probe{VideoCodec: "h264", Width: 1280, Height: 720, BitRate: 2_500_000, AudioCodec: "aac", AudioProfile: "LC"}
+	hdr4K := &Probe{VideoCodec: "hevc", Width: 3840, Height: 2160, ColorTransfer: "smpte2084", AudioCodec: "aac"}
 	cases := []struct {
 		name    string
 		p       *Probe

@@ -194,6 +194,9 @@ type Probe struct {
 	Height     int
 	DurationMs int64
 	AudioCodec string
+	// AudioProfile is the first audio stream's profile as ffprobe names
+	// it ("LC", "HE-AAC", "HE-AACv2", …); empty when it reports none.
+	AudioProfile string
 	// BitRate is the container's overall bitrate in bit/s (ffprobe's
 	// format.bit_rate); 0 when unknown.
 	BitRate int64
@@ -363,6 +366,7 @@ func RunFFprobe(ctx context.Context, ffprobeBin, path string) (Probe, error) {
 		Streams []struct {
 			CodecType      string `json:"codec_type"`
 			CodecName      string `json:"codec_name"`
+			Profile        string `json:"profile"`
 			Width          int    `json:"width"`
 			Height         int    `json:"height"`
 			Channels       int    `json:"channels"`
@@ -407,6 +411,7 @@ func RunFFprobe(ctx context.Context, ffprobeBin, path string) (Probe, error) {
 		case "audio":
 			if p.AudioCodec == "" {
 				p.AudioCodec = s.CodecName
+				p.AudioProfile = s.Profile
 			}
 			p.AudioTracks = append(p.AudioTracks, TrackInfo{
 				Index:    audioIdx,
