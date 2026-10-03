@@ -1,13 +1,38 @@
 package http
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
+
+// The router's request log (stdout) blanks out the stream token and the
+// bearer of a request URL.
+func TestRouterRequestLogRedactsCredentials(t *testing.T) {
+	rd, wr, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout := os.Stdout
+	os.Stdout = wr // NewRouter hands its request logger os.Stdout
+	h, err := NewRouter(Deps{FFmpegBin: "ffmpeg", FFprobeBin: "ffprobe", HLSCacheDir: t.TempDir()})
+	os.Stdout = stdout
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/healthz?stream=s3cr3t.s1g&token=eyJhbGciOiJIUzI1NiJ9.e30.x", nil))
+	_ = wr.Close()
+	out, _ := io.ReadAll(rd)
+	if !strings.Contains(string(out), "/healthz?stream=REDACTED&token=REDACTED") || strings.Contains(string(out), "s3cr3t") ||
+		strings.Contains(string(out), "eyJhbGci") {
+		t.Errorf("request log: %q", out)
+	}
+}
 
 // /readyz is up only while ffmpeg has an AAC encoder the on-the-fly
 // pipelines can use; /healthz (liveness) is up regardless.
