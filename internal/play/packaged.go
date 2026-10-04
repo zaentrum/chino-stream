@@ -1043,10 +1043,26 @@ func ReadPackageManifest(itemID string) (*pkgmanifest.Manifest, error) {
 // renditions (post-downmix, stereo AAC), not from a fresh probe of
 // the source file (which would still report the original surround
 // codec).
-func writePackagedInfo(w http.ResponseWriter, mf *pkgmanifest.Manifest) {
+//
+// The video fields describe the rung the client starts on: the first
+// variant of the master it is served for caps and q. qualities is the
+// choice it may offer (packagedQualities) — null for a package with one
+// rendition, as before — and default_quality is "auto": the client's
+// ladder, adaptive. Clients put the name they pick in ?q=.
+func writePackagedInfo(w http.ResponseWriter, itemID string, mf *pkgmanifest.Manifest, caps Caps, q string) {
 	video := pkgmanifest.VideoRendition{}
 	if len(mf.Renditions.Video) > 0 {
 		video = mf.Renditions.Video[0]
+	}
+	var qualities []map[string]any
+	if master, err := readPackagedMaster(itemID); err == nil {
+		start := serveLadder(master, caps, q).video
+		for _, v := range mf.Renditions.Video {
+			if v.ID == start {
+				video = v
+			}
+		}
+		qualities = packagedQualities(master, caps)
 	}
 	audioTracks := make([]map[string]any, 0, len(mf.Renditions.Audio))
 	for i, a := range mf.Renditions.Audio {
@@ -1077,9 +1093,21 @@ func writePackagedInfo(w http.ResponseWriter, mf *pkgmanifest.Manifest) {
 		"duration_ms":     mf.EffectiveDurationMs(),
 		"mode":            "packaged",
 		"reason":          "pre-segmented CMAF on disk; served as static byte-range fetches with no request-time ffmpeg",
-		"qualities":       nil,
-		"default_quality": video.ID,
+		"qualities":       qualities,
+		"default_quality": "auto",
 		"audio_tracks":    audioTracks,
 		"subtitle_tracks": mf.Subtitles,
 	})
+}
+
+// readPackagedMaster is the item's hls/master.m3u8 as packaged, through
+// packagedCache.
+func readPackagedMaster(itemID string) (string, error) {
+	path := packagePath(itemID, "hls", "master.m3u8")
+	st, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	b, err := readPackagedBytes(path, st.ModTime())
+	return string(b), err
 }

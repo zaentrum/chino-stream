@@ -1,6 +1,7 @@
 package play
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -323,6 +324,73 @@ func serveLadder(body string, caps Caps, q string) servedLadder {
 	}
 	m.normalizeDefaults(drop)
 	return m.render(drop).served("")
+}
+
+// packagedQualities is the quality choice /play/info offers for a packaged
+// master: {"name": "auto", "label": "Auto"} — the client's ladder,
+// adaptive — then one entry per picture size the client may pick, the
+// tallest first: name and id the rung id for ?q=, label the size class
+// ("1080p"), width, height, codec (its CODECS video entry), bitrate (its
+// variant's BANDWIDTH, the stereo group's), video_range. Of two rungs of
+// one size class (an HEVC 1080p next to an H.264 one) the one in the
+// family its ladder is in is listed. nil when the client may pick fewer
+// than two rungs: nothing to choose (every package before
+// renditions.json). Every entry has name and label, the two fields the
+// clients' quality menus read.
+func packagedQualities(body string, caps Caps) []map[string]any {
+	rungs := parseMaster(body).rungs()
+	fam := ladderFamily(rungs, caps)
+	var picks []ladderRung
+	byLabel := map[string]int{}
+	for _, r := range rungs {
+		if !rungPlayable(r, caps) {
+			continue
+		}
+		label := rungLabel(r)
+		if i, ok := byLabel[label]; ok {
+			if picks[i].family != fam && r.family == fam {
+				picks[i] = r
+			}
+			continue
+		}
+		byLabel[label] = len(picks)
+		picks = append(picks, r)
+	}
+	if len(picks) < 2 {
+		return nil
+	}
+	sort.SliceStable(picks, func(i, j int) bool { return picks[i].height > picks[j].height })
+	out := []map[string]any{{"name": "auto", "label": "Auto"}}
+	for _, r := range picks {
+		e := map[string]any{"name": r.id, "id": r.id, "label": rungLabel(r), "width": r.width,
+			"height": r.height, "codec": r.codec, "bitrate": r.bandwidth}
+		if r.videoRange != "" {
+			e["video_range"] = r.videoRange
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// sizeClasses are the picture heights quality labels name.
+var sizeClasses = []int{240, 360, 480, 540, 576, 720, 1080, 1440, 2160, 4320}
+
+// rungLabel names a rung's picture size the way the ladder's rungs are
+// named ("720p" = the 1280x720 box): the smallest class whose 16:9 box
+// holds the frame, 10% of width to spare for DCI frames (4096x2160 is
+// 2160p). So a 2.39:1 film's 1280x536 rung is 720p and its 3840x1606 top
+// rung 2160p, like the transcoder's LADDER names them.
+func rungLabel(r ladderRung) string {
+	if r.height <= 0 {
+		return r.id
+	}
+	for _, c := range sizeClasses {
+		boxW := (c*16/9 + 1) &^ 1
+		if r.height <= c && r.width*10 <= boxW*11 {
+			return strconv.Itoa(c) + "p"
+		}
+	}
+	return strconv.Itoa(r.height) + "p"
 }
 
 // normalizeDefaults leaves each audio group that is served with exactly

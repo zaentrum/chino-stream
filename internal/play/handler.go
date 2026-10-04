@@ -395,7 +395,9 @@ func (h *Handler) ensureSubtitleCached(ctx context.Context, src string, idx, sta
 //   - "packaged"   → the analyzer has built a pre-segmented CMAF tree
 //     under /var/lib/katalog/packages/{id}/. The player
 //     serves video + audio as static byte-range fetches
-//     from disk. No request-time ffmpeg.
+//     from disk. No request-time ffmpeg. For a ladder,
+//     qualities lists Auto and the rungs the client may
+//     pick (?q=<name>), default_quality is "auto".
 //   - "transcode"  → legacy on-demand path. Source codec isn't browser-
 //     compatible, so chino-stream runs ffmpeg per
 //     window to produce HLS segments on the fly.
@@ -442,7 +444,7 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 	if HasCompletedPackage(itemID) && PackagedPlayableBy(itemID, infoCaps) {
 		mf, err := ReadPackageManifest(itemID)
 		if err == nil && mf != nil {
-			writePackagedInfo(w, mf)
+			writePackagedInfo(w, itemID, mf, infoCaps, r.URL.Query().Get("q"))
 			return
 		}
 		// Manifest unreadable — fall through to the source-side probe
