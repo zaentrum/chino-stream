@@ -468,7 +468,7 @@ func (m *hlsMaster) render(drop []bool) *hlsMaster {
 		if drop[i] {
 			continue
 		}
-		if strings.TrimSpace(l) == "" && i < len(m.lines)-1 && len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
+		if strings.TrimSpace(l) == "" && len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
 			continue
 		}
 		out = append(out, l)

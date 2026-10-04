@@ -22,6 +22,9 @@ const (
 	// LADDER=source,1080p,720p on a 2160p HEVC source: v0 HEVC 2160p, v1
 	// H.264 1080p, v2 H.264 720p. No subtitles in the master.
 	pkgUHD = "3d4c0000-0000-4000-8000-000000000003"
+	// pkgLadder's rungs with SURROUND_AUDIO and HLS_SUBTITLES off: one
+	// audio group, no SUBTITLES group.
+	pkgStereoLadder = "57e2e0a0-0000-4000-8000-000000000008"
 )
 
 // packagedMasterBody is a test package's master.m3u8 as it is on disk.
@@ -160,6 +163,12 @@ func TestLadderServesEachClientOneCodecFamily(t *testing.T) {
 			[]string{"v2/audio"}, []string{"v2"}},
 		{"a 4K TV decoding AC-3 and E-AC-3", pkgUHD, "avc:2160,hvc:2160,aac,mp3,ac3,eac3",
 			[]string{"v0/audio", "v0/audio-surround"}, []string{"v0"}},
+		{"one audio group: HEVC browser", pkgStereoLadder, "avc,hvc,aac,eac3",
+			[]string{"v0/audio"}, []string{"v0"}},
+		{"one audio group: H.264", pkgStereoLadder, "avc,aac",
+			[]string{"v1/audio", "v2/audio"}, []string{"v1", "v2"}},
+		{"one audio group: H.264 capped at 480", pkgStereoLadder, "hvc:480,avc:480,aac",
+			[]string{"v2/audio"}, []string{"v2"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -485,6 +494,35 @@ func TestLadderLeavesASingleRenditionMasterAlone(t *testing.T) {
 	one = strings.ReplaceAll(one, "#EXT-X-STREAM-INF:BANDWIDTH=3000000,CODECS=\"avc1.64001f,ec-3\",RESOLUTION=1280x720,AUDIO=\"audio-surround\"\nv1/playlist.m3u8\n", "")
 	if got := servedVariants(serveLadder(one, ParseCaps("hvc,aac"), "").body); !reflect.DeepEqual(got, []string{"v0/audio"}) {
 		t.Errorf("one rendition with a 5.1 group: %v", got)
+	}
+}
+
+// Families the packager does not write today (AV1, VP9) are served by the
+// same rules: HEVC first, then H.264, then the first other family the
+// client decodes — and only to a client that decodes it.
+func TestLadderOtherCodecFamilies(t *testing.T) {
+	body := "#EXTM3U\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=5000000,CODECS=\"av01.0.08M.08\",RESOLUTION=1920x1080\nv0/playlist.m3u8\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=4000000,CODECS=\"vp09.00.40.08\",RESOLUTION=1920x1080\nv1/playlist.m3u8\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=3000000,CODECS=\"avc1.64001f\",RESOLUTION=1280x720\nv2/playlist.m3u8\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=2000000,CODECS=\"av01.0.05M.08\",RESOLUTION=1280x720\nv3/playlist.m3u8\n"
+	cases := []struct {
+		caps string
+		want []string
+	}{
+		{"av1,avc", []string{"v2/"}},        // H.264 before the others
+		{"av1,vp9", []string{"v0/", "v3/"}}, // the first other family in master order
+		{"vp9", []string{"v1/"}},
+		{"av1:720,vp9:720", []string{"v3/"}}, // the AV1 rung under its cap
+		{"vp9:720,av1:720", []string{"v3/"}}, // the VP9 one is over it
+	}
+	for _, tc := range cases {
+		if got := servedVariants(serveLadder(body, ParseCaps(tc.caps), "").body); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("caps=%s: %v, want %v", tc.caps, got, tc.want)
+		}
+	}
+	if s := serveLadder(body, ParseCaps("hvc"), ""); s.body != body {
+		t.Errorf("a client decoding none of them: %s", s.body)
 	}
 }
 
