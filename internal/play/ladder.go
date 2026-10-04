@@ -100,8 +100,10 @@ func parseMaster(body string) *hlsMaster {
 				c = strings.TrimSpace(c)
 				switch {
 				case c == "":
-				case v.codec == "" && codecFamily(c) != "":
-					v.codec, v.family = c, codecFamily(c)
+				case isVideoCodec(c):
+					if v.codec == "" {
+						v.codec, v.family = c, codecFamily(c)
+					}
 				default:
 					v.audioCodecs = append(v.audioCodecs, c)
 				}
@@ -124,6 +126,25 @@ func parseMaster(body string) *hlsMaster {
 		}
 	}
 	return m
+}
+
+// videoCodecs are the sample entries of a CODECS video entry: those
+// codecFamily knows and those it doesn't (H.264 with in-band parameter
+// sets, Dolby Vision, MPEG-4 Part 2, VP8). An entry of the second kind is
+// still the variant's video, of no family a client may be served (a
+// browser rejects a dvh1 level it can't decode); it must not be read as an
+// audio codec, which would drop its audio group.
+var videoCodecs = []string{"avc1", "avc3", "hvc1", "hev1", "dvh1", "dvhe", "dva1", "dvav", "dav1",
+	"vp08", "vp09", "av01", "mp4v"}
+
+func isVideoCodec(c string) bool {
+	c = strings.ToLower(c)
+	for _, p := range videoCodecs {
+		if strings.HasPrefix(c, p) {
+			return true
+		}
+	}
+	return codecFamily(c) != ""
 }
 
 // ladderRung is one video rendition of a master: the attributes of its
@@ -289,11 +310,11 @@ func serveLadder(body string, caps Caps, q string) servedLadder {
 		groups[g] = ok
 	}
 	keep := func(v masterVariant) bool { return videos[v.rung] && (v.audio == "" || groups[v.audio]) }
-	any := false
+	kept := false
 	for _, v := range m.variants {
-		any = any || keep(v)
+		kept = kept || keep(v)
 	}
-	if !any {
+	if !kept {
 		for g := range groups {
 			groups[g] = true
 		}

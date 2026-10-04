@@ -497,6 +497,42 @@ func TestLadderLeavesASingleRenditionMasterAlone(t *testing.T) {
 	}
 }
 
+// A video entry codecFamily doesn't know (Dolby Vision, avc3) is still the
+// variant's video, never one of its audio codecs: its audio group stays,
+// and the rung — of no family a client is served — goes.
+func TestLadderVideoCodecsWithoutAFamily(t *testing.T) {
+	body := "#EXTM3U\n" +
+		"#EXT-X-MEDIA:TYPE=AUDIO,URI=\"a0/playlist.m3u8\",GROUP-ID=\"audio\",LANGUAGE=\"en\",NAME=\"English\",DEFAULT=YES,AUTOSELECT=YES,CHANNELS=\"2\"\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=9000000,CODECS=\"dvh1.08.06,mp4a.40.2\",RESOLUTION=3840x2160,AUDIO=\"audio\"\nv0/playlist.m3u8\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=3000000,CODECS=\"avc1.64001f,mp4a.40.2\",RESOLUTION=1280x720,AUDIO=\"audio\"\nv1/playlist.m3u8\n"
+	m := parseMaster(body)
+	if v := m.variants[0]; v.codec != "dvh1.08.06" || v.family != "" || !reflect.DeepEqual(v.audioCodecs, []string{"mp4a.40.2"}) {
+		t.Errorf("parsed %+v", v)
+	}
+	for _, c := range []string{"avc,hvc,aac", "avc,aac"} {
+		if got := servedVariants(serveLadder(body, ParseCaps(c), "").body); !reflect.DeepEqual(got, []string{"v1/audio"}) {
+			t.Errorf("caps=%s: %v", c, got)
+		}
+	}
+	// Of two video entries (an HEVC base layer listed with its Dolby
+	// Vision one, as some masters did before SUPPLEMENTAL-CODECS) the
+	// first is the variant's video.
+	two := parseMaster("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,CODECS=\"hvc1.2.4.L150.90,dvh1.08.06,ec-3\"\nv0/playlist.m3u8\n")
+	if v := two.variants[0]; v.codec != "hvc1.2.4.L150.90" || v.family != "hevc" || !reflect.DeepEqual(v.audioCodecs, []string{"ec-3"}) {
+		t.Errorf("two video entries: %+v", v)
+	}
+	for _, c := range []string{"avc3.640028", "dvhe.05.06", "dva1.09.05", "dav1.10.09", "vp08.00.10.08", "mp4v.20.9", "AVC1.4d401f"} {
+		if !isVideoCodec(c) {
+			t.Errorf("%s is a video codec", c)
+		}
+	}
+	for _, c := range []string{"mp4a.40.2", "ec-3", "ac-3", "opus", "fLaC", "stpp.ttml.im1t", "wvtt"} {
+		if isVideoCodec(c) {
+			t.Errorf("%s is not a video codec", c)
+		}
+	}
+}
+
 // Families the packager does not write today (AV1, VP9) are served by the
 // same rules: HEVC first, then H.264, then the first other family the
 // client decodes — and only to a client that decodes it.
