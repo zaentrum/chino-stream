@@ -1,0 +1,54 @@
+{
+  "version": 2,
+  "itemId": "1e9ac7d3-0000-4000-8000-000000000007",
+  "type": "movie",
+  "title": "Clip",
+  "year": 2026,
+  "tmdbId": null,
+  "durationMs": 8007,
+  "packagedAt": "2026-10-04T00:00:00+00:00",
+  "packager": "packager version v3.4.2-c819dea-release",
+  "renditions": {
+    "video": [
+      {
+        "id": "v0",
+        "dir": "hls/v0",
+        "codec": "hev1.1.6.L120.B0",
+        "width": 1920,
+        "height": 1080,
+        "bitrateBps": 4174743,
+        "hdr": true,
+        "frameRate": "24000/1001",
+        "segments": 2,
+        "targetDuration": 6
+      }
+    ],
+    "audio": [
+      {
+        "id": "a0",
+        "dir": "hls/a0",
+        "codec": "mp4a.40.2",
+        "language": "eng",
+        "title": "",
+        "default": true,
+        "channels": 2,
+        "bitrateBps": 192000,
+        "segments": 2,
+        "visible": true
+      },
+      {
+        "id": "a1",
+        "dir": "hls/a1",
+        "codec": "mp4a.40.2",
+        "language": "ger",
+        "title": "",
+        "default": false,
+        "channels": 2,
+        "bitrateBps": 192000,
+        "segments": 2,
+        "visible": false
+      }
+    ]
+  },
+  "subtitles": []
+}

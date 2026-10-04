@@ -25,6 +25,7 @@ import (
 // PackagesRoot is where katalog-analyzer writes the per-item CMAF
 // trees. Mounted RO into chino-stream pods via the katalog-packages
 // PVC; the path here must match the volumeMount in k8s/deployment.yaml.
+// A variable only so tests can point it at packages under testdata.
 //
 // Layout under PackagesRoot is sharded to keep any single directory's
 // child count bounded:
@@ -35,7 +36,7 @@ import (
 // the katalog item type) and shard2 is the first two hex chars of the
 // item uuid. At 10k items per category, ~40 per shard — every fs
 // (incl. NFS) reads that fast.
-const PackagesRoot = "/var/lib/katalog/packages"
+var PackagesRoot = "/var/lib/katalog/packages"
 
 // Known top-level category dirs the analyzer writes to. The stream
 // side probes these on read to locate a package for a given item id

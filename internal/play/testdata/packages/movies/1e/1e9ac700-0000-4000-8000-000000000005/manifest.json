@@ -1,0 +1,94 @@
+{
+  "version": 2,
+  "itemId": "1e9ac700-0000-4000-8000-000000000005",
+  "type": "movie",
+  "title": "Clip",
+  "year": 2026,
+  "tmdbId": null,
+  "durationMs": 20021,
+  "packagedAt": "2026-10-04T00:00:00+00:00",
+  "packager": "packager version v3.4.2-c819dea-release",
+  "renditions": {
+    "video": [
+      {
+        "id": "v0",
+        "dir": "hls/v0",
+        "codec": "hev1.1.6.L120.B0",
+        "width": 1920,
+        "height": 1080,
+        "bitrateBps": 0,
+        "hdr": false,
+        "frameRate": "24000/1001",
+        "segments": 4,
+        "targetDuration": 6
+      }
+    ],
+    "audio": [
+      {
+        "id": "a0",
+        "dir": "hls/a0",
+        "codec": "mp4a.40.2",
+        "language": "eng",
+        "title": "",
+        "default": true,
+        "channels": 2,
+        "bitrateBps": 192000,
+        "segments": 4,
+        "visible": true
+      },
+      {
+        "id": "a1",
+        "dir": "hls/a1",
+        "codec": "mp4a.40.2",
+        "language": "ger",
+        "title": "",
+        "default": false,
+        "channels": 2,
+        "bitrateBps": 192000,
+        "segments": 4,
+        "visible": false
+      }
+    ]
+  },
+  "subtitles": [
+    {
+      "id": "sub0",
+      "language": "eng",
+      "title": "",
+      "default": false,
+      "forced": false,
+      "visible": true,
+      "path": "subs/0.vtt",
+      "format": "webvtt"
+    },
+    {
+      "id": "sub1",
+      "language": "eng",
+      "title": "Forced",
+      "default": false,
+      "forced": true,
+      "visible": true,
+      "path": "subs/1.vtt",
+      "format": "webvtt"
+    },
+    {
+      "id": "sub2",
+      "language": "ger",
+      "title": "",
+      "default": false,
+      "forced": false,
+      "visible": false,
+      "path": "subs/2.vtt",
+      "format": "webvtt"
+    }
+  ],
+  "trickplay": {
+    "vttPath": "trickplay/thumbnails.vtt",
+    "spritePattern": "trickplay/sprite-%04d.jpg",
+    "intervalSec": 10,
+    "thumbWidth": 320,
+    "thumbHeight": 180,
+    "gridCols": 10,
+    "gridRows": 10
+  }
+}
