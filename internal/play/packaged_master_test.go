@@ -31,19 +31,21 @@ const (
 	pkgSingle = "5119e000-0000-4000-8000-000000000004"
 )
 
-// usePackages points PackagesRoot at root for the test and empties the
-// per-item caches, before and after.
+// usePackages points PackagesRoot at root for the test, empties the
+// per-item caches, before and after, and runs cache warms in place (no
+// goroutine outlives the test).
 func usePackages(t *testing.T, root string) {
 	t.Helper()
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	old := PackagesRoot
+	old, oldWarm := PackagesRoot, goWarm
 	PackagesRoot = abs
+	goWarm = func(f func()) { f() }
 	resetPackageCaches()
 	t.Cleanup(func() {
-		PackagesRoot = old
+		PackagesRoot, goWarm = old, oldWarm
 		resetPackageCaches()
 	})
 }

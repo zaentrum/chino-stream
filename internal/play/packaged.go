@@ -313,14 +313,15 @@ func servePlaylistCached(w http.ResponseWriter, r *http.Request, path string) {
 
 // servePlaylistCachedTransform is servePlaylistCached with an optional
 // post-rewrite transform applied to the playlist body before it's cached and
-// served. Used to stamp VIDEO-RANGE onto the packaged master for HDR titles
-// (shaka omits it). The transform runs once per (path, query) cache miss; cache
-// hits serve the already-transformed body.
-func servePlaylistCachedTransform(w http.ResponseWriter, r *http.Request, path string, transform func(string) string) {
+// served. Used for the packaged master: the client's share of a ladder, and
+// VIDEO-RANGE on HDR titles whose master lacks it. The transform runs once per
+// (path, query) cache miss; cache hits serve the already-transformed body. It
+// returns the body served (also on a 304), nil when there is none.
+func servePlaylistCachedTransform(w http.ResponseWriter, r *http.Request, path string, transform func(string) string) []byte {
 	st, err := os.Stat(path)
 	if err != nil {
 		http.Error(w, "playlist not found", http.StatusNotFound)
-		return
+		return nil
 	}
 	// Cache key includes the query so different ?stream=…/?caps=…
 	// rewrites stay distinct. Cap at the lifetime of the file mtime
@@ -330,13 +331,13 @@ func servePlaylistCachedTransform(w http.ResponseWriter, r *http.Request, path s
 		if e := v.(*playlistCacheEntry); e.mtime.Equal(st.ModTime()) {
 			if match := r.Header.Get("If-None-Match"); match != "" && match == e.etag {
 				w.WriteHeader(http.StatusNotModified)
-				return
+				return e.body
 			}
 			w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 			w.Header().Set("Cache-Control", "private, max-age=60")
 			w.Header().Set("ETag", e.etag)
 			_, _ = w.Write(e.body)
-			return
+			return e.body
 		}
 	}
 	// Route the raw read through packagedCache so a Zap warm
@@ -349,7 +350,7 @@ func servePlaylistCachedTransform(w http.ResponseWriter, r *http.Request, path s
 	raw, err := readPackagedBytes(path, st.ModTime())
 	if err != nil {
 		http.Error(w, "playlist not found", http.StatusNotFound)
-		return
+		return nil
 	}
 	body := rewriteM3U8URIs(string(raw), r.URL.RawQuery)
 	if transform != nil {
@@ -361,12 +362,13 @@ func servePlaylistCachedTransform(w http.ResponseWriter, r *http.Request, path s
 	playlistCache.Store(cacheKey, &playlistCacheEntry{body: out, etag: etag, mtime: st.ModTime()})
 	if match := r.Header.Get("If-None-Match"); match != "" && match == etag {
 		w.WriteHeader(http.StatusNotModified)
-		return
+		return out
 	}
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Cache-Control", "private, max-age=60")
 	w.Header().Set("ETag", etag)
 	_, _ = w.Write(out)
+	return out
 }
 
 // PackagedMaster serves the package's master.m3u8 as the client may
@@ -377,6 +379,13 @@ func servePlaylistCachedTransform(w http.ResponseWriter, r *http.Request, path s
 // against the master's URL and drop `?stream=…`, leaving subsequent
 // rendition fetches unauthenticated. A master with one video rendition
 // and one audio group is served as packaged.
+//
+// Off the request path it warms the variant the client starts on (the
+// served master's first variant and its audio rendition): their media
+// playlists and init segments, and with ?t=<sec> the segments from
+// there. Not the other rungs or audio groups — a ladder's other
+// renditions are bytes no player asked for — and no segments without t,
+// since the player may start anywhere (a resume, a Zap card's midpoint).
 func (h *HLSHandler) PackagedMaster(w http.ResponseWriter, r *http.Request) {
 	itemID := chi.URLParam(r, "itemId")
 	masterPath := packagePath(itemID, "hls", "master.m3u8")
@@ -393,13 +402,27 @@ func (h *HLSHandler) PackagedMaster(w http.ResponseWriter, r *http.Request) {
 	if mf, err := ReadPackageManifest(itemID); err == nil && manifestHasHDR(mf) {
 		videoRange = injectVideoRangeTransform(mf)
 	}
-	servePlaylistCachedTransform(w, r, masterPath, func(body string) string {
+	served := servePlaylistCachedTransform(w, r, masterPath, func(body string) string {
 		if videoRange != nil {
 			body = videoRange(body)
 		}
 		return serveLadder(body, caps, q).body
 	})
+	if served == nil {
+		return
+	}
+	start := ladderStart(string(served))
+	tSec, segments := -1.0, false
+	if v := r.URL.Query().Get("t"); v != "" {
+		if n, err := strconv.ParseFloat(v, 64); err == nil && n >= 0 {
+			tSec, segments = n, true
+		}
+	}
+	goWarm(func() { warmStart(itemID, start, tSec, segments) })
 }
+
+// goWarm runs a cache warm off the request path. Tests run it in place.
+var goWarm = func(f func()) { go f() }
 
 // manifestHasHDR reports whether any packaged video rendition is HDR.
 func manifestHasHDR(mf *pkgmanifest.Manifest) bool {
@@ -683,27 +706,27 @@ func UnpinPaths(paths []string) {
 
 // warmPackaged primes the caches for a packaged item OFF the request
 // path so the player's follow-up master / playlist / init / segment
-// fetches all land hot. It is fire-and-forget (called via `go`),
-// panic-safe, and bounded (~2 segments per playable rendition).
+// fetches all land hot. It is fire-and-forget, panic-safe, and bounded:
+// the master plus the variant the client starts on, nothing else.
 //
 // What it warms:
 //
-//	(a) master.m3u8 + each playable video+audio rendition playlist.m3u8
-//	    via os.ReadFile — warms the NFS client + OS page cache so the
-//	    real servePlaylistCached read is hot (the rewrite+cache step
-//	    itself is cheap; the NFS read was the slow part).
-//	(b) init.mp4 for those renditions into packagedCache, so the real
-//	    PackagedInitSegment serves from memory (a 924-byte init.mp4 was
-//	    seen stalling 18.4s cold under NFS contention).
-//	(c) the media segment that contains tSec (+ the next one) for each
-//	    rendition; or the first 2 segments when tSec<=0. Segment choice
-//	    is driven by parsing the rendition playlist's #EXTINF durations
-//	    and seg-*.m4s URIs.
+//	(a) master.m3u8, into packagedCache — the real servePlaylistCached
+//	    read is then hot (the rewrite+cache step itself is cheap; the
+//	    NFS read was the slow part).
+//	(b) the start of the master the client is served for caps and q
+//	    (serveLadder): its first variant's video rendition and that
+//	    variant's audio rendition — media playlist, init.mp4 (a 924-byte
+//	    init.mp4 was seen stalling 18.4s cold under NFS contention) and
+//	    the segments at tSec (pickWarmSegments; the first ones when
+//	    tSec<=0). A ladder's other rungs and audio groups are not
+//	    warmed: a client starts on one variant, and warming every
+//	    rendition of a ladder filled the cache with bytes no player
+//	    asked for.
 //
-// Renditions are filtered to those the client can actually play via
-// ReadPackageManifest + PackagedPlayableBy(caps): no point warming an
-// HEVC rendition for a device that will fall through to transcode.
-func (h *HLSHandler) warmPackaged(itemID string, caps Caps, tSec float64) {
+// A client that decodes none of the package's rungs is not warmed at
+// all (PackagedPlayableBy): it falls through to the transcode.
+func (h *HLSHandler) warmPackaged(itemID string, caps Caps, q string, tSec float64) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			log.Printf("warmPackaged %s panic: %v", itemID, rec)
@@ -712,45 +735,58 @@ func (h *HLSHandler) warmPackaged(itemID string, caps Caps, tSec float64) {
 	if !PackagedPlayableBy(itemID, caps) {
 		return
 	}
-	mf, err := ReadPackageManifest(itemID)
-	if err != nil || mf == nil {
-		// No manifest to drive rendition selection — still warm the
-		// master so at least the first fetch is hot.
-		warmPackagedFile(packagePath(itemID, "hls", "master.m3u8"))
+	warmPackagedFile(packagePath(itemID, "hls", "master.m3u8"))
+	master, err := readPackagedMaster(itemID)
+	if err != nil {
 		return
 	}
+	warmStart(itemID, serveLadder(master, caps, q), tSec, true)
+}
 
-	// (a) master playlist.
-	warmPackagedFile(packagePath(itemID, "hls", "master.m3u8"))
+// warmStart warms the variant a client starts on: s.video and s.audio,
+// each its media playlist and init.mp4, and with segments the segments
+// at tSec (the first ones when tSec<=0). It returns the paths that are
+// in packagedCache afterwards and whether the video rendition is
+// playable from there: its playlist, its init and, with segments, at
+// least one segment landed.
+func warmStart(itemID string, s servedLadder, tSec float64, segments bool) (paths []string, videoOK bool) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("warmStart %s panic: %v", itemID, rec)
+		}
+	}()
+	paths, videoOK = warmRendition(itemID, s.video, tSec, segments)
+	if !videoOK {
+		return nil, false
+	}
+	if s.audio != "" {
+		audio, _ := warmRendition(itemID, s.audio, tSec, segments)
+		paths = append(paths, audio...)
+	}
+	return paths, true
+}
 
-	// Build the rendition id list: every video rendition (manifest-level
-	// PackagedPlayableBy already gated the whole item) + every audio
-	// rendition. Audio is codec-agnostic here (always stereo AAC in
-	// packaged mode), so all audio renditions are playable.
-	rendIDs := make([]string, 0, len(mf.Renditions.Video)+len(mf.Renditions.Audio))
-	for _, v := range mf.Renditions.Video {
-		if v.ID != "" {
-			rendIDs = append(rendIDs, v.ID)
+// warmRendition warms one packaged rendition (see warmStart). ok: its
+// playlist and init landed, and with segments at least one segment.
+func warmRendition(itemID, rendID string, tSec float64, segments bool) (paths []string, ok bool) {
+	if rendID == "" {
+		return nil, false
+	}
+	playlistPath := packagePath(itemID, "hls", rendID, "playlist.m3u8")
+	initPath := packagePath(itemID, "hls", rendID, "init.mp4")
+	if !warmPackagedFile(playlistPath) || !warmPackagedFile(initPath) {
+		return nil, false
+	}
+	paths = []string{playlistPath, initPath}
+	if !segments {
+		return paths, true
+	}
+	for _, seg := range pickWarmSegments(playlistPath, tSec) {
+		if p := packagePath(itemID, "hls", rendID, seg); warmPackagedFile(p) {
+			paths = append(paths, p)
 		}
 	}
-	for _, a := range mf.Renditions.Audio {
-		if a.ID != "" {
-			rendIDs = append(rendIDs, a.ID)
-		}
-	}
-
-	for _, rid := range rendIDs {
-		playlistPath := packagePath(itemID, "hls", rid, "playlist.m3u8")
-		// (a) rendition playlist — warm NFS+page cache.
-		warmPackagedFile(playlistPath)
-		// (b) init segment — warm into packagedCache.
-		warmPackagedFile(packagePath(itemID, "hls", rid, "init.mp4"))
-		// (c) segment(s) covering tSec (or the first two).
-		segNames := pickWarmSegments(playlistPath, tSec)
-		for _, seg := range segNames {
-			warmPackagedFile(packagePath(itemID, "hls", rid, seg))
-		}
-	}
+	return paths, len(paths) > 2
 }
 
 // pickWarmSegments parses a rendition playlist.m3u8 and returns the

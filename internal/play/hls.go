@@ -476,7 +476,7 @@ func (h *HLSHandler) PackagedIDs(w http.ResponseWriter, _ *http.Request) {
 //
 //   - HTTP 202 returned immediately; no playlist body
 //   - Packaged items warm the NFS client + OS page cache + the
-//     in-memory packagedCache for the renditions the client can play,
+//     in-memory packagedCache for the variant the client starts on,
 //     off the request path (warmPackaged). The early-return that used
 //     to claim "nothing to warm" was wrong: cold packaged reads stall
 //     for seconds under NFS contention (a 924-byte init.mp4 was seen
@@ -486,8 +486,8 @@ func (h *HLSHandler) PackagedIDs(w http.ResponseWriter, _ *http.Request) {
 //     the main pool, so they can NEVER starve a real-request transcode
 //
 // Optional ?t=<sec> picks the segments to warm (the seek/resume hint):
-// when present we warm the segment containing tSec plus the next one;
-// otherwise the first two segments of each rendition.
+// when present we warm from the segment containing tSec; otherwise from
+// the first segment.
 //
 // Authn rides on the same verifier middleware as Master; the bearer
 // can come from Authorization or ?stream=token.
@@ -503,10 +503,12 @@ func (h *HLSHandler) Prewarm(w http.ResponseWriter, r *http.Request) {
 	if HasCompletedPackage(itemID) && PackagedPlayableBy(itemID, caps) {
 		// Fire-and-forget background warm: prime the NFS client, OS
 		// page cache and packagedCache so the real playlist/init/seg
-		// fetches that follow are hot. 202 with a body so client
-		// telemetry can distinguish "packaged-warming" from "warming"
-		// (transcode) and the old "packaged" no-op.
-		go h.warmPackaged(itemID, caps, tSec)
+		// fetches that follow are hot — for the variant this client
+		// starts on (its caps and q), not every rendition. 202 with a
+		// body so client telemetry can distinguish "packaged-warming"
+		// from "warming" (transcode) and the old "packaged" no-op.
+		q := r.URL.Query().Get("q")
+		goWarm(func() { h.warmPackaged(itemID, caps, q, tSec) })
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = w.Write([]byte("packaged-warming"))
 		return

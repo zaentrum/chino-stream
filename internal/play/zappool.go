@@ -31,10 +31,12 @@ import (
 //   existing CacheSweeper) keeps `zapPoolSize` entries in memory.
 //   Each entry has a random `seekSec` rolled by the same algorithm
 //   useZapMidpoint.ts uses on the client. For each entry the worker
-//   primes packagedCache with master.m3u8, every rendition's
-//   playlist.m3u8 + init.mp4, plus the segment containing seekSec
-//   (and the next one) for each rendition. The serve path
-//   (PackagedMaster / PackagedInitSegment / PackagedSegment) is
+//   primes packagedCache with master.m3u8 and the variants Zap clients
+//   start on (zapClients: an HEVC client's, any other's; the same one
+//   for a package with one rendition): their video and audio
+//   renditions' playlist.m3u8 + init.mp4, plus the segments from
+//   seekSec. Not a ladder's other rungs and audio groups. The serve
+//   path (PackagedMaster / PackagedInitSegment / PackagedSegment) is
 //   unchanged — it just finds the file already in packagedCache and
 //   skips the NFS read.
 //
@@ -91,6 +93,13 @@ const (
 	zapRandLow       = 0.10
 	zapRandHigh      = 0.80
 )
+
+// zapClients are the clients whose starting variant a pool entry warms.
+// The pool serves every Zap client and a ladder starts them on different
+// rungs: an HEVC client (chino-web's Zap caps) on the HEVC rung, any
+// other on the top H.264 rung (the default caps). A package with one
+// rendition starts both on it, warmed once.
+var zapClients = []Caps{ParseCaps("avc,hvc,aac,opus,mp3"), DefaultCaps}
 
 var (
 	zapPoolMu   sync.Mutex
@@ -246,16 +255,18 @@ func refillZapPool(h *HLSHandler) {
 }
 
 // warmOneZapItem reads the package manifest, rolls a random seekSec,
-// primes packagedCache with master + per-rendition (playlist + init +
-// segments covering seekSec), tracks which paths landed, and returns
-// a ready entry. Returns nil when:
+// primes packagedCache with the master and the starting variants
+// (zapClients; playlist + init + segments from seekSec of each video
+// and audio rendition), tracks which paths landed, and returns a ready
+// entry. Returns nil when:
 //   - the item has no manifest or zero duration
 //   - the midpoint algo returns "fallback" (content too short for a
 //     mid-stream seek; ZapCard's playUrl gate rejects fallback sources)
-//   - the master, the first video rendition's playlist+init, or its
-//     containing segment failed to land in packagedCache (corrupt or
-//     half-packaged item; serving it would mean cold NFS reads which
-//     defeats the entire point of the warm pool)
+//   - the master, or for every starting variant its video rendition's
+//     playlist+init or containing segment, failed to land in
+//     packagedCache (corrupt or half-packaged item; serving it would
+//     mean cold NFS reads which defeats the entire point of the warm
+//     pool)
 //
 // Each successful warmPackagedFile path is recorded on entry.Paths so
 // ZapFeed can validate the bytes haven't been LRU-evicted between
@@ -281,70 +292,45 @@ func warmOneZapItem(_ *HLSHandler, itemID string) *zapPoolEntry {
 		return nil
 	}
 
-	paths := make([]string, 0, 12)
-
 	// Master playlist — required.
 	masterPath := packagePath(itemID, "hls", "master.m3u8")
 	if !warmPackagedFile(masterPath) {
 		return nil
 	}
-	paths = append(paths, masterPath)
-
-	// Video rendition warmup — at least one must succeed fully
-	// (playlist + init + ≥1 segment) or the entry is unplayable.
-	videoOK := false
-	for _, v := range mf.Renditions.Video {
-		if v.ID == "" {
-			continue
-		}
-		playlistPath := packagePath(itemID, "hls", v.ID, "playlist.m3u8")
-		initPath := packagePath(itemID, "hls", v.ID, "init.mp4")
-		if !warmPackagedFile(playlistPath) || !warmPackagedFile(initPath) {
-			continue
-		}
-		segNames := pickWarmSegments(playlistPath, seekSec)
-		warmedSegs := make([]string, 0, len(segNames))
-		for _, seg := range segNames {
-			p := packagePath(itemID, "hls", v.ID, seg)
-			if warmPackagedFile(p) {
-				warmedSegs = append(warmedSegs, p)
-			}
-		}
-		if len(warmedSegs) == 0 {
-			// Playlist + init landed but no segments — nothing to
-			// decode at seekSec. Skip this rendition.
-			continue
-		}
-		paths = append(paths, playlistPath, initPath)
-		paths = append(paths, warmedSegs...)
-		videoOK = true
-	}
-	if !videoOK {
+	master, err := readPackagedMaster(itemID)
+	if err != nil {
 		return nil
 	}
+	paths := []string{masterPath}
+	seen := map[string]bool{masterPath: true}
 
-	// Audio rendition warmup — best effort; audio-only renditions
-	// missing don't kill the entry (video carries it), they just
-	// degrade silently to whatever NFS serves.
-	for _, a := range mf.Renditions.Audio {
-		if a.ID == "" {
+	// The starting variants — at least one must land fully (playlist +
+	// init + ≥1 segment of its video rendition) or the entry is
+	// unplayable. Its audio rendition is best effort: missing, it
+	// degrades to whatever NFS serves.
+	videoOK := false
+	started := map[string]bool{}
+	for _, caps := range zapClients {
+		start := serveLadder(master, caps, "")
+		key := start.video + "/" + start.audio
+		if started[key] {
 			continue
 		}
-		playlistPath := packagePath(itemID, "hls", a.ID, "playlist.m3u8")
-		initPath := packagePath(itemID, "hls", a.ID, "init.mp4")
-		if !warmPackagedFile(playlistPath) {
+		started[key] = true
+		landed, ok := warmStart(itemID, start, seekSec, true)
+		if !ok {
 			continue
 		}
-		if !warmPackagedFile(initPath) {
-			continue
-		}
-		paths = append(paths, playlistPath, initPath)
-		for _, seg := range pickWarmSegments(playlistPath, seekSec) {
-			p := packagePath(itemID, "hls", a.ID, seg)
-			if warmPackagedFile(p) {
+		videoOK = true
+		for _, p := range landed {
+			if !seen[p] {
+				seen[p] = true
 				paths = append(paths, p)
 			}
 		}
+	}
+	if !videoOK {
+		return nil
 	}
 
 	year := 0

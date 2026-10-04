@@ -476,6 +476,12 @@ func (m *hlsMaster) render(drop []bool) *hlsMaster {
 	return parseMaster(strings.Join(out, "\n"))
 }
 
+// ladderStart is where a client starts on a served master: its first
+// variant and that variant's audio rendition.
+func ladderStart(body string) servedLadder {
+	return parseMaster(body).served(body)
+}
+
 // served is m served as body ("" = m's own lines), with its start.
 func (m *hlsMaster) served(body string) servedLadder {
 	if body == "" {
