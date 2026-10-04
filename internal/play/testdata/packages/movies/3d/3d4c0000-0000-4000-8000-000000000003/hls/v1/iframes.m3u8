@@ -1,0 +1,14 @@
+#EXTM3U
+#EXT-X-VERSION:6
+## Generated with https://github.com/shaka-project/shaka-packager version v3.4.2-c819dea-release
+#EXT-X-TARGETDURATION:7
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-I-FRAMES-ONLY
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:6.006,
+#EXT-X-BYTERANGE:33885@84
+seg-00001.m4s
+#EXTINF:6.005,
+#EXT-X-BYTERANGE:49529@84
+seg-00002.m4s
+#EXT-X-ENDLIST

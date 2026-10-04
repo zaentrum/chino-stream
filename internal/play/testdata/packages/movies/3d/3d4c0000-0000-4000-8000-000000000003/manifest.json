@@ -1,0 +1,166 @@
+{
+  "version": 2,
+  "itemId": "3d4c0000-0000-4000-8000-000000000003",
+  "type": "movie",
+  "title": "Clip",
+  "year": 2026,
+  "tmdbId": null,
+  "durationMs": 15000,
+  "packagedAt": "2026-10-04T00:00:00+00:00",
+  "packager": "packager version v3.4.2-c819dea-release",
+  "renditions": {
+    "video": [
+      {
+        "id": "v0",
+        "dir": "hls/v0",
+        "codec": "hvc1.1.6.L150.90",
+        "width": 3840,
+        "height": 2160,
+        "bitrateBps": 9204865,
+        "peakBitrateBps": 9366812,
+        "hdr": false,
+        "videoRange": "SDR",
+        "frameRate": "24000/1001",
+        "segments": 2,
+        "targetDuration": 7,
+        "label": "source",
+        "encoder": "copy"
+      },
+      {
+        "id": "v1",
+        "dir": "hls/v1",
+        "codec": "avc1.640028",
+        "width": 1920,
+        "height": 1080,
+        "bitrateBps": 2136505,
+        "peakBitrateBps": 2174240,
+        "hdr": false,
+        "videoRange": "SDR",
+        "frameRate": "24000/1001",
+        "segments": 2,
+        "targetDuration": 7,
+        "label": "1080p",
+        "encoder": "libx264"
+      },
+      {
+        "id": "v2",
+        "dir": "hls/v2",
+        "codec": "avc1.64001f",
+        "width": 1280,
+        "height": 720,
+        "bitrateBps": 823209,
+        "peakBitrateBps": 827719,
+        "hdr": false,
+        "videoRange": "SDR",
+        "frameRate": "24000/1001",
+        "segments": 2,
+        "targetDuration": 7,
+        "label": "720p",
+        "encoder": "libx264"
+      }
+    ],
+    "audio": [
+      {
+        "idx": 0,
+        "codec": "mp4a.40.2",
+        "language": "eng",
+        "title": "",
+        "channels": 2,
+        "default": true,
+        "visible": true,
+        "id": "a0",
+        "dir": "hls/a0",
+        "bitrateBps": 192216,
+        "segments": 2,
+        "group": "audio",
+        "name": "English"
+      },
+      {
+        "idx": 1,
+        "codec": "mp4a.40.2",
+        "language": "ger",
+        "title": "",
+        "channels": 2,
+        "default": false,
+        "visible": true,
+        "id": "a1",
+        "dir": "hls/a1",
+        "bitrateBps": 165537,
+        "segments": 2,
+        "group": "audio",
+        "name": "German"
+      }
+    ],
+    "audioSurround": [
+      {
+        "idx": 0,
+        "codec": "ec-3",
+        "language": "eng",
+        "title": "",
+        "channels": 6,
+        "default": true,
+        "visible": true,
+        "mode": "encode",
+        "id": "a2",
+        "dir": "hls/a2",
+        "bitrateBps": 449719,
+        "segments": 2,
+        "group": "audio-surround",
+        "name": "English 5.1"
+      }
+    ]
+  },
+  "subtitles": [
+    {
+      "id": "sub0",
+      "language": "eng",
+      "title": "",
+      "default": false,
+      "forced": false,
+      "visible": true,
+      "path": "subs/0.vtt",
+      "format": "webvtt",
+      "hls": "hls/s0"
+    },
+    {
+      "id": "sub1",
+      "language": "eng",
+      "title": "Forced",
+      "default": false,
+      "forced": true,
+      "visible": true,
+      "path": "subs/1.vtt",
+      "format": "webvtt",
+      "hls": "hls/s1"
+    },
+    {
+      "id": "sub2",
+      "language": "ger",
+      "title": "",
+      "default": false,
+      "forced": false,
+      "visible": true,
+      "path": "subs/2.vtt",
+      "format": "webvtt",
+      "hls": "hls/s2"
+    }
+  ],
+  "hls": {
+    "master": "hls/master.m3u8",
+    "segmentSeconds": 6,
+    "audioGroups": [
+      "audio",
+      "audio-surround"
+    ],
+    "subtitleGroup": null
+  },
+  "trickplay": {
+    "vttPath": "trickplay/thumbnails.vtt",
+    "spritePattern": "trickplay/sprite-%04d.jpg",
+    "intervalSec": 10,
+    "thumbWidth": 320,
+    "thumbHeight": 180,
+    "gridCols": 10,
+    "gridRows": 10
+  }
+}

@@ -221,14 +221,15 @@ func packagePath(itemID string, rel ...string) string {
 // PackagedPlayableBy reports whether at least one packaged video
 // rendition is HARDWARE-playable on the client: it uses a codec the
 // client says it can decode AND its frame height is within the device's
-// HW decoder ceiling for that codec family (caps.VideoMaxHeight). The
-// current packager only emits a single video rendition (HEVC for
-// everything post-2024), so an item the client can't HW-decode — wrong
-// codec, OR right codec but the package is 4K and the device's HEVC
-// decoder tops out at 1080 — falls through to the on-demand libx264
+// HW decoder ceiling for that codec family (caps.VideoMaxHeight). A
+// package from before renditions.json has a single video rendition
+// (HEVC for everything post-2024), so an item the client can't HW-decode
+// — wrong codec, OR right codec but the package is 4K and the device's
+// HEVC decoder tops out at 1080 — falls through to the on-demand libx264
 // transcode ladder (which can downscale) instead of silently dropping
 // to the device's software decoder, which on tablets like the SM-T500
-// plays 4K HEVC unwatchably slowly.
+// plays 4K HEVC unwatchably slowly. A ladder package plays when one of
+// its rungs does; serveLadder then serves the client those rungs.
 //
 // The height gate is: VideoMaxHeight has no entry for the codec family,
 // OR the entry is 0 (no limit), OR rendition.Height <= the entry. A
@@ -248,23 +249,13 @@ func PackagedPlayableBy(itemID string, caps Caps) bool {
 	}
 	for _, v := range mf.Renditions.Video {
 		fam := codecFamily(v.Codec)
-		codecOK := false
-		switch fam {
-		case "h264":
-			codecOK = caps.Video["h264"] || caps.Video["avc1"]
-		case "hevc":
-			codecOK = caps.Video["hevc"] || caps.Video["hvc1"] || caps.Video["h265"]
-		case "vp9":
-			codecOK = caps.Video["vp9"]
-		case "av1":
-			codecOK = caps.Video["av1"]
-		default:
+		if fam == "" {
 			// Unknown codec string — assume playable rather than
 			// black-screen the user on a parse miss. No height gate
 			// applies because we have no family to look the cap up under.
 			return true
 		}
-		if !codecOK {
+		if !videoFamilyOK(fam, caps) {
 			continue
 		}
 		// Codec is supported. Apply the per-family HW height ceiling: an
@@ -378,26 +369,36 @@ func servePlaylistCachedTransform(w http.ResponseWriter, r *http.Request, path s
 	_, _ = w.Write(out)
 }
 
-// PackagedMaster serves the shaka-generated master.m3u8 with every
-// rendition URI rewritten to carry the inbound query string. Without
-// the rewrite the player would resolve `v0/playlist.m3u8` against the
-// master's URL and drop `?stream=…`, leaving subsequent rendition
-// fetches unauthenticated.
+// PackagedMaster serves the package's master.m3u8 as the client may
+// play it (serveLadder: one codec family at the heights its decoder
+// takes, the audio groups it decodes, or the one rung ?q= names), with
+// every rendition URI rewritten to carry the inbound query string.
+// Without the rewrite the player would resolve `v0/playlist.m3u8`
+// against the master's URL and drop `?stream=…`, leaving subsequent
+// rendition fetches unauthenticated. A master with one video rendition
+// and one audio group is served as packaged.
 func (h *HLSHandler) PackagedMaster(w http.ResponseWriter, r *http.Request) {
 	itemID := chi.URLParam(r, "itemId")
 	masterPath := packagePath(itemID, "hls", "master.m3u8")
-	// Shaka doesn't emit VIDEO-RANGE, so a packaged HDR HEVC rendition is
-	// mis-signalled as SDR and HDR displays never engage HDR mode. The package
-	// manifest carries a per-rendition HDR flag from a LOCAL file (no OIDC
-	// bearer needed — unlike re-resolving the source via katalog-api, which
-	// this stream-token'd path can't do), so stamp VIDEO-RANGE onto the variant
-	// lines when the package has any HDR rendition. Pure-SDR packages serve
-	// verbatim (byte-identical to before this change).
+	caps := ParseCaps(r.URL.Query().Get("caps"))
+	q := r.URL.Query().Get("q")
+	// An older shaka didn't emit VIDEO-RANGE, so a packaged HDR HEVC
+	// rendition is mis-signalled as SDR and HDR displays never engage HDR
+	// mode. The package manifest carries a per-rendition HDR flag from a
+	// LOCAL file (no OIDC bearer needed — unlike re-resolving the source via
+	// katalog-api, which this stream-token'd path can't do), so stamp
+	// VIDEO-RANGE onto the variant lines that lack it when the package has
+	// any HDR rendition.
+	var videoRange func(string) string
 	if mf, err := ReadPackageManifest(itemID); err == nil && manifestHasHDR(mf) {
-		servePlaylistCachedTransform(w, r, masterPath, injectVideoRangeTransform(mf))
-		return
+		videoRange = injectVideoRangeTransform(mf)
 	}
-	servePlaylistCached(w, r, masterPath)
+	servePlaylistCachedTransform(w, r, masterPath, func(body string) string {
+		if videoRange != nil {
+			body = videoRange(body)
+		}
+		return serveLadder(body, caps, q).body
+	})
 }
 
 // manifestHasHDR reports whether any packaged video rendition is HDR.

@@ -4,6 +4,8 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -114,5 +116,70 @@ func TestGoldenSingleRenditionMasterIsServedAsPackaged(t *testing.T) {
 				golden(t, "master-"+pname+"-"+qname+".m3u8", w.Body.String())
 			})
 		}
+	}
+}
+
+// Through the router: a ladder package's master is the client's share of
+// it, its URIs carrying the request's query (the stream token, caps, q),
+// so every rendition fetch is authorised and answered for the same client.
+func TestPackagedMasterServesTheClientsShareOfTheLadder(t *testing.T) {
+	usePackages(t, filepath.Join("testdata", "packages"))
+	h := &HLSHandler{}
+	const query = "?stream=dXNlci0xfDE3OTEwNjI5NDM.c2ln&caps=avc,aac"
+	w := get(h, "/api/play/"+pkgLadder+"/master.m3u8"+query)
+	if w.Code != 200 {
+		t.Fatalf("master: %d %q", w.Code, w.Body)
+	}
+	body := w.Body.String()
+	if got := servedVariants(body); !reflect.DeepEqual(got, []string{"v1/audio", "v2/audio"}) {
+		t.Errorf("variants %v:\n%s", got, body)
+	}
+	for _, uri := range []string{"\nv1/playlist.m3u8" + query + "\n", "\nv2/playlist.m3u8" + query + "\n",
+		`URI="a0/playlist.m3u8` + query + `"`, `URI="s1/playlist.m3u8` + query + `"`, `URI="v1/iframes.m3u8` + query + `"`} {
+		if !strings.Contains(body, uri) {
+			t.Errorf("master lacks %q:\n%s", uri, body)
+		}
+	}
+	if strings.Contains(body, "hvc1") || strings.Contains(body, "ec-3") {
+		t.Errorf("HEVC or E-AC-3 served to a client decoding neither:\n%s", body)
+	}
+
+	// The same package, another client: its own share, not the first
+	// client's from the cache.
+	w = get(h, "/api/play/"+pkgLadder+"/master.m3u8?caps=avc,hvc,aac,eac3&q=auto")
+	if got := servedVariants(w.Body.String()); !reflect.DeepEqual(got, []string{"v0/audio", "v0/audio-surround"}) {
+		t.Errorf("an HEVC + E-AC-3 client: %v", got)
+	}
+	// And the one rung it asks for.
+	w = get(h, "/api/play/"+pkgLadder+"/master.m3u8?caps=avc,hvc,aac&q=v2")
+	if got := servedVariants(w.Body.String()); !reflect.DeepEqual(got, []string{"v2/audio"}) {
+		t.Errorf("q=v2: %v", got)
+	}
+}
+
+// A client that decodes none of the rungs is not served the package: the
+// master falls through to the on-the-fly pipeline, as for any package
+// before the ladder.
+func TestPackagedLadderNoRungPlaysFallsThroughToTheTranscode(t *testing.T) {
+	usePackages(t, filepath.Join("testdata", "packages"))
+	captureLog(t)
+	root, src := mediaFile(t, "film.mkv")
+	cache, err := os.MkdirTemp("", "chino-stream-master-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(cache) })
+	h := &HLSHandler{
+		Catalog:    fakeKatalog(t, src),
+		MediaRoot:  root,
+		FFmpegBin:  fakeBin(t, "ffmpeg", "exit 1"),
+		FFprobeBin: probeFFprobe(t, probeJSON("matroska,webm", "hevc", 1920, 1080, "aac", 2, 8_000_000)),
+		CacheDir:   cache,
+	}
+	// Neither HEVC nor H.264 at 2160p: the uhd package's H.264 rungs are
+	// 1080p and 720p, over a 480 cap.
+	w := get(h, "/api/play/"+pkgUHD+"/master.m3u8?caps=avc:480,aac")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "\nhigh/index.m3u8") {
+		t.Errorf("want the transcode master: %d\n%s", w.Code, w.Body)
 	}
 }
