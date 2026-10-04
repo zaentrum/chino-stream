@@ -488,6 +488,31 @@ func TestLadderLeavesASingleRenditionMasterAlone(t *testing.T) {
 	}
 }
 
+// Where a client starts: the served master's first variant, the DEFAULT
+// rendition of its audio group, else the group's first — what hls.js
+// picks when a group marks no default (shaka's masters), AUTOSELECT or
+// not.
+func TestLadderStart(t *testing.T) {
+	body := "#EXTM3U\n" +
+		"#EXT-X-MEDIA:TYPE=AUDIO,URI=\"a0/playlist.m3u8\",GROUP-ID=\"audio\",LANGUAGE=\"en\",NAME=\"Commentary\",DEFAULT=NO\n" +
+		"#EXT-X-MEDIA:TYPE=AUDIO,URI=\"a1/playlist.m3u8\",GROUP-ID=\"audio\",LANGUAGE=\"en\",NAME=\"English\",DEFAULT=NO,AUTOSELECT=YES\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=5000000,CODECS=\"avc1.640028,mp4a.40.2\",RESOLUTION=1920x1080,AUDIO=\"audio\"\nv0/playlist.m3u8\n"
+	if s := ladderStart(body); s.video != "v0" || s.audio != "a0" {
+		t.Errorf("no default: %s/%s, want v0/a0", s.video, s.audio)
+	}
+	withDefault := strings.Replace(body, `NAME="English",DEFAULT=NO`, `NAME="English",DEFAULT=YES`, 1)
+	if s := ladderStart(withDefault); s.audio != "a1" {
+		t.Errorf("a default: %s, want a1", s.audio)
+	}
+	noAudio := "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,CODECS=\"avc1.640028\"\nv3/playlist.m3u8\n"
+	if s := ladderStart(noAudio); s.video != "v3" || s.audio != "" {
+		t.Errorf("no audio group: %s/%s", s.video, s.audio)
+	}
+	if s := ladderStart("#EXTM3U\n"); s.video != "" || s.audio != "" {
+		t.Errorf("no variant: %+v", s)
+	}
+}
+
 func TestHLSAttributes(t *testing.T) {
 	line := `#EXT-X-MEDIA:TYPE=AUDIO,URI="a0/playlist.m3u8?caps=avc,hvc:1080&q=v1",GROUP-ID="audio",NAME="Ton, Kommentar",DEFAULT=NO,CHANNELS="2"`
 	a := hlsAttributes(line)

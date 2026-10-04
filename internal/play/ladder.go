@@ -499,22 +499,17 @@ func (m *hlsMaster) served(body string) servedLadder {
 			group = append(group, md)
 		}
 	}
-	if len(group) > 0 {
-		idx := make([]int, len(group))
-		for i := range idx {
-			idx[i] = i
+	// The group's DEFAULT rendition, else its first: what hls.js starts
+	// on (it ignores AUTOSELECT when a group marks no default, as
+	// shaka's own masters do).
+	for _, md := range group {
+		if md.isDefault {
+			s.audio = md.rend
+			break
 		}
-		pick := -1
-		for i, md := range group {
-			if md.isDefault {
-				pick = i
-				break
-			}
-		}
-		if pick < 0 {
-			pick = pickDefault(group, idx, "")
-		}
-		s.audio = group[pick].rend
+	}
+	if s.audio == "" && len(group) > 0 {
+		s.audio = group[0].rend
 	}
 	return s
 }

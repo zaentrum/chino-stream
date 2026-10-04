@@ -136,7 +136,7 @@ func TestMasterFetchWarmsTheStartingVariant(t *testing.T) {
 		{"with t=13, from the segment holding it", pkgLadder, "?caps=avc,aac&t=13",
 			[]string{"hls/master.m3u8", "hls/v1/playlist.m3u8", "hls/v1/init.mp4", "hls/a0/playlist.m3u8", "hls/a0/init.mp4",
 				"hls/v1/seg-00003.m4s", "hls/v1/seg-00004.m4s", "hls/a0/seg-00003.m4s", "hls/a0/seg-00004.m4s"}},
-		{"a package before the ladder: its one variant, the first AUTOSELECT audio", pkgLegacy, "?caps=avc,hvc,aac",
+		{"a package before the ladder: its one variant, its first audio rendition", pkgLegacy, "?caps=avc,hvc,aac",
 			[]string{"hls/master.m3u8", "hls/v0/playlist.m3u8", "hls/v0/init.mp4", "hls/a0/playlist.m3u8", "hls/a0/init.mp4"}},
 	}
 	for _, tc := range cases {
