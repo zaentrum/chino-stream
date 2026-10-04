@@ -159,6 +159,11 @@ func (h *HLSHandler) Routes(r chi.Router) {
 	r.Get("/{rendId:[va][0-9]+}/iframes.m3u8", h.PackagedIframesPlaylist)
 	r.Get("/{rendId:[va][0-9]+}/init.mp4", h.PackagedInitSegment)
 	r.Get("/{rendId:[va][0-9]+}/seg-{seg:[0-9]+}.m4s", h.PackagedSegment)
+	// Packaged WebVTT subtitle renditions (sN, N = the sidecar's index):
+	// a media playlist of seg-NNNNN.vtt segments, no init. A master
+	// references them when the packager ran with HLS_SUBTITLES.
+	r.Get("/{rendId:s[0-9]+}/playlist.m3u8", h.PackagedRenditionPlaylist)
+	r.Get("/{rendId:s[0-9]+}/seg-{seg:[0-9]+}.vtt", h.PackagedSubtitleSegment)
 	// Trickplay (scrub-preview thumbnails). Player loads the VTT once
 	// then pulls one sprite per ~16.7 min window as the user scrubs.
 	r.Get("/trickplay/thumbnails.vtt", h.PackagedTrickplayVTT)

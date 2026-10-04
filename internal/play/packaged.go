@@ -205,8 +205,8 @@ func HasCompletedPackage(itemID string) bool {
 }
 
 // packagePath joins {item-root}/rel safely. The chi URL params are
-// constrained by route regex (^v[0-9]+$|^a[0-9]+$ for rendId, digits
-// for seg) so a hostile rendId can't traverse out of the item
+// constrained by route regex (^[va][0-9]+$ or ^s[0-9]+$ for rendId,
+// digits for seg) so a hostile rendId can't traverse out of the item
 // directory, but we still filepath.Clean before stat as a belt-and-
 // braces measure.
 func packagePath(itemID string, rel ...string) string {
@@ -508,6 +508,17 @@ func (h *HLSHandler) PackagedSegment(w http.ResponseWriter, r *http.Request) {
 	seg := chi.URLParam(r, "seg")
 	path := packagePath(itemID, "hls", rendID, "seg-"+seg+".m4s")
 	servePackagedStatic(w, r, path, "video/iso.segment", "segment not found")
+}
+
+// PackagedSubtitleSegment serves one WebVTT segment of a packaged
+// subtitle rendition. Path: /api/play/{itemId}/{rendId}/seg-{seg}.vtt,
+// rendId sN, the name shaka writes (seg-00001.vtt).
+func (h *HLSHandler) PackagedSubtitleSegment(w http.ResponseWriter, r *http.Request) {
+	itemID := chi.URLParam(r, "itemId")
+	rendID := chi.URLParam(r, "rendId")
+	seg := chi.URLParam(r, "seg")
+	path := packagePath(itemID, "hls", rendID, "seg-"+seg+".vtt")
+	servePackagedStatic(w, r, path, "text/vtt; charset=utf-8", "subtitle segment not found")
 }
 
 // packagedFileCache is an in-memory LRU-ish cache for packaged
