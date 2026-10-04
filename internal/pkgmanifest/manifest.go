@@ -59,6 +59,9 @@ type Manifest struct {
 	Subtitles  []Subtitle `json:"subtitles,omitempty"`
 	Trickplay  *Trickplay `json:"trickplay,omitempty"`
 	Trailers   []Trailer  `json:"trailers,omitempty"`
+	// HLS describes the master the packager assembled (packages written
+	// since renditions.json; nil before).
+	HLS *HLS `json:"hls,omitempty"`
 
 	// v1-only. Kept optional so old packages on disk still parse;
 	// new code should read DurationMs / Title at the top level.
@@ -90,12 +93,15 @@ func (m Manifest) EffectiveDurationMs() int64 {
 
 // Renditions enumerates the streamable tracks. Video and audio are
 // kept separate so the player can switch audio language independently
-// of video quality. Today we have one video rendition (HEVC
-// passthrough); the slice shape leaves room to add fallback renditions
-// per quality later without a schema change.
+// of video quality. Packages before renditions.json have one video
+// rendition; a ladder has one per rung, the top rung first.
 type Renditions struct {
 	Video []VideoRendition `json:"video"`
+	// Audio is the stereo AAC group ("audio"), one per source track.
 	Audio []AudioRendition `json:"audio"`
+	// AudioSurround is the 5.1 E-AC-3 / AC-3 group ("audio-surround")
+	// the packager writes with SURROUND_AUDIO; empty without.
+	AudioSurround []AudioRendition `json:"audioSurround,omitempty"`
 }
 
 // VideoRendition describes one packaged video track. Dir is the
@@ -112,19 +118,30 @@ type VideoRendition struct {
 	FrameRate      string `json:"frameRate"` // e.g. "24000/1001"
 	Segments       int    `json:"segments"`
 	TargetDuration int    `json:"targetDuration"` // seconds, for #EXT-X-TARGETDURATION
+	// Since renditions.json: the peak bit rate (RFC 8216, as BANDWIDTH
+	// counts it), SDR / PQ / HLG, the transcoder's rung name ("source",
+	// "720p") and its encoder ("copy", "h264_nvenc", …).
+	PeakBitrateBps int    `json:"peakBitrateBps,omitempty"`
+	VideoRange     string `json:"videoRange,omitempty"`
+	Label          string `json:"label,omitempty"`
+	Encoder        string `json:"encoder,omitempty"`
 }
 
 // AudioRendition describes one packaged audio track.
 type AudioRendition struct {
 	ID         string `json:"id"`       // e.g. "a0"
 	Dir        string `json:"dir"`      // e.g. "hls/a0"
-	Codec      string `json:"codec"`    // e.g. "mp4a.40.2"
+	Codec      string `json:"codec"`    // e.g. "mp4a.40.2", "ec-3"
 	Language   string `json:"language"` // ISO 639-2/3
 	Title      string `json:"title,omitempty"`
 	Default    bool   `json:"default"`
 	Channels   int    `json:"channels"`
 	BitrateBps int    `json:"bitrateBps"`
 	Segments   int    `json:"segments"`
+	// Since renditions.json: the HLS group ("audio", "audio-surround")
+	// and the rendition's NAME there.
+	Group string `json:"group,omitempty"`
+	Name  string `json:"name,omitempty"`
 }
 
 // Subtitle describes one extracted subtitle track. Format is always
@@ -137,6 +154,20 @@ type Subtitle struct {
 	Default  bool   `json:"default,omitempty"`
 	Forced   bool   `json:"forced,omitempty"`
 	Format   string `json:"format"` // "webvtt"
+	// HLS is the WebVTT track's HLS rendition dir ("hls/s0"), written
+	// for every visible WebVTT track since renditions.json. The master
+	// references it only when the packager ran with HLS_SUBTITLES.
+	HLS string `json:"hls,omitempty"`
+}
+
+// HLS is the manifest's description of the assembled master.
+type HLS struct {
+	Master         string   `json:"master"`         // "hls/master.m3u8"
+	SegmentSeconds int      `json:"segmentSeconds"` // the rungs' aligned segment length
+	AudioGroups    []string `json:"audioGroups"`    // e.g. ["audio", "audio-surround"]
+	// SubtitleGroup is the master's SUBTITLES group ("subs"), empty when
+	// the master references none.
+	SubtitleGroup string `json:"subtitleGroup,omitempty"`
 }
 
 // Trickplay holds scrub-preview thumbnail metadata. The player loads
