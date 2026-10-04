@@ -298,7 +298,7 @@ func ladderMaster(audio []string, groups map[string]string, subs ...string) stri
 // first. A group with several keeps the first. A SUBTITLES group keeps at
 // most one, and none stays none.
 func TestLadderLeavesOneDefaultPerAudioGroup(t *testing.T) {
-	codecs := map[string]string{"audio": "mp4a.40.2", "audio-surround": "ec-3"}
+	codecs := map[string]string{"audio": "mp4a.40.2", "audio-surround": "ec-3", "audio-ec3": "ec-3", "audio-ac3": "ac-3"}
 	stereo := []string{
 		`URI="a0/playlist.m3u8",GROUP-ID="audio",LANGUAGE="en",NAME="English",DEFAULT=NO,AUTOSELECT=YES,CHANNELS="2"`,
 		`URI="a1/playlist.m3u8",GROUP-ID="audio",LANGUAGE="de",NAME="German",DEFAULT=YES,AUTOSELECT=YES,CHANNELS="2"`,
@@ -340,6 +340,14 @@ func TestLadderLeavesOneDefaultPerAudioGroup(t *testing.T) {
 			},
 			[]string{"AUDIO audio a0 YES", "AUDIO audio a1 NO", "AUDIO audio-surround a2 YES",
 				"SUBTITLES subs s0 YES", "SUBTITLES subs s1 NO", "SUBTITLES subs s2 NO"}},
+		{"three groups: the language of the first group's default, not the last one's",
+			append(stereo,
+				`URI="a2/playlist.m3u8",GROUP-ID="audio-ec3",LANGUAGE="en",NAME="English 5.1",DEFAULT=YES,AUTOSELECT=YES,CHANNELS="6"`,
+				`URI="a3/playlist.m3u8",GROUP-ID="audio-ac3",LANGUAGE="en",NAME="English 5.1",DEFAULT=NO,AUTOSELECT=YES,CHANNELS="6"`,
+				`URI="a4/playlist.m3u8",GROUP-ID="audio-ac3",LANGUAGE="de",NAME="German 5.1",DEFAULT=NO,AUTOSELECT=YES,CHANNELS="6"`),
+			nil,
+			[]string{"AUDIO audio a0 NO", "AUDIO audio a1 YES", "AUDIO audio-ec3 a2 YES",
+				"AUDIO audio-ac3 a3 NO", "AUDIO audio-ac3 a4 YES"}},
 		{"no subtitle default stays none",
 			stereo,
 			[]string{
@@ -354,7 +362,7 @@ func TestLadderLeavesOneDefaultPerAudioGroup(t *testing.T) {
 			if len(tc.subs) > 0 {
 				body = strings.ReplaceAll(body, `,AUDIO=`, `,SUBTITLES="subs",AUDIO=`)
 			}
-			caps := ParseCaps("avc,hvc,aac,eac3")
+			caps := ParseCaps("avc,hvc,aac,eac3,ac3")
 			s := serveLadder(body, caps, "")
 			if got := servedMedia(s.body); !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("renditions\n got %v\nwant %v", got, tc.want)
@@ -494,6 +502,24 @@ func TestLadderLeavesASingleRenditionMasterAlone(t *testing.T) {
 	one = strings.ReplaceAll(one, "#EXT-X-STREAM-INF:BANDWIDTH=3000000,CODECS=\"avc1.64001f,ec-3\",RESOLUTION=1280x720,AUDIO=\"audio-surround\"\nv1/playlist.m3u8\n", "")
 	if got := servedVariants(serveLadder(one, ParseCaps("hvc,aac"), "").body); !reflect.DeepEqual(got, []string{"v0/audio"}) {
 		t.Errorf("one rendition with a 5.1 group: %v", got)
+	}
+}
+
+// A SUBTITLES group no variant served names is not listed either: here
+// only the HEVC rung's variant carries the group.
+func TestLadderListsOnlyTheGroupsItsVariantsName(t *testing.T) {
+	body := "#EXTM3U\n" +
+		"#EXT-X-MEDIA:TYPE=SUBTITLES,URI=\"s0/playlist.m3u8\",GROUP-ID=\"subs\",LANGUAGE=\"en\",NAME=\"English\",DEFAULT=NO\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=6000000,CODECS=\"hvc1.1.6.L120.90\",RESOLUTION=1920x1080,SUBTITLES=\"subs\"\nv0/playlist.m3u8\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=3000000,CODECS=\"avc1.64001f\",RESOLUTION=1280x720\nv1/playlist.m3u8\n"
+	caps := ParseCaps("avc")
+	s := serveLadder(body, caps, "")
+	if strings.Contains(s.body, "TYPE=SUBTITLES") {
+		t.Errorf("a SUBTITLES group no served variant names:\n%s", s.body)
+	}
+	checkServed(t, s.body, caps)
+	if hevc := serveLadder(body, ParseCaps("hvc"), ""); !strings.Contains(hevc.body, "TYPE=SUBTITLES") {
+		t.Errorf("the HEVC rung's group went:\n%s", hevc.body)
 	}
 }
 

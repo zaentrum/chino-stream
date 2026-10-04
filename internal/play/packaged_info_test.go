@@ -153,6 +153,16 @@ func TestPlayInfoOneEntryPerSize(t *testing.T) {
 		[]string{"auto Auto", "v1 1080p", "v2 720p"}) {
 		t.Errorf("H.264 client: %v", got)
 	}
+	// Whatever the master's order: an H.264 1080p listed before the HEVC
+	// one is still not an HEVC client's 1080p.
+	h264First := "#EXTM3U\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=8000000,CODECS=\"avc1.640028\",RESOLUTION=1920x1080\nv0/playlist.m3u8\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=6000000,CODECS=\"hvc1.1.6.L120.90\",RESOLUTION=1920x1080\nv1/playlist.m3u8\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=3000000,CODECS=\"avc1.64001f\",RESOLUTION=1280x720\nv2/playlist.m3u8\n"
+	if got := qualityNames(packagedQualities(h264First, ParseCaps("avc,hvc"))); !reflect.DeepEqual(got,
+		[]string{"auto Auto", "v1 1080p", "v2 720p"}) {
+		t.Errorf("H.264 listed first, HEVC client: %v", got)
+	}
 	// Listed tallest first whatever the master's order.
 	reordered := "#EXTM3U\n" +
 		"#EXT-X-STREAM-INF:BANDWIDTH=3000000,CODECS=\"avc1.64001f\",RESOLUTION=1280x720\nv2/playlist.m3u8\n" +
