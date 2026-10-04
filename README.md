@@ -78,6 +78,16 @@ ffmpeg's native `aac` encoder. The choice is logged at startup.
 docker build -t zaentrum/chino-stream .
 ```
 
+The image ships `ffmpeg` and `ffprobe` from BtbN's static GPL build of
+ffmpeg 7.1 (n7.1.5, the dated `autobuild-2026-07-31-14-10` archive, checked
+against its sha256; the transcoder image pins the same archive): NVENC
+(`h264_nvenc`, `hevc_nvenc`), the CUDA filters (`scale_cuda` with `format`),
+libx264 and ffmpeg's native AAC encoder. Ubuntu 22.04's ffmpeg 4.4 could do
+neither the NVENC path nor the stream-copy plan's keyframe probe. A mirror
+passes `--build-arg FFMPEG_BUILD_URL=… --build-arg FFMPEG_SHA256=…`. The CUDA
+base stays `nvidia/cuda:12.3.2-runtime-ubuntu22.04`; the build's NVENC SDK
+wants an NVIDIA driver ≥ ~550 on the GPU node.
+
 A private deploy mirror can pass `--build-arg BASE=<registry>/library/` to
 pull base images from an internal registry. Build and push the image to your
 own registry and update the image reference in the `k8s/` manifests for your

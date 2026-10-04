@@ -17,10 +17,11 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
     -o /out/chino-stream ./cmd/chino-stream
 
 # Stage 2: runtime. Built on nvidia/cuda:12.3.2-runtime-ubuntu22.04 so we
-# get h264_nvenc + hevc_nvenc + CUDA hwaccel decode out of the box. The
-# userspace CUDA libs ship with the image; libcuda.so.1 is bind-mounted
-# from the host by the NVIDIA device plugin at pod start. Pods scheduled
-# on non-GPU nodes still get a working ffmpeg (just no `-c:v h264_nvenc`).
+# get the userspace CUDA libs for h264_nvenc + hevc_nvenc + CUDA hwaccel
+# decode; libcuda.so.1 is bind-mounted from the host by the NVIDIA device
+# plugin at pod start. Pods scheduled on non-GPU nodes still get a working
+# ffmpeg (just no `-c:v h264_nvenc`). The base stays at 12.3.2, the one the
+# GPU nodes run today: a newer one is not verified on them.
 FROM ${BASE}nvidia/cuda:12.3.2-runtime-ubuntu22.04
 WORKDIR /app
 
@@ -28,18 +29,38 @@ ENV DEBIAN_FRONTEND=noninteractive \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
 
-# Install ffmpeg + ffprobe. The distro package works everywhere; for the
-# NVENC-accelerated transcode path you can swap in a static ffmpeg build
-# that links the NVIDIA encoders (set --build-arg to point at your own
-# mirror) — the Go service shells out to `ffmpeg`/`ffprobe` on $PATH and
-# does not care which build provides them, only that NVENC is present
-# when `-c:v h264_nvenc` is requested. Audio is encoded with whichever AAC
-# encoder the build has (libfdk_aac in a nonfree build, else ffmpeg's
-# native aac — what the distro package ships); /readyz fails when ffmpeg
-# has neither.
+# ffmpeg + ffprobe: BtbN's static GPL build of the ffmpeg 7.1 release
+# branch, pinned to a dated archive and checked against its sha256 — the
+# same archive the transcoder image pins. Not Ubuntu 22.04's ffmpeg 4.4.2:
+# its scale_cuda has no `format` option, so the NVENC path
+# (`scale_cuda=…:format=nv12`) cannot run on it, and its ffprobe answers
+# `-show_entries frame=pts_time` with empty fields, so the stream-copy
+# plan's keyframe fallback (probeKeyframes) finds none. The static build
+# links h264_nvenc, hevc_nvenc and the CUDA filters, and ffmpeg's native
+# aac encoder (a GPL build has no libfdk_aac; /readyz fails only when
+# ffmpeg has no AAC encoder at all). Its nvenc SDK wants an NVIDIA driver
+# >= ~550 on the node. Only the two binaries are installed.
+#
+# BtbN's rolling `latest` release drops a branch once newer ones ship;
+# the month-end `autobuild-YYYY-MM-31` releases are kept, and 2026-07-31
+# is the last with a 7.1 build (n7.1.5). The checksum is from that
+# release's checksums.sha256. Override with --build-arg
+# FFMPEG_BUILD_URL=... FFMPEG_SHA256=... to pin a mirror (an empty
+# FFMPEG_SHA256 skips the check).
+ARG FFMPEG_BUILD_URL=https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-31-14-10/ffmpeg-n7.1.5-12-g1fdbca85aa-linux64-gpl-7.1.tar.xz
+ARG FFMPEG_SHA256=c1e6caf48923dd8e6bc5e54d51ba70c321175b8162ae9c414c392990e72f0e79
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
+      ca-certificates curl xz-utils \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL "${FFMPEG_BUILD_URL}" -o /tmp/ffmpeg.tar.xz \
+    && if [ -n "${FFMPEG_SHA256}" ]; then \
+         echo "${FFMPEG_SHA256}  /tmp/ffmpeg.tar.xz" | sha256sum -c -; \
+       fi \
+    && mkdir -p /tmp/ffmpeg \
+    && tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ffmpeg --strip-components=1 \
+    && install -m 0755 /tmp/ffmpeg/bin/ffmpeg /usr/local/bin/ffmpeg \
+    && install -m 0755 /tmp/ffmpeg/bin/ffprobe /usr/local/bin/ffprobe \
+    && rm -rf /tmp/ffmpeg /tmp/ffmpeg.tar.xz
 
 # OpenShift runs containers with an arbitrary UID that belongs to GID 0.
 # Create a placeholder user so /tmp etc. work; OpenShift overrides UID anyway.
