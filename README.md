@@ -41,7 +41,7 @@ Dockerfile
 | GET    | `/api/play/packaged-ids`                     | which items are already packaged    |
 | GET    | `/api/play/zap-feed`                         | zap discovery feed                  |
 | GET    | `/api/play/{itemId}/subtitles/{idx}.vtt`     | embedded subtitle track             |
-| GET    | `/api/play/subs/{subID}.vtt` (and `.sup`…)   | sidecar subtitle files              |
+| GET    | `/api/play/subs/{subID}.vtt` (and `.sup`…)   | sidecar subtitle files (a SubRip one as WebVTT) |
 | GET    | `/api/play/{itemId}/master.m3u8`             | HLS master (packaged or on the fly) |
 | POST   | `/api/play/{itemId}/prewarm`                 | warm the start of a title (202)     |
 | GET    | `/api/play/{itemId}/{vN\|aN}/playlist.m3u8`   | packaged video / audio rendition    |

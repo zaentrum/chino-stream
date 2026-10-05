@@ -233,6 +233,11 @@ func (h *Handler) SidecarSubtitle(w http.ResponseWriter, r *http.Request) {
 	if a.Format == "vobsub" && reqExt == ".sub" {
 		mime = "application/octet-stream"
 	}
+	// A SubRip file at its .vtt URL is served as WebVTT (srt.go).
+	if a.Format == "srt" && reqExt == ".vtt" {
+		serveSRTAsWebVTT(w, r, clean, st)
+		return
+	}
 	w.Header().Set("Content-Type", mime)
 	// Subtitle bytes are immutable per package run; cache aggressively.
 	// Range requests on the bitmap formats matter for big PGS files
