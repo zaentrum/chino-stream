@@ -18,6 +18,7 @@ internal/catalog/client.go      # thin HTTP client to the catalog API
 internal/play/                  # playback core
   packaged.go                   #   pre-packaged CMAF byte-range serving
   ladder.go                     #   a packaged master as each client is served it
+  extras.go                     #   a title's extras (trailers, …), packaged apart from it
   passthrough.go                #   direct-play passthrough
   hls.go / transcode.go         #   on-demand HLS + ffmpeg/NVENC encoder args
   ffprobe.go                    #   source probing
@@ -48,6 +49,8 @@ Dockerfile
 | GET    | `/api/play/{itemId}/{vN}/iframes.m3u8`       | I-frame playlist of a video rung    |
 | GET    | `/api/play/{itemId}/{sN}/playlist.m3u8`, `seg-{n}.vtt` | packaged WebVTT rendition |
 | GET    | `/api/play/{itemId}/{high\|medium\|low}/…`, `copy/…`, `audio/{n}/…` | on-the-fly HLS |
+| GET    | `/api/play/{itemId}/extras/{extraId}/master.m3u8` | an extra's HLS master ([below](#extras)) |
+| GET    | `/api/play/{itemId}/extras/{extraId}/{vN\|aN\|sN}/…` | its renditions, as a packaged title's |
 
 Every `/api/play` route takes a bearer or `?stream=<token>` (chino-api's
 stream token). The URIs inside a playlist carry the request's query, so the
@@ -150,6 +153,34 @@ rendition of its audio group: media playlists and init segments, and with
 HEVC client and of any other client at its seek point. hls.js starts on the
 best level under `min(first BANDWIDTH, 5 Mbit/s)`, which for an HEVC top
 rung above that is the rung below it.
+
+## Extras
+
+A title's extras - its trailers, teasers, featurettes and other bonus
+material - are packages of their own in the package store,
+`extras/<aa>/<extraId>/`: laid out as an item's package, without trickplay,
+the manifest's `parentId` naming the movie or series and `extraKind` what the
+extra is. One is served under its title's id only:
+
+```
+GET /api/play/{itemId}/extras/{extraId}/master.m3u8            ?stream=&caps=&q=
+GET /api/play/{itemId}/extras/{extraId}/{vN|aN|sN}/playlist.m3u8
+GET /api/play/{itemId}/extras/{extraId}/{vN|aN}/iframes.m3u8, init.mp4, seg-{n}.m4s
+GET /api/play/{itemId}/extras/{extraId}/{sN}/seg-{n}.vtt
+```
+
+- Every route answers `404` unless `extraId` is a UUID, the package is
+  complete (`.complete`) and its manifest's `parentId` is `itemId`. chino-api
+  holds a viewer to the rating of the title in the URL; the parent check
+  makes that the extra's own title.
+- The master is the client's share of the ladder, by the rules above, its
+  URIs carrying the request's query. There is no on-the-fly pipeline for an
+  extra: the extras ladder is H.264 and stereo AAC, which every client
+  decodes, and a client that says it decodes none of it gets the master as
+  packaged.
+- An extra is no item: it is not among the packaged ids nor in the Zap pool,
+  it has no `/info`, `/prewarm` or trickplay, and `/api/play/{extraId}/…`
+  finds no package of it.
 
 ## Configuration
 
