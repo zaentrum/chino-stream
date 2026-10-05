@@ -498,7 +498,12 @@ func (h *HLSHandler) PackagedRenditionPlaylist(w http.ResponseWriter, r *http.Re
 func (h *HLSHandler) PackagedIframesPlaylist(w http.ResponseWriter, r *http.Request) {
 	itemID := chi.URLParam(r, "itemId")
 	rendID := chi.URLParam(r, "rendId")
-	path := packagePath(itemID, "hls", rendID, "iframes.m3u8")
+	serveIframesPlaylist(w, r, packagePath(itemID, "hls", rendID, "iframes.m3u8"))
+}
+
+// serveIframesPlaylist serves the I-frame playlist at path, its URIs
+// carrying the request's query.
+func serveIframesPlaylist(w http.ResponseWriter, r *http.Request, path string) {
 	body, err := os.ReadFile(path)
 	if err != nil {
 		http.Error(w, "iframes not found", http.StatusNotFound)
@@ -1043,7 +1048,7 @@ type manifestCacheEntry struct {
 	mtime time.Time
 }
 
-var manifestCache sync.Map // map[string]*manifestCacheEntry (itemId -> entry)
+var manifestCache sync.Map // map[string]*manifestCacheEntry (readManifest's key -> entry)
 
 // ReadPackageManifest parses the manifest.json sitting next to the
 // .complete sentinel. Returns nil + an error on read or parse failure
@@ -1058,17 +1063,22 @@ func ReadPackageManifest(itemID string) (*pkgmanifest.Manifest, error) {
 	if root == "" {
 		return nil, os.ErrNotExist
 	}
-	mfPath := filepath.Join(root, "manifest.json")
-	st, err := os.Stat(mfPath)
+	return readManifest(itemID, filepath.Join(root, "manifest.json"))
+}
+
+// readManifest parses the manifest.json at path, cached in manifestCache
+// under key until the file's mtime changes.
+func readManifest(key, path string) (*pkgmanifest.Manifest, error) {
+	st, err := os.Stat(path)
 	if err != nil {
 		return nil, err
 	}
-	if v, ok := manifestCache.Load(itemID); ok {
+	if v, ok := manifestCache.Load(key); ok {
 		if e := v.(*manifestCacheEntry); e.mtime.Equal(st.ModTime()) {
 			return e.mf, nil
 		}
 	}
-	raw, err := os.ReadFile(mfPath)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -1076,7 +1086,7 @@ func ReadPackageManifest(itemID string) (*pkgmanifest.Manifest, error) {
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return nil, err
 	}
-	manifestCache.Store(itemID, &manifestCacheEntry{mf: &m, mtime: st.ModTime()})
+	manifestCache.Store(key, &manifestCacheEntry{mf: &m, mtime: st.ModTime()})
 	return &m, nil
 }
 
