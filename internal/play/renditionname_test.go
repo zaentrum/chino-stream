@@ -7,8 +7,9 @@ import (
 	"testing"
 )
 
-// A rendition's NAME is its title where the title says what the track is,
-// else its language by name: "No dialogue" for zxx, "Unknown" for und.
+// A rendition's NAME is its language by name - "No dialogue" for zxx,
+// "Unknown" for und - then what its title says besides, as the packager
+// names its renditions; a track in no language what its title says.
 func TestAudioRenditionName(t *testing.T) {
 	cases := []struct {
 		lang, title, want string
@@ -25,10 +26,25 @@ func TestAudioRenditionName(t *testing.T) {
 		{"mis", "", "Other language"},
 		{"en-US", "", "English"},
 		{"fil", "", "fil"}, // no name for it: the code as it came
-		// A title that names the track.
-		{"eng", "Commentary", "Commentary"},
-		{"ger", "Deutsch", "Deutsch"},
+		// What a title says besides the language comes after it; a track in
+		// no language is called what its title says.
+		{"eng", "Commentary", "English · Commentary"},
+		{"eng", "English Commentary", "English · Commentary"},
+		{"eng", "English (SDH)", "English · SDH"},
+		{"eng", "English: Director's Cut", "English · Director's Cut"},
+		{"eng", "Englishman's tale", "English · Englishman's tale"},
 		{"und", "Director's Commentary", "Director's Commentary"},
+		{"", "Signs & Songs", "Signs & Songs"},
+		{"zxx", "Music & Effects", "No dialogue · Music & Effects"},
+		{"mul", "Original", "Multiple languages · Original"},
+		// The language again, by its name or as its speakers call it.
+		{"eng", "English", "English"},
+		{"ger", "Deutsch", "German"},
+		{"fre", "Français", "French"},
+		{"spa", "Español latino", "Spanish · latino"},
+		// Long words are cut at a word.
+		{"eng", "A very long commentary about the making of the film and its music",
+			"English · A very long commentary about the making…"},
 		// A title that describes the source's format says nothing of the
 		// rendition (stereo AAC).
 		{"eng", "AC3 5.1 @ 640 Kbps", "English"},
@@ -38,7 +54,7 @@ func TestAudioRenditionName(t *testing.T) {
 		{"und", "TrueHD Atmos 7.1", "Unknown"},
 		{"zxx", "AAC", "No dialogue"},
 		// A layout goes; what is left names the track.
-		{"eng", "Commentary 5.1", "Commentary"},
+		{"eng", "Commentary 5.1", "English · Commentary"},
 		{"eng", "Stereo", "English"},
 		{"eng", "English (5.1)", "English"},
 		{"spa", "Surround 7.1", "Spanish"},
@@ -48,8 +64,8 @@ func TestAudioRenditionName(t *testing.T) {
 		{"fre", "fre", "French"},
 		{"zxx", "zxx", "No dialogue"},
 		// Words that hold a format word are words.
-		{"eng", "Monologue", "Monologue"},
-		{"eng", "The Hobbit", "The Hobbit"},
+		{"eng", "Monologue", "English · Monologue"},
+		{"eng", "The Hobbit", "English · The Hobbit"},
 	}
 	for _, tc := range cases {
 		if got := audioRenditionName(TrackInfo{Language: tc.lang, Title: tc.title}); got != tc.want {
@@ -69,9 +85,35 @@ func TestAudioRenditionNamesAreUnique(t *testing.T) {
 		{Index: 4, Language: "zxx"},
 		{Index: 5, Language: "eng", Title: "Commentary"},
 	})
-	want := []string{"English", "English (2)", "Unknown", "Unknown (2)", "No dialogue", "Commentary"}
+	want := []string{"English", "English (2)", "Unknown", "Unknown (2)", "No dialogue", "English · Commentary"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("NAMEs %q, want %q", got, want)
+	}
+}
+
+// A subtitle track's name: its language, what its title says besides, and
+// "(forced)" for a forced one whose name does not say so.
+func TestSubtitleDisplayName(t *testing.T) {
+	cases := []struct {
+		lang, title string
+		forced      bool
+		want        string
+	}{
+		{"eng", "", false, "English"},
+		{"eng", "SDH", false, "English · SDH"},
+		{"eng", "English [CC]", false, "English · CC"},
+		{"eng", "", true, "English (forced)"},
+		{"eng", "Forced", true, "English · Forced"},
+		{"zxx", "", false, "No dialogue"},
+		{"und", "Signs", false, "Signs"},
+		{"und", "und", false, "Unknown"},
+		{"", "", true, "Unknown (forced)"},
+		{"mis", "", false, "Other language"},
+	}
+	for _, tc := range cases {
+		if got := subtitleDisplayName(tc.lang, tc.title, tc.forced); got != tc.want {
+			t.Errorf("language %q, title %q, forced %v: %q, want %q", tc.lang, tc.title, tc.forced, got, tc.want)
+		}
 	}
 }
 

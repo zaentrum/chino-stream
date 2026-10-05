@@ -1089,7 +1089,8 @@ func ReadPackageManifest(itemID string) (*pkgmanifest.Manifest, error) {
 // for that value. Audio tracks are taken from the manifest's actual
 // renditions (post-downmix, stereo AAC), not from a fresh probe of
 // the source file (which would still report the original surround
-// codec).
+// codec), each by its name (packagedAudioTracks), never by the source's
+// title.
 //
 // The video fields describe the rung the client starts on: the first
 // variant of the master it is served for caps and q. qualities is the
@@ -1111,17 +1112,7 @@ func writePackagedInfo(w http.ResponseWriter, itemID string, mf *pkgmanifest.Man
 		}
 		qualities = packagedQualities(master, caps)
 	}
-	audioTracks := make([]map[string]any, 0, len(mf.Renditions.Audio))
-	for i, a := range mf.Renditions.Audio {
-		audioTracks = append(audioTracks, map[string]any{
-			"index":    i,
-			"codec":    a.Codec, // always mp4a in packaged mode
-			"language": a.Language,
-			"title":    a.Title,
-			"default":  a.Default,
-			"channels": a.Channels, // always 2 in packaged mode
-		})
-	}
+	audioTracks := packagedAudioTracks(mf.Renditions.Audio)
 	// v2 manifests put the title at the top level; v1 manifests had
 	// only Source.Path. Prefer Title when present; fall back to the
 	// source-path basename for legacy packages.
@@ -1143,8 +1134,69 @@ func writePackagedInfo(w http.ResponseWriter, itemID string, mf *pkgmanifest.Man
 		"qualities":       qualities,
 		"default_quality": "auto",
 		"audio_tracks":    audioTracks,
-		"subtitle_tracks": mf.Subtitles,
+		"subtitle_tracks": packagedSubtitleTracks(mf.Subtitles),
 	})
+}
+
+// packagedAudioTracks are /play/info's audio_tracks of a package, one per
+// stereo rendition: its name as the packager wrote it ("English", "No
+// dialogue", "English · Commentary"), else - a manifest from before names -
+// trackDisplayName of its language and title, unique as the master's NAMEs
+// are. title is the same name, for a client that reads title: the source's
+// title as it is, free text that is often its codec ("AC3 5.1 @ 640 Kbps"),
+// is never a label.
+func packagedAudioTracks(renditions []pkgmanifest.AudioRendition) []map[string]any {
+	names := make([]string, len(renditions))
+	for i, a := range renditions {
+		if names[i] = strings.TrimSpace(a.Name); names[i] == "" {
+			names[i] = trackDisplayName(a.Language, a.Title)
+		}
+	}
+	names = uniqueNames(names)
+	out := make([]map[string]any, 0, len(renditions))
+	for i, a := range renditions {
+		out = append(out, map[string]any{
+			"index":    i,
+			"codec":    a.Codec, // always mp4a in packaged mode
+			"language": a.Language,
+			"name":     names[i],
+			"title":    names[i],
+			"default":  a.Default,
+			"channels": a.Channels, // always 2 in packaged mode
+		})
+	}
+	return out
+}
+
+// packagedSubtitleTracks are /play/info's subtitle_tracks of a package, its
+// sidecars as the manifest lists them - the source's own tracks, then the
+// subtitle files from next to it (external), whose sN count on past them -
+// each with its name: the packager's, else subtitleDisplayName of its
+// language, title and forced flag. title is the same name, never the
+// source's title as it is.
+func packagedSubtitleTracks(subs []pkgmanifest.Subtitle) []map[string]any {
+	out := make([]map[string]any, 0, len(subs))
+	for _, s := range subs {
+		name := strings.TrimSpace(s.Name)
+		if name == "" {
+			name = subtitleDisplayName(s.Language, s.Title, s.Forced)
+		}
+		e := map[string]any{"id": s.ID, "path": s.Path, "language": s.Language, "name": name, "title": name, "format": s.Format}
+		if s.Default {
+			e["default"] = true
+		}
+		if s.Forced {
+			e["forced"] = true
+		}
+		if s.HLS != "" {
+			e["hls"] = s.HLS
+		}
+		if s.External {
+			e["external"] = true
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 // readPackagedMaster is the item's hls/master.m3u8 as packaged, through

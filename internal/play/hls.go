@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -546,129 +545,6 @@ func defaultAudioIndex(tracks []TrackInfo) int {
 		return tracks[0].Index
 	}
 	return 0
-}
-
-// audioRenditionNames are the NAMEs of the master's audio renditions, in
-// track order: each track's audioRenditionName, made unique in the group as
-// RFC 8216 wants them - a second "English" is "English (2)".
-func audioRenditionNames(tracks []TrackInfo) []string {
-	names := make([]string, len(tracks))
-	used := make(map[string]bool, len(tracks))
-	for i, t := range tracks {
-		base := audioRenditionName(t)
-		name := base
-		for n := 2; used[name]; n++ {
-			name = fmt.Sprintf("%s (%d)", base, n)
-		}
-		used[name] = true
-		names[i] = name
-	}
-	return names
-}
-
-// audioRenditionName is what a player lists an audio rendition as: the
-// track's title where it says what the track is ("Commentary"), else its
-// language by name ("English", "No dialogue"). Clients name a track by its
-// LANGUAGE first and fall back to the NAME; players that show the NAME show
-// this.
-func audioRenditionName(t TrackInfo) string {
-	if title := trackTitle(t.Title); title != "" {
-		return title
-	}
-	return langDisplay(t.Language)
-}
-
-var (
-	// formatWords mark a title that describes the source's audio format -
-	// a codec, a bitrate, a sample rate or depth ("AC3 5.1 @ 640 Kbps",
-	// "DTS-HD MA 5.1"), as the packager's codec hints do. It says nothing of
-	// the rendition, which is AAC whatever the source was.
-	formatWords = regexp.MustCompile(`(?i)(^|[^a-z0-9])(dts(-hd)?|truehd|atmos|dolby|e?-?ac-?3|ddp?\+?|aac|flac|l?pcm|opus|mp3|vorbis|lossless|master audio|\d+ ?k?hz|\d* ?[km]bps|kb/s|\d+[- ]?bit)($|[^a-z0-9])`)
-	// layoutWords are a channel layout, which goes from a title that names
-	// the track ("Commentary 5.1" is "Commentary"): the rendition is stereo.
-	layoutWords = regexp.MustCompile(`(?i)(^|[^a-z0-9.])(?:mono|stereo|surround|[1-9]\.[0-2]|\d{1,2} ?ch(?:annels?)?)($|[^a-z0-9.])`)
-	// emptyBrackets are what a layout in brackets leaves ("English (5.1)").
-	emptyBrackets = regexp.MustCompile(`\(\s*\)|\[\s*\]`)
-	// numberedTitle only numbers the track ("Track 2", "Audio Track 1",
-	// "Audio", "2").
-	numberedTitle = regexp.MustCompile(`(?i)^(?:audio|sound|track|stream|[\s#])*\d*$`)
-	// codeTitle is a language code and no more ("eng", "en-US").
-	codeTitle = regexp.MustCompile(`(?i)^[a-z]{2,3}([-_][a-z0-9]{1,8})*$`)
-)
-
-// trackTitle is what a track's title says about the track, or "" when it
-// says nothing: no title, a format, a number, a code.
-func trackTitle(title string) string {
-	if formatWords.MatchString(title) {
-		return ""
-	}
-	t := title
-	for layoutWords.MatchString(t) {
-		t = layoutWords.ReplaceAllString(t, "${1}${2}")
-	}
-	t = emptyBrackets.ReplaceAllString(t, "")
-	t = strings.Trim(strings.Join(strings.Fields(t), " "), " -–—:·,|/")
-	if numberedTitle.MatchString(t) || codeTitle.MatchString(t) {
-		return ""
-	}
-	return t
-}
-
-// languageNames are the English names of the languages a library carries,
-// by ISO 639-2/T, 639-2/B and 639-1 code.
-var languageNames = map[string]string{
-	"eng": "English", "en": "English",
-	"deu": "German", "ger": "German", "de": "German",
-	"fra": "French", "fre": "French", "fr": "French",
-	"spa": "Spanish", "es": "Spanish",
-	"ita": "Italian", "it": "Italian",
-	"jpn": "Japanese", "ja": "Japanese",
-	"zho": "Chinese", "chi": "Chinese", "zh": "Chinese",
-	"por": "Portuguese", "pt": "Portuguese",
-	"rus": "Russian", "ru": "Russian",
-	"nld": "Dutch", "dut": "Dutch", "nl": "Dutch",
-	"kor": "Korean", "ko": "Korean",
-	"pol": "Polish", "pl": "Polish",
-	"swe": "Swedish", "sv": "Swedish",
-	"nor": "Norwegian", "no": "Norwegian",
-	"dan": "Danish", "da": "Danish",
-	"fin": "Finnish", "fi": "Finnish",
-	"tur": "Turkish", "tr": "Turkish",
-	"ces": "Czech", "cze": "Czech", "cs": "Czech",
-	"ell": "Greek", "gre": "Greek", "el": "Greek",
-	"hun": "Hungarian", "hu": "Hungarian",
-	"ron": "Romanian", "rum": "Romanian", "ro": "Romanian",
-	"heb": "Hebrew", "he": "Hebrew",
-	"ara": "Arabic", "ar": "Arabic",
-	"hin": "Hindi", "hi": "Hindi",
-	"tha": "Thai", "th": "Thai",
-	"vie": "Vietnamese", "vi": "Vietnamese",
-	"ukr": "Ukrainian", "uk": "Ukrainian",
-	"gsw": "Swiss German",
-}
-
-// langDisplay names an ISO 639 code in English ("eng", "en", "en-US":
-// "English"). "zxx" - no linguistic content, a film without dialogue - is
-// "No dialogue", "mul" "Multiple languages", "mis" (a language with no code)
-// "Other language"; "und" or none is "Unknown". A code it has no name for
-// comes back as it is.
-func langDisplay(code string) string {
-	primary, _, _ := strings.Cut(strings.ToLower(strings.TrimSpace(code)), "-")
-	primary, _, _ = strings.Cut(primary, "_")
-	switch primary {
-	case "", "und":
-		return "Unknown"
-	case "zxx":
-		return "No dialogue"
-	case "mul":
-		return "Multiple languages"
-	case "mis":
-		return "Other language"
-	}
-	if name, ok := languageNames[primary]; ok {
-		return name
-	}
-	return code
 }
 
 // Playlist returns the media playlist for one quality variant. Lists

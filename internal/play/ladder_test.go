@@ -386,6 +386,44 @@ func TestLadderLeavesOneDefaultPerAudioGroup(t *testing.T) {
 	}
 }
 
+// A rendition without dialogue (zxx) or in no known language (no
+// LANGUAGE: und) is served like any other - the filter drops only what a
+// client cannot decode - and the 5.1 group's default is the one without
+// dialogue when that is the stereo default's. A subtitle file from next to
+// the source is a rendition past the source's own (s5), and stays.
+func TestLadderKeepsTracksInNoLanguage(t *testing.T) {
+	codecs := map[string]string{"audio": "mp4a.40.2", "audio-surround": "ec-3"}
+	audio := []string{
+		`URI="a0/playlist.m3u8",GROUP-ID="audio",LANGUAGE="zxx",NAME="No dialogue",DEFAULT=YES,AUTOSELECT=YES,CHANNELS="2"`,
+		`URI="a1/playlist.m3u8",GROUP-ID="audio",NAME="Unknown",DEFAULT=NO,AUTOSELECT=YES,CHANNELS="2"`,
+		`URI="a2/playlist.m3u8",GROUP-ID="audio-surround",NAME="Unknown 5.1",DEFAULT=NO,AUTOSELECT=YES,CHANNELS="6"`,
+		`URI="a3/playlist.m3u8",GROUP-ID="audio-surround",LANGUAGE="zxx",NAME="No dialogue 5.1",DEFAULT=NO,AUTOSELECT=YES,CHANNELS="6"`,
+	}
+	subs := []string{
+		`URI="s0/playlist.m3u8",GROUP-ID="subs",LANGUAGE="en",NAME="English",DEFAULT=NO,AUTOSELECT=YES`,
+		`URI="s5/playlist.m3u8",GROUP-ID="subs",NAME="Unknown",DEFAULT=NO,AUTOSELECT=YES`,
+	}
+	body := strings.ReplaceAll(ladderMaster(audio, codecs, subs...), `,AUDIO=`, `,SUBTITLES="subs",AUDIO=`)
+	for _, tc := range []struct {
+		caps string
+		want []string
+	}{
+		{"avc,hvc,aac,eac3", []string{"AUDIO audio a0 YES", "AUDIO audio a1 NO", "AUDIO audio-surround a2 NO",
+			"AUDIO audio-surround a3 YES", "SUBTITLES subs s0 NO", "SUBTITLES subs s5 NO"}},
+		{"avc,aac", []string{"AUDIO audio a0 YES", "AUDIO audio a1 NO", "SUBTITLES subs s0 NO", "SUBTITLES subs s5 NO"}},
+	} {
+		caps := ParseCaps(tc.caps)
+		s := serveLadder(body, caps, "")
+		if got := servedMedia(s.body); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: renditions\n got %v\nwant %v", tc.caps, got, tc.want)
+		}
+		checkServed(t, s.body, caps)
+		if s.audio != "a0" {
+			t.Errorf("%s: starts on %s, want the default a0", tc.caps, s.audio)
+		}
+	}
+}
+
 // withoutDefault is line with its DEFAULT value blanked out.
 func withoutDefault(line string) string {
 	for _, a := range hlsAttributeSpans(line) {

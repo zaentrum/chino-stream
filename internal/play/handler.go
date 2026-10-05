@@ -501,10 +501,43 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 		"reason":          reason,
 		"qualities":       ladder,
 		"default_quality": "high",
-		"audio_tracks":    probe.AudioTracks,
-		"subtitle_tracks": probe.SubtitleTracks,
+		"audio_tracks":    infoTracks(probe.AudioTracks, audioRenditionNames(probe.AudioTracks)),
+		"subtitle_tracks": infoTracks(probe.SubtitleTracks, subtitleNames(probe.SubtitleTracks)),
 		"encoder":         encoder,
 	})
+}
+
+// infoTracks are a source's tracks as /play/info lists them: as ffprobe
+// found them, each with its name - an audio track's the master's NAME for
+// it - and title the same name, for a client that reads title. The source's
+// title as it is, free text that is often its codec ("AC3 5.1 @ 640 Kbps"),
+// is never a label.
+func infoTracks(tracks []TrackInfo, names []string) []map[string]any {
+	out := make([]map[string]any, 0, len(tracks))
+	for i, t := range tracks {
+		e := map[string]any{"index": t.Index, "codec": t.Codec, "language": t.Language, "name": names[i], "title": names[i]}
+		if t.Default {
+			e["default"] = true
+		}
+		if t.Forced {
+			e["forced"] = true
+		}
+		if t.Channels != 0 {
+			e["channels"] = t.Channels
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// subtitleNames are the names of a source's subtitle tracks
+// (subtitleDisplayName: "English", "English · SDH", "English (forced)").
+func subtitleNames(tracks []TrackInfo) []string {
+	names := make([]string, len(tracks))
+	for i, t := range tracks {
+		names[i] = subtitleDisplayName(t.Language, t.Title, t.Forced)
+	}
+	return names
 }
 
 // passthrough streams the file directly with full byte-range support

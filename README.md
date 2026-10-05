@@ -126,7 +126,16 @@ starts on and what it may pick:
 - `default_quality`: `auto`.
 - `audio_tracks` lists the stereo tracks only; `subtitle_tracks` the
   sidecars, each WebVTT one with its HLS rendition dir (`hls`) when it has
-  one.
+  one: the source's own tracks, then the subtitle files from next to it
+  (`external`), whose `sN` count on past them.
+- Each track has a `name`: the packager's ("English", "No dialogue",
+  "English · Commentary"), else - a package from before names - its
+  language's name, then what its title says besides, the rule the packager
+  names its renditions by. `title` is the same name, for a client that
+  reads `title`; the source's title as it is (free text, often the source's
+  codec: "AC3 5.1 @ 640 Kbps") is never sent. On the fly, `/info` names a
+  source's tracks by the same rule, an audio track as the master's `NAME`
+  does.
 
 A quality menu shows `qualities` when it has two or more entries, by
 `label`, and on a pick reloads the master with `q=<name>` (`auto` back to

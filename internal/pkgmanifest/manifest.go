@@ -129,17 +129,18 @@ type VideoRendition struct {
 
 // AudioRendition describes one packaged audio track.
 type AudioRendition struct {
-	ID         string `json:"id"`       // e.g. "a0"
-	Dir        string `json:"dir"`      // e.g. "hls/a0"
-	Codec      string `json:"codec"`    // e.g. "mp4a.40.2", "ec-3"
-	Language   string `json:"language"` // ISO 639-2/3
-	Title      string `json:"title,omitempty"`
+	ID         string `json:"id"`              // e.g. "a0"
+	Dir        string `json:"dir"`             // e.g. "hls/a0"
+	Codec      string `json:"codec"`           // e.g. "mp4a.40.2", "ec-3"
+	Language   string `json:"language"`        // ISO 639-2/3
+	Title      string `json:"title,omitempty"` // the source's title as it is (free text)
 	Default    bool   `json:"default"`
 	Channels   int    `json:"channels"`
 	BitrateBps int    `json:"bitrateBps"`
 	Segments   int    `json:"segments"`
 	// Since renditions.json: the HLS group ("audio", "audio-surround")
-	// and the rendition's NAME there.
+	// and the rendition's NAME there, what the track is called ("English",
+	// "No dialogue", "English · Commentary").
 	Group string `json:"group,omitempty"`
 	Name  string `json:"name,omitempty"`
 }
@@ -150,14 +151,20 @@ type Subtitle struct {
 	ID       string `json:"id"`
 	Path     string `json:"path"` // relative, e.g. "subs/0.vtt"
 	Language string `json:"language"`
-	Title    string `json:"title,omitempty"`
-	Default  bool   `json:"default,omitempty"`
-	Forced   bool   `json:"forced,omitempty"`
-	Format   string `json:"format"` // "webvtt"
+	// Title is the source's title as it is (free text); Name, where the
+	// packager writes one, what the track is called ("English · SDH").
+	Title   string `json:"title,omitempty"`
+	Name    string `json:"name,omitempty"`
+	Default bool   `json:"default,omitempty"`
+	Forced  bool   `json:"forced,omitempty"`
+	Format  string `json:"format"` // "webvtt"
 	// HLS is the WebVTT track's HLS rendition dir ("hls/s0"), written
 	// for every visible WebVTT track since renditions.json. The master
 	// references it only when the packager ran with HLS_SUBTITLES.
 	HLS string `json:"hls,omitempty"`
+	// External marks a subtitle file from next to the source, packaged
+	// after the source's own tracks: its sN counts on past them.
+	External bool `json:"external,omitempty"`
 }
 
 // HLS is the manifest's description of the assembled master.
