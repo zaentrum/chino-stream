@@ -41,6 +41,10 @@ var PackagesRoot = "/var/lib/katalog/packages"
 // Known top-level category dirs the analyzer writes to. The stream
 // side probes these on read to locate a package for a given item id
 // (it doesn't know the item type from the URL alone).
+//
+// extras, where a title's extras are packaged, is not one and must not
+// become one: an extra is no item, never in the packaged ids or the Zap
+// pool, and served only under its title (extras.go).
 var packageCategories = []string{"movies", "shows", "music", "other"}
 
 // itemRootCache memoises the resolved package directory per item id
@@ -1048,7 +1052,9 @@ type manifestCacheEntry struct {
 	mtime time.Time
 }
 
-var manifestCache sync.Map // map[string]*manifestCacheEntry (readManifest's key -> entry)
+// manifestCache is keyed by an item's id, and by extras/<extraId> for an
+// extra's package (extras.go).
+var manifestCache sync.Map // map[string]*manifestCacheEntry (key -> entry)
 
 // ReadPackageManifest parses the manifest.json sitting next to the
 // .complete sentinel. Returns nil + an error on read or parse failure

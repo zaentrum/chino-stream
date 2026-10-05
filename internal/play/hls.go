@@ -168,6 +168,10 @@ func (h *HLSHandler) Routes(r chi.Router) {
 	// then pulls one sprite per ~16.7 min window as the user scrubs.
 	r.Get("/trickplay/thumbnails.vtt", h.PackagedTrickplayVTT)
 	r.Get("/trickplay/sprite-{n:[0-9]+}.jpg", h.PackagedTrickplaySprite)
+	// The title's extras (trailers, featurettes, … packaged apart from it,
+	// extras.go): an extra's master and renditions, packaged only. The
+	// static "extras" segment cannot collide with a rendition id.
+	r.Route("/extras/{extraId}", h.extraRoutes)
 }
 
 // probeCache memoises ffprobe results to skip the ~150-250 ms per-call
