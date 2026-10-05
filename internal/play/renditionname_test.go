@@ -20,6 +20,9 @@ func TestAudioRenditionName(t *testing.T) {
 		{"ZXX", "", "No dialogue"},
 		{"und", "", "Unknown"},
 		{"", "", "Unknown"},
+		{"mul", "", "Multiple languages"},
+		{"MUL", "mul", "Multiple languages"},
+		{"mis", "", "Other language"},
 		{"en-US", "", "English"},
 		{"fil", "", "fil"}, // no name for it: the code as it came
 		// A title that names the track.

@@ -649,8 +649,9 @@ var languageNames = map[string]string{
 
 // langDisplay names an ISO 639 code in English ("eng", "en", "en-US":
 // "English"). "zxx" - no linguistic content, a film without dialogue - is
-// "No dialogue"; "und" or none is "Unknown". A code it has no name for comes
-// back as it is.
+// "No dialogue", "mul" "Multiple languages", "mis" (a language with no code)
+// "Other language"; "und" or none is "Unknown". A code it has no name for
+// comes back as it is.
 func langDisplay(code string) string {
 	primary, _, _ := strings.Cut(strings.ToLower(strings.TrimSpace(code)), "-")
 	primary, _, _ = strings.Cut(primary, "_")
@@ -659,6 +660,10 @@ func langDisplay(code string) string {
 		return "Unknown"
 	case "zxx":
 		return "No dialogue"
+	case "mul":
+		return "Multiple languages"
+	case "mis":
+		return "Other language"
 	}
 	if name, ok := languageNames[primary]; ok {
 		return name
