@@ -65,6 +65,32 @@ func TestLadderManifestFields(t *testing.T) {
 	}
 }
 
+// An extra's manifest is an item's, plus the title it belongs to and its
+// kind, without trickplay; an item's has neither.
+func TestExtraManifestFields(t *testing.T) {
+	var m Manifest
+	if err := json.Unmarshal([]byte(`{"version":2,"itemId":"7a11e700-0000-4000-8000-000000000009","type":"extra",
+		"parentId":"57e2e0a0-0000-4000-8000-000000000008","extraKind":"trailer","title":"Trailer",
+		"year":null,"tmdbId":null,"durationMs":20021,
+		"renditions":{"video":[{"id":"v0","dir":"hls/v0","codec":"avc1.64001f","width":1280,"height":720}],
+		              "audio":[{"id":"a0","dir":"hls/a0","codec":"mp4a.40.2","language":"eng","default":true,"channels":2}],
+		              "audioSurround":[]},
+		"subtitles":[],"hls":{"master":"hls/master.m3u8","segmentSeconds":6,"audioGroups":["audio"],"subtitleGroup":null}}`), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m.Type != "extra" || m.ParentID != "57e2e0a0-0000-4000-8000-000000000008" || m.ExtraKind != "trailer" ||
+		m.Trickplay != nil || m.EffectiveDurationMs() != 20021 {
+		t.Errorf("%+v", m)
+	}
+	var item Manifest
+	if err := json.Unmarshal([]byte(ladderManifest), &item); err != nil {
+		t.Fatal(err)
+	}
+	if item.ParentID != "" || item.ExtraKind != "" {
+		t.Errorf("an item's manifest: parentId %q, extraKind %q", item.ParentID, item.ExtraKind)
+	}
+}
+
 // The packager writes "subtitleGroup": null when the master references no
 // subtitles, and a package from before renditions.json has no hls block.
 func TestManifestWithoutLadderFields(t *testing.T) {

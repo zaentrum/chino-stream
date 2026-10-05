@@ -54,6 +54,13 @@ type Manifest struct {
 	EpisodeNumber *int   `json:"episodeNumber,omitempty"`
 	EpisodeCode   string `json:"episodeCode,omitempty"` // e.g. "S01E03"
 
+	// An extra's package only (type "extra", under packages/extras/, its
+	// ItemID the extra's id): the title it belongs to, a movie's or a
+	// series' id, and what it is (katalog-manager's kind: trailer, teaser,
+	// featurette, …). Empty on an item's package.
+	ParentID  string `json:"parentId,omitempty"`
+	ExtraKind string `json:"extraKind,omitempty"`
+
 	// Renditions + adjuncts are version-independent.
 	Renditions Renditions `json:"renditions"`
 	Subtitles  []Subtitle `json:"subtitles,omitempty"`
@@ -194,6 +201,9 @@ type Trickplay struct {
 // trailer, downloaded once at package time). Each trailer has its own
 // mini-manifest at ManifestPath so the player can play it via the
 // same HLS pipeline as the main feature.
+//
+// Legacy: no packager writes it. A title's trailers and other extras are
+// packages of their own (packages/extras/, ParentID naming the title).
 type Trailer struct {
 	ID           string `json:"id"`
 	Source       string `json:"source"` // e.g. "tmdb:603692" or "local:/path/to/trailer.mp4"
