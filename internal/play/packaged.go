@@ -644,17 +644,7 @@ func servePackagedStatic(w http.ResponseWriter, r *http.Request, path, contentTy
 		http.Error(w, "read failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	entry := &packagedCacheEntry{bytes: data, mtime: mtime}
-	entry.lastTouch.Store(time.Now().UnixNano())
-	if v, loaded := packagedCache.LoadOrStore(path, entry); loaded {
-		entry = v.(*packagedCacheEntry)
-	} else {
-		newTotal := packagedCacheBytes.Add(int64(len(data)))
-		if newTotal > packagedCacheBudgetBytes {
-			go evictPackagedCache()
-		}
-	}
-	entry.lastTouch.Store(time.Now().UnixNano())
+	entry := storePackaged(path, data, mtime)
 
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
@@ -923,17 +913,26 @@ func readPackagedBytes(path string, mtime time.Time) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	return storePackaged(path, data, mtime).bytes, nil
+}
+
+// storePackaged puts path's bytes, read when the file had mtime, in
+// packagedCache in place of whatever it held for path. An entry of another
+// mtime is the file as it was: a title packaged again writes the same paths,
+// and keeping that entry served the earlier package's master, playlists and
+// segments until the entry was evicted, which a path the Zap pool pins never
+// is. The caller holds path's load lock (packagedLoadLock).
+func storePackaged(path string, data []byte, mtime time.Time) *packagedCacheEntry {
 	entry := &packagedCacheEntry{bytes: data, mtime: mtime}
 	entry.lastTouch.Store(time.Now().UnixNano())
-	if v, loaded := packagedCache.LoadOrStore(path, entry); loaded {
-		v.(*packagedCacheEntry).lastTouch.Store(time.Now().UnixNano())
-		return v.(*packagedCacheEntry).bytes, nil
+	delta := int64(len(data))
+	if old, loaded := packagedCache.Swap(path, entry); loaded {
+		delta -= int64(len(old.(*packagedCacheEntry).bytes))
 	}
-	newTotal := packagedCacheBytes.Add(int64(len(data)))
-	if newTotal > packagedCacheBudgetBytes {
+	if packagedCacheBytes.Add(delta) > packagedCacheBudgetBytes {
 		go evictPackagedCache()
 	}
-	return data, nil
+	return entry
 }
 
 // warmPackagedFile loads a packaged static file into packagedCache
