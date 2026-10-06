@@ -3,10 +3,12 @@
 Streaming origin for the **chino** product on the zaentrum platform. Serves
 on-demand playback: pre-packaged CMAF byte-range delivery when an asset has
 already been packaged, and on-the-fly HLS transcoding (optionally NVENC-
-accelerated) for codecs a client can't decode (HEVC / DTS / AC3 / TrueHD).
+accelerated) for codecs a client can't decode (HEVC / DTS / AC3 / TrueHD) —
+from the original, or once that is retired from the package itself.
 
-It reads item-to-file mappings from the catalog API (the read side of the
-CQRS split) rather than touching the catalog database directly.
+It asks the catalog API (the read side of the CQRS split) where an item's
+original and package are rather than touching the catalog database, and
+never works a path out itself ([below](#where-a-title-plays-from)).
 
 ## Layout
 
@@ -16,14 +18,17 @@ internal/http/router.go         # routes: /healthz, /readyz, /metrics, /api/play
 internal/auth/                  # OIDC bearer verification + per-stream token checks
 internal/catalog/client.go      # thin HTTP client to the catalog API
 internal/play/                  # playback core
+  resolve.go                    #   where an item's or an extra's package is (katalog-api, cached)
   packaged.go                   #   pre-packaged CMAF byte-range serving
   ladder.go                     #   a packaged master as each client is served it
   extras.go                     #   a title's extras (trailers, …), packaged apart from it
   passthrough.go                #   direct-play passthrough
   hls.go / transcode.go         #   on-demand HLS + ffmpeg/NVENC encoder args
+  source.go                     #   what on-the-fly reads: the original, else the package
+  window.go                     #   a window's segments served as ffmpeg finishes them
   ffprobe.go                    #   source probing
   zappool.go                    #   zap-feed warm-pool
-internal/pkgmanifest/manifest.go # package manifest schema (CMAF, subtitles, trickplay)
+internal/pkgmanifest/           # a package's manifest.json, and a library package.json read as one
 internal/metrics/metrics.go     # Prometheus metrics
 k8s/                            # Deployment, Service, PVCs, ServiceMonitor, GrafanaDashboard
 Dockerfile
@@ -51,10 +56,56 @@ Dockerfile
 | GET    | `/api/play/{itemId}/{high\|medium\|low}/…`, `copy/…`, `audio/{n}/…` | on-the-fly HLS |
 | GET    | `/api/play/{itemId}/extras/{extraId}/master.m3u8` | an extra's HLS master ([below](#extras)) |
 | GET    | `/api/play/{itemId}/extras/{extraId}/{vN\|aN\|sN}/…` | its renditions, as a packaged title's |
+| GET    | `/api/play/{itemId}/extras/{extraId}/{high\|medium\|low}/…`, `audio/{n}/…` | its on-the-fly HLS |
 
 Every `/api/play` route takes a bearer or `?stream=<token>` (chino-api's
 stream token). The URIs inside a playlist carry the request's query, so the
-token, `caps` and `q` ride along on every fetch.
+token, `caps` and `q` ride along on every fetch — and `v`, the version a
+session is pinned to.
+
+## Where a title plays from
+
+katalog-manager owns every path of the library and records each package as
+it completes, so chino-stream asks katalog-api where a title plays from:
+`/api/v1/items/{id}/playback` (the current package, the superseded versions
+not removed yet, the original), `/api/v1/extras/{id}/playback` and
+`/api/v1/packaged-ids` (the packaged movies and episodes, for the Zap
+pager). In the library a package is a version folder,
+`<item>/versions/<versionId>/`, read by its `package.json`; before it the
+package store's folder, read by its `manifest.json`.
+
+- Answers are cached per item: 15 s fresh, then served stale while one
+  lookup revalidates them, and while katalog-api fails served for up to
+  10 min; an unknown item is remembered 5 s. The packaged ids the same for
+  60 s.
+- A version plays once its `.complete` is visible; right after the
+  packager's rename, while an NFS client may not see it yet, the version
+  it superseded plays. A file missing from the folder answered (a version
+  removed after its grace) resolves the title once more.
+- A session is pinned to its version: a library version's master writes
+  `v=<versionId>` onto its URIs, and while katalog-api lists that version
+  (current or previous) the session is served from it, so one started on
+  a version superseded meanwhile ends on it. A package from before the
+  library has no version and no `v`.
+
+Packages are HEVC only, and in the library an original is deleted once its
+package is recorded. A client that decodes none of a package's rungs (no
+HEVC, or HEVC under the package's height) gets the on-the-fly transcode:
+from the original while there is one, as always, else from the package —
+its top video rendition and stereo AAC renditions, each window's segments
+read as one fragmented MP4 (`concat:init.mp4|seg-N.m4s|…` with
+`-seek_timestamp 1`; ffmpeg's HLS demuxer cannot seek in them). Nothing of
+a package is stream-copied (`/copy/` is 404); `/info` describes the
+transcode; the progressive `/api/play/{id}` answers 404 "progressive
+playback needs the original"; an embedded subtitle is the package's
+WebVTT of that stream. A title whose package katalog-api names but the
+storage does not have complete, and without an original, answers 404 "not
+playable: the original was retired and its package is missing".
+
+A window of the on-the-fly pipeline is ten 6 s segments encoded by one
+ffmpeg run; each segment is served as soon as it is finished, so the first
+segment of a window comes within about a second — not when the window is
+done. A window nobody asks for any more for 20 s is given up.
 
 ## Packaged playback: what a client is served
 
@@ -157,27 +208,29 @@ rung above that is the rung below it.
 ## Extras
 
 A title's extras - its trailers, teasers, featurettes and other bonus
-material - are packages of their own in the package store,
-`extras/<aa>/<extraId>/`: laid out as an item's package, without trickplay,
-the manifest's `parentId` naming the movie or series and `extraKind` what the
-extra is. One is served under its title's id only:
+material - are packages of their own, laid out as an item's package without
+trickplay, wherever katalog-api answers them: in the library
+`<title>/extras/<extraId>/`, before it the package store's
+`extras/<aa>/<extraId>/`. One is served under its title's id only:
 
 ```
 GET /api/play/{itemId}/extras/{extraId}/master.m3u8            ?stream=&caps=&q=
 GET /api/play/{itemId}/extras/{extraId}/{vN|aN|sN}/playlist.m3u8
 GET /api/play/{itemId}/extras/{extraId}/{vN|aN}/iframes.m3u8, init.mp4, seg-{n}.m4s
 GET /api/play/{itemId}/extras/{extraId}/{sN}/seg-{n}.vtt
+GET /api/play/{itemId}/extras/{extraId}/{high|medium|low}/index.m3u8, init.mp4, {n}.m4s
+GET /api/play/{itemId}/extras/{extraId}/audio/{n}/index.m3u8, init.mp4, {n}.m4s
 ```
 
-- Every route answers `404` unless `extraId` is a UUID, the package is
-  complete (`.complete`) and its manifest's `parentId` is `itemId`. chino-api
-  holds a viewer to the rating of the title in the URL; the parent check
-  makes that the extra's own title.
+- Every route answers `404` unless `extraId` is a UUID, katalog-api answers
+  it as an extra of `itemId` (it answers only extras packaged and not
+  removed), and its package is complete (`.complete`). chino-api holds a
+  viewer to the rating of the title in the URL; the title check makes that
+  the extra's own title.
 - The master is the client's share of the ladder, by the rules above, its
-  URIs carrying the request's query. There is no on-the-fly pipeline for an
-  extra: the extras ladder is H.264 and stereo AAC, which every client
-  decodes, and a client that says it decodes none of it gets the master as
-  packaged.
+  URIs carrying the request's query. Extras are packaged HEVC only too: a
+  client that decodes none of an extra's rungs gets its on-the-fly master,
+  transcoded from the extra's package as a title's is.
 - An extra is no item: it is not among the packaged ids nor in the Zap pool,
   it has no `/info`, `/prewarm` or trickplay, and `/api/play/{extraId}/…`
   finds no package of it.
@@ -190,7 +243,7 @@ All config is environment-driven (defaults in parentheses):
 |------------------------|------------------------------------------------------|
 | `LISTEN_ADDR`          | `:8080`                                              |
 | `KATALOG_API_BASE_URL` | `http://katalog-api.zaentrum.svc.cluster.local`      |
-| `MEDIA_ROOT`           | `/var/lib/katalog/media`                             |
+| `MEDIA_ROOT`           | `/var/lib/katalog/media` (the library's share, `/var/lib/katalog`, in the library) |
 | `HLS_CACHE_DIR`        | `/var/cache/katalog-hls`                             |
 | `OIDC_ISSUER`          | `https://sso.example.com/realms/zaentrum`            |
 | `OIDC_AUDIENCE`        | `chino-web`                                           |
