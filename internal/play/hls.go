@@ -84,6 +84,11 @@ type HLSHandler struct {
 	// at most maxWindowAttempts failed runs per windowRetryCooldown, after
 	// which requests answer 404 and the player ABR-falls to a lower rung.
 	windowFails windowFailures
+
+	// windows are the windows being produced, each shared by the requests
+	// for its segments, which are served as ffmpeg finishes them
+	// (window.go).
+	windows productions
 }
 
 // segmentSec is the target HLS segment length. 6s is the canonical HLS
@@ -776,21 +781,11 @@ func (h *HLSHandler) ensureVideoWindow(ctx context.Context, src *source, quality
 	capQuality := videoCacheQuality(quality, maxHeight)
 	initPath := h.cachePath(src.key, capQuality, "init")
 	requestedSegPath := h.cachePath(src.key, capQuality, strconv.Itoa(requestedSeg))
-	if statOK(initPath) && statOK(requestedSegPath) {
-		return nil
-	}
-	mu := h.lockFor(fmt.Sprintf("vwin/%s/%s/%d", src.key, capQuality, windowIdx))
-	mu.Lock()
-	defer mu.Unlock()
-	if statOK(initPath) && statOK(requestedSegPath) {
-		return nil
-	}
-
 	windowKey := fmt.Sprintf("%s/%s/%d", src.key, capQuality, windowIdx)
-	return h.produceWindow(ctx, "vwin", windowKey, requestedSeg,
+	return h.awaitWindow(ctx, "vwin", windowKey, requestedSeg,
 		func() bool { return statOK(initPath) && statOK(requestedSegPath) },
-		func() (string, error) {
-			return h.transcodeVideoWindow(ctx, src, quality, ql, windowIdx, maxHeight)
+		func(ctx context.Context, installed func()) (string, error) {
+			return h.transcodeVideoWindow(ctx, src, quality, ql, windowIdx, maxHeight, installed)
 		},
 		func() error { return h.invalidateWindowSegments(src.key, capQuality, windowIdx) },
 	)
@@ -812,7 +807,7 @@ func videoCacheQuality(quality string, maxHeight int) string {
 // produced segments into the cache, returning the tail of ffmpeg's
 // stderr. Split out from ensureVideoWindow so the partial-install retry
 // loop can re-invoke it without duplicating the arg-building code.
-func (h *HLSHandler) transcodeVideoWindow(ctx context.Context, src *source, quality string, ql Quality, windowIdx, maxHeight int) (string, error) {
+func (h *HLSHandler) transcodeVideoWindow(ctx context.Context, src *source, quality string, ql Quality, windowIdx, maxHeight int, installed func()) (string, error) {
 	probe := src.probe
 	isHDR := probe != nil && probe.IsHDR()
 	capQuality := videoCacheQuality(quality, maxHeight)
@@ -905,11 +900,8 @@ func (h *HLSHandler) transcodeVideoWindow(ctx context.Context, src *source, qual
 		"-hls_segment_filename", filepath.Join(tmpDir, "seg_%d.m4s"),
 		filepath.Join(tmpDir, "playlist.m3u8"),
 	)
-	tail, err := h.runFFmpeg(ctx, args, fmt.Sprintf("vwin %d %s/%s", windowIdx, capQuality, src.label()))
-	if err != nil {
-		return tail, err
-	}
-	return tail, h.installWindow(tmpDir, src.key, capQuality, windowIdx)
+	return h.runInstalling(ctx, args, fmt.Sprintf("vwin %d %s/%s", windowIdx, capQuality, src.label()),
+		&windowInstaller{h: h, tmpDir: tmpDir, key: src.key, quality: capQuality, windowIdx: windowIdx, installed: installed})
 }
 
 // invalidateWindowSegments removes every cached segment for one
@@ -936,27 +928,17 @@ func (h *HLSHandler) ensureAudioWindow(ctx context.Context, src *source, audioId
 	audioKey := "audio-" + strconv.Itoa(audioIdx)
 	initPath := h.cachePath(src.key, audioKey, "init")
 	requestedSegPath := h.cachePath(src.key, audioKey, strconv.Itoa(requestedSeg))
-	if statOK(initPath) && statOK(requestedSegPath) {
-		return nil
-	}
-	mu := h.lockFor(fmt.Sprintf("awin/%s/%d/%d", src.key, audioIdx, windowIdx))
-	mu.Lock()
-	defer mu.Unlock()
-	if statOK(initPath) && statOK(requestedSegPath) {
-		return nil
-	}
-
 	windowKey := fmt.Sprintf("%s/%s/%d", src.key, audioKey, windowIdx)
-	return h.produceWindow(ctx, "awin", windowKey, requestedSeg,
+	return h.awaitWindow(ctx, "awin", windowKey, requestedSeg,
 		func() bool { return statOK(initPath) && statOK(requestedSegPath) },
-		func() (string, error) {
-			return h.transcodeAudioWindow(ctx, src, audioIdx, audioKey, windowIdx)
+		func(ctx context.Context, installed func()) (string, error) {
+			return h.transcodeAudioWindow(ctx, src, audioIdx, audioKey, windowIdx, installed)
 		},
 		func() error { return h.invalidateWindowSegments(src.key, audioKey, windowIdx) },
 	)
 }
 
-func (h *HLSHandler) transcodeAudioWindow(ctx context.Context, src *source, audioIdx int, audioKey string, windowIdx int) (string, error) {
+func (h *HLSHandler) transcodeAudioWindow(ctx context.Context, src *source, audioIdx int, audioKey string, windowIdx int, installed func()) (string, error) {
 	probe := src.probe
 	initPath := h.cachePath(src.key, audioKey, "init")
 	windowStartSec := windowIdx * windowSize * segmentSec
@@ -1019,66 +1001,18 @@ func (h *HLSHandler) transcodeAudioWindow(ctx context.Context, src *source, audi
 		"-hls_segment_filename", filepath.Join(tmpDir, "seg_%d.m4s"),
 		filepath.Join(tmpDir, "playlist.m3u8"),
 	)
-	tail, err := h.runFFmpeg(ctx, args, fmt.Sprintf("awin %d/%d %s", audioIdx, windowIdx, src.label()))
-	if err != nil {
-		return tail, err
-	}
-	return tail, h.installWindow(tmpDir, src.key, audioKey, windowIdx)
+	return h.runInstalling(ctx, args, fmt.Sprintf("awin %d/%d %s", audioIdx, windowIdx, src.label()),
+		&windowInstaller{h: h, tmpDir: tmpDir, key: src.key, quality: audioKey, windowIdx: windowIdx, installed: installed})
 }
 
-// installWindow patches each per-window segment's tfdt to land in the
-// right place in the global timeline, then renames the outputs into
-// the permanent cache layout.
-//
-// Why patching is necessary: ffmpeg's `-f hls -hls_segment_type fmp4`
-// muxer writes per-segment tfdt baseMediaDecodeTime starting from 0
-// for each muxer invocation, regardless of `-output_ts_offset`. So
-// window 0 produces tfdts 0, 6×ts, …, 54×ts (correct), but window 1
-// produces tfdts 0, 6×ts, … (wrong — should start at 60×ts). Without
-// this patch, MSE would render every window as starting at t=0,
-// overwriting the previous window in the source buffer.
-//
-// Within each window the deltas across segments are preserved exactly
-// (encoder state was continuous), so we only need to add a single
-// window-wide bias.
-func (h *HLSHandler) installWindow(tmpDir, itemID, qualityOrAudio string, windowIdx int) error {
-	cacheRoot := filepath.Dir(h.cachePath(itemID, qualityOrAudio, "init"))
-	if err := os.MkdirAll(cacheRoot, 0o755); err != nil {
-		return err
-	}
-	initSrc := filepath.Join(tmpDir, "init.mp4")
-	initBytes, err := os.ReadFile(initSrc)
-	if err != nil {
-		return fmt.Errorf("read window init: %w", err)
-	}
-	timescales := parseInitTimescales(initBytes)
-	bias := uint64(windowIdx * windowSize * segmentSec) // seconds; multiplied by per-track timescale at patch time
-
-	initDst := filepath.Join(cacheRoot, "init.bin")
-	if !statOK(initDst) {
-		if err := os.Rename(initSrc, initDst); err != nil {
-			return fmt.Errorf("install init: %w", err)
-		}
-	}
-	for i := 0; i < windowSize; i++ {
-		segSrc := filepath.Join(tmpDir, fmt.Sprintf("seg_%d.m4s", i))
-		if !statOK(segSrc) {
-			// End of file: no more segments in this window.
-			break
-		}
-		if bias > 0 {
-			if err := addTfdtBiasInPlace(segSrc, bias, timescales); err != nil {
-				return fmt.Errorf("patch tfdt seg %d: %w", i, err)
-			}
-		}
-		absSeg := windowIdx*windowSize + i
-		segDst := filepath.Join(cacheRoot, strconv.Itoa(absSeg)+".bin")
-		if err := os.Rename(segSrc, segDst); err != nil {
-			return fmt.Errorf("install seg %d: %w", absSeg, err)
-		}
-	}
-	return nil
-}
+// A window's segments come out of ffmpeg's hls muxer with their tfdt
+// counted from the window's start, whatever -output_ts_offset says: its
+// `-f hls -hls_segment_type fmp4` writes each run's baseMediaDecodeTime
+// from 0. Window 0's are right; window 1's would start at 0 again instead
+// of at 60 s, and MSE would lay every window over the first. So each
+// segment is shifted by its window's start (windowInstaller, window.go)
+// before it is installed. Within a window the deltas between segments are
+// exact (one encoder ran across them), so one bias per window does.
 
 // addTfdtBiasInPlace adds (biasSec × per-track-timescale) to every
 // tfdt baseMediaDecodeTime in the file. Used to shift a whole window's

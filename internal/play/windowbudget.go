@@ -113,11 +113,13 @@ func (f *windowFailures) prune() {
 // produceWindow runs transcode (one ffmpeg run of a whole window) until done
 // reports the asked-for segment on disk, within the window's failure budget.
 // kind ("vwin"/"awin") and key name the window in logs; seg is the segment
-// asked for. The caller holds the window's lock.
+// asked for. It runs as the window's production (window.go), one at a time
+// per window; ctx is the production's, done when nobody wants the window.
 //
-//   - A run that fails while ctx is done (the client seeked away, a warm hit
-//     its timeout, the slot wait was abandoned) is not charged: it says
-//     nothing about whether the window can be produced.
+//   - A run that fails while ctx is done (every client waiting for the
+//     window went away, a warm hit its timeout, the slot wait was abandoned)
+//     is not charged: it says nothing about whether the window can be
+//     produced.
 //   - Any other failed run is charged and returned; the client may retry.
 //   - A run that exits 0 without the segment (the silent truncation) is
 //     charged and retried at once, after invalidate wipes the partial output.
