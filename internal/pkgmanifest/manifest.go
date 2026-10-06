@@ -1,5 +1,7 @@
 // Package pkgmanifest is the on-disk schema for a packaged item under
-// /var/lib/katalog/packages/{itemUUID}/manifest.json.
+// /var/lib/katalog/packages/{itemUUID}/manifest.json, and the reading of the
+// record a package in the library is described by, a version's or an extra's
+// package.json, as the same Manifest (FromPackageRecord, record.go).
 //
 // The package is the source of truth for everything chino-stream
 // needs to serve a pre-packaged item without ever spawning ffmpeg:
