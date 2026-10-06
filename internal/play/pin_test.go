@@ -2,6 +2,7 @@ package play
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -115,6 +116,47 @@ func TestPinnedQuery(t *testing.T) {
 	} {
 		if got := pinnedQuery(tc.raw, tc.version); got != tc.want {
 			t.Errorf("pinnedQuery(%q, %q) = %q, want %q", tc.raw, tc.version, got, tc.want)
+		}
+	}
+}
+
+// A title migrated into the library while a session plays it — its package
+// store folder's files renamed into a version folder, katalog-api answering
+// the version from then on — plays on: the session's next file is missing
+// from the old folder, the title is resolved again, and the same path in the
+// version folder is served.
+func TestASessionPlaysOnAcrossTheMigrationOfItsTitle(t *testing.T) {
+	stagePackages(t, nil, pkgSingle)
+	now := time.Now()
+	f := newFakeLibrary(t)
+	legacy := legacyDir(t, pkgSingle)
+	f.setItem(catalog.Playback{ItemID: pkgSingle, Package: &catalog.PackageRef{Dir: legacy, Record: "manifest.json"}})
+	res := f.resolver()
+	res.now = func() time.Time { return now }
+	h := &HLSHandler{Packages: res}
+	const query = "?stream=dXNlci0xfDE3OTEwNjI5NDM.c2ln&caps=avc,hvc,aac"
+	if w := get(h, "/api/play/"+pkgSingle+"/master.m3u8"+query); w.Code != 200 || strings.Contains(w.Body.String(), "v=") {
+		t.Fatalf("legacy master: %d\n%s", w.Code, w.Body)
+	}
+	if w := get(h, "/api/play/"+pkgSingle+"/v0/seg-00001.m4s"+query); w.Code != 200 {
+		t.Fatalf("legacy segment: %d", w.Code)
+	}
+	// The flip: hls/ renamed into the version folder, katalog-api answers it.
+	version := filepath.Join(t.TempDir(), "movies", pkgSingle[:2], pkgSingle, "versions", "f1f1f1f1-0000-4000-8000-0000000000f1")
+	if err := os.MkdirAll(version, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(legacy, "hls"), filepath.Join(version, "hls")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(version, ".complete"), []byte("sha256:x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.setItem(catalog.Playback{ItemID: pkgSingle, Package: &catalog.PackageRef{VersionID: "f1f1f1f1-0000-4000-8000-0000000000f1", Dir: version, Record: "package.json"}})
+	now = now.Add(resolveRefetchMin)
+	for _, route := range []string{"v0/seg-00002.m4s", "v0/playlist.m3u8", "a1/seg-00003.m4s", "s0/seg-00001.vtt"} {
+		if w := get(h, "/api/play/"+pkgSingle+"/"+route+query); w.Code != 200 {
+			t.Errorf("%s after the flip: %d %q", route, w.Code, w.Body)
 		}
 	}
 }
