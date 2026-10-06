@@ -220,10 +220,12 @@ func (h *Handler) SidecarSubtitle(w http.ResponseWriter, r *http.Request) {
 	if a.Format == "vobsub" && reqExt == ".sub" {
 		clean = strings.TrimSuffix(clean, filepath.Ext(clean)) + ".sub"
 	}
-	// Allow under either the packages root or the legacy media root —
-	// older sidecars live next to the source file.
-	if !strings.HasPrefix(clean, "/var/lib/katalog/packages/") &&
-		!(h.MediaRoot != "" && strings.HasPrefix(clean, filepath.Clean(h.MediaRoot)+string(os.PathSeparator))) {
+	// Allow under the media root — the library's share, which holds the
+	// versions' subtitles (versions/<id>/subs/), the copies of the sidecar
+	// files next to an original (sources/<id>/) and the arrivals — or in the
+	// package store a deployment whose media root is still its old media/
+	// folder serves its packages' subtitles from.
+	if !underRoot(clean, legacyPackageStore) && !(h.MediaRoot != "" && underRoot(clean, h.MediaRoot)) {
 		http.Error(w, "subtitle path outside allowed roots", http.StatusForbidden)
 		return
 	}
@@ -255,6 +257,17 @@ func (h *Handler) SidecarSubtitle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Last-Modified", st.ModTime().UTC().Format(http.TimeFormat))
 	http.ServeFile(w, r, clean)
+}
+
+// legacyPackageStore is the package store of the packages from before the
+// library, whose subtitles are served wherever the media root is; with the
+// library the media root is the share and holds it. A variable only so
+// tests can point it elsewhere.
+var legacyPackageStore = "/var/lib/katalog/packages"
+
+// underRoot reports whether the clean path is inside the folder root.
+func underRoot(path, root string) bool {
+	return strings.HasPrefix(path, filepath.Clean(root)+string(os.PathSeparator))
 }
 
 // EmbeddedSubtitle extracts an embedded subtitle stream to WebVTT and

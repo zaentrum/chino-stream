@@ -136,3 +136,71 @@ func TestASubRipSidecarIsServedAsWebVTT(t *testing.T) {
 		t.Errorf("webvtt: %d %q", webvtt.Code, webvtt.Body.String())
 	}
 }
+
+// A subtitle row is served where the library keeps it, under the media root
+// (the share): a version's subtitles (versions/<id>/subs/), the copy of a
+// sidecar file next to a retired original (sources/<id>/, a SubRip one as
+// WebVTT at its .vtt URL); and from the package store also where the media
+// root is still the old media/ folder. Anywhere else is refused.
+func TestASubtitleIsServedFromTheLibraryAndThePackageStore(t *testing.T) {
+	share := t.TempDir()
+	store := filepath.Join(t.TempDir(), "packages")
+	old := legacyPackageStore
+	legacyPackageStore = store
+	t.Cleanup(func() { legacyPackageStore = old })
+	item := filepath.Join(share, "movies", "f0", "f001aeff-9c18-4183-b51b-51403af2515e")
+	vtt := "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHallo.\n"
+	rows := map[string][2]string{ // id → path, format
+		"version": {filepath.Join(item, "versions", "9a2e0000-0000-4000-8000-000000000001", "subs", "3.vtt"), "webvtt"},
+		"sidecar": {filepath.Join(item, "sources", "0b6c0000-0000-4000-8000-000000000001", "Film (2010).de.srt"), "srt"},
+		"store":   {filepath.Join(store, "movies", "f0", "f001aeff-9c18-4183-b51b-51403af2515e", "subs", "0.vtt"), "webvtt"},
+		"outside": {filepath.Join(t.TempDir(), "x.vtt"), "webvtt"},
+	}
+	for _, row := range rows {
+		body := vtt
+		if row[1] == "srt" {
+			body = srtSample
+		}
+		if err := os.MkdirAll(filepath.Dir(row[0]), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(row[0], []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	katalog := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		row, ok := rows[strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/subtitles/"), "/asset")]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"itemId": "i1", "path": row[0], "format": row[1], "lang": "deu"})
+	}))
+	t.Cleanup(katalog.Close)
+	serve := func(mediaRoot, id string) *httptest.ResponseRecorder {
+		h := &Handler{Catalog: catalog.New(katalog.URL), MediaRoot: mediaRoot}
+		r := chi.NewRouter()
+		r.Get("/api/play/subs/{subID}.vtt", h.SidecarSubtitle)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/play/subs/"+id+".vtt", nil))
+		return rec
+	}
+	for _, id := range []string{"version", "store"} {
+		if w := serve(share, id); w.Code != 200 || w.Body.String() != vtt {
+			t.Errorf("%s: %d %q", id, w.Code, w.Body)
+		}
+	}
+	if w := serve(share, "sidecar"); w.Code != 200 || !strings.HasPrefix(w.Body.String(), "WEBVTT\n\n00:00:01.000 --> 00:00:02.500\n") {
+		t.Errorf("sidecar copy: %d %q", w.Code, w.Body)
+	}
+	// A media root that is still the old media/ folder: the store's.
+	if w := serve(filepath.Join(share, "media"), "store"); w.Code != 200 {
+		t.Errorf("store under an old media root: %d", w.Code)
+	}
+	if w := serve(filepath.Join(share, "media"), "version"); w.Code != http.StatusForbidden {
+		t.Errorf("a version's subtitle outside an old media root: %d", w.Code)
+	}
+	if w := serve(share, "outside"); w.Code != http.StatusForbidden {
+		t.Errorf("outside: %d %q", w.Code, w.Body)
+	}
+}
