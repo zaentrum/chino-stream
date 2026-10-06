@@ -149,9 +149,9 @@ func (h *HLSHandler) Routes(r chi.Router) {
 	r.Post("/prewarm", h.Prewarm)
 	// Legacy on-demand quality ladder. Constrained so it can't collide
 	// with the rendition routes below ("v0", "a0", ...).
-	r.Get("/{quality:high|medium|low}/index.m3u8", h.Playlist)
-	r.Get("/{quality:high|medium|low}/init.mp4", h.InitSegment)
-	r.Get("/{quality:high|medium|low}/{seg:[0-9]+}.m4s", h.Segment)
+	r.Get("/{quality:(high|medium|low)}/index.m3u8", h.Playlist)
+	r.Get("/{quality:(high|medium|low)}/init.mp4", h.InitSegment)
+	r.Get("/{quality:(high|medium|low)}/{seg:[0-9]+}.m4s", h.Segment)
 	// Stream-copy passthrough — for items whose codecs are already
 	// browser-compatible. ffmpeg runs but with -c copy, no re-encode.
 	r.Get("/copy/index.m3u8", h.PassthroughPlaylist)

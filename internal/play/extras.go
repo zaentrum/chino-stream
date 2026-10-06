@@ -57,9 +57,9 @@ var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 func (h *HLSHandler) extraRoutes(r chi.Router) {
 	r.Get("/master.m3u8", h.ExtraMaster)
 	// The live path from the extra's package (requestSource reads extraId).
-	r.Get("/{quality:high|medium|low}/index.m3u8", h.Playlist)
-	r.Get("/{quality:high|medium|low}/init.mp4", h.InitSegment)
-	r.Get("/{quality:high|medium|low}/{seg:[0-9]+}.m4s", h.Segment)
+	r.Get("/{quality:(high|medium|low)}/index.m3u8", h.Playlist)
+	r.Get("/{quality:(high|medium|low)}/init.mp4", h.InitSegment)
+	r.Get("/{quality:(high|medium|low)}/{seg:[0-9]+}.m4s", h.Segment)
 	r.Get("/audio/{audioIdx:[0-9]+}/index.m3u8", h.AudioPlaylist)
 	r.Get("/audio/{audioIdx:[0-9]+}/init.mp4", h.AudioInitSegment)
 	r.Get("/audio/{audioIdx:[0-9]+}/{seg:[0-9]+}.m4s", h.AudioSegment)
