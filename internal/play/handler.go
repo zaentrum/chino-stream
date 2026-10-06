@@ -298,7 +298,9 @@ func (h *Handler) EmbeddedSubtitle(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "the package has no WebVTT subtitle "+idxStr, http.StatusNotFound)
 			return
 		}
-		h.serveSubtitleExtract(w, r, src.pkg.path(sub.Path), 0, src.key, itemID+"#sub:"+idxStr)
+		// Stream 0 of the subtitle's own file: cached under a key of its
+		// own, the package's sub<idx>.
+		h.serveSubtitleExtract(w, r, src.pkg.path(sub.Path), 0, src.key+"/sub"+idxStr, itemID+"#sub:"+idxStr)
 	}
 	path, err := h.Catalog.PrimaryAssetPath(r.Context(), itemID, bearerFrom(r))
 	if err != nil {

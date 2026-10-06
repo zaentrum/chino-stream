@@ -235,6 +235,29 @@ printf 'WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHello.\n'`)
 	}
 }
 
+// Each of a package's subtitles is extracted and cached as its own: two of
+// them from the same second are not one another's.
+func TestAPackagesSubtitlesAreCachedApart(t *testing.T) {
+	// Answers with the file it read.
+	ffmpeg := fakeBin(t, "ffmpeg", `
+for a; do case "$prev" in -i) src="$a";; esac; prev="$a"; done
+printf 'WEBVTT\n\nNOTE %s\n' "$src"`)
+	l, _, ph := retiredLibrary(t, ffmpeg)
+	if err := os.MkdirAll(filepath.Join(l.version(libNew), "subs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"0", "2"} {
+		if err := os.WriteFile(filepath.Join(l.version(libNew), "subs", n+".vtt"), []byte("WEBVTT\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := getPlay(ph, "/api/play/"+libItem+"/subtitles/0.vtt?t=5").Body.String()
+	b := getPlay(ph, "/api/play/"+libItem+"/subtitles/2.vtt?t=5").Body.String()
+	if !strings.Contains(a, filepath.Join("subs", "0.vtt")) || !strings.Contains(b, filepath.Join("subs", "2.vtt")) {
+		t.Errorf("sub0 served %q, sub2 served %q", a, b)
+	}
+}
+
 // A title whose original is retired and whose package katalog-api names
 // but the storage does not have complete cannot be played: its master,
 // /play/info and the progressive stream say so (404); only a backup brings
