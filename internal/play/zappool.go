@@ -182,7 +182,7 @@ func refillZapPool(h *HLSHandler) {
 		return
 	}
 
-	all := ListCompletedPackageIDs()
+	all := h.Packages.PackagedIDs()
 	if len(all) == 0 {
 		return
 	}
@@ -277,7 +277,7 @@ func warmOneZapItem(h *HLSHandler, itemID string) *zapPoolEntry {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), resolveTimeout)
 	defer cancel()
-	p, _, err := h.Packages.itemPackage(ctx, itemID, "", true)
+	p, answer, err := h.Packages.itemPackage(ctx, itemID, "", true)
 	if err != nil || p == nil {
 		return nil
 	}
@@ -342,16 +342,22 @@ func warmOneZapItem(h *HLSHandler, itemID string) *zapPoolEntry {
 		return nil
 	}
 
-	year := 0
+	// A manifest names its title; a library version's record does not —
+	// the item's own records do (libraryTitle), and katalog-api its type.
+	title, typ, year := mf.Title, mf.Type, 0
 	if mf.Year != nil {
 		year = *mf.Year
+	}
+	if p.library() {
+		title, year = libraryTitle(p.dir)
+		typ = answer.Type
 	}
 	return &zapPoolEntry{
 		ItemID:     itemID,
 		SeekSec:    seekSec,
 		DurationMs: dur,
-		Title:      mf.Title,
-		Type:       mf.Type,
+		Title:      title,
+		Type:       typ,
 		Year:       year,
 		MidSource:  midSource,
 		WarmedAt:   time.Now(),

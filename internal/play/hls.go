@@ -468,18 +468,19 @@ func (h *HLSHandler) Master(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(sb.String()))
 }
 
-// PackagedIDs lists every item that has a finished CMAF package on
-// disk. The Zap pager calls this once per session to filter its
-// candidate pool to instant-start items — packaged items skip ffmpeg
-// entirely and serve in tens of ms.
+// PackagedIDs lists the movies and episodes that have a package, as
+// katalog-api says (/api/v1/packaged-ids; the folders are never walked).
+// The Zap pager calls this once per session to filter its candidate pool
+// to instant-start items — packaged items skip ffmpeg entirely and serve
+// in tens of ms.
 //
-// The directory walk is cached for 60 s inside ListCompletedPackageIDs
-// so back-to-back calls don't hammer NFS. No auth-related state is
-// exposed (just opaque ids the caller already has in their catalog
-// listing), but we still gate behind the existing verifier middleware
-// because the broader play group does.
+// The answer is cached for 60 s, stale-while-revalidate (Resolver.
+// PackagedIDs), so back-to-back calls don't hammer katalog-api. No
+// auth-related state is exposed (just opaque ids the caller already has
+// in their catalog listing), but we still gate behind the existing
+// verifier middleware because the broader play group does.
 func (h *HLSHandler) PackagedIDs(w http.ResponseWriter, _ *http.Request) {
-	ids := ListCompletedPackageIDs()
+	ids := h.Packages.PackagedIDs()
 	w.Header().Set("Content-Type", "application/json")
 	// 30-second client cache so a tab refreshing the Zap pool inside
 	// the same minute reuses the response.

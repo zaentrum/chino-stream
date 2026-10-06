@@ -260,11 +260,11 @@ func TestAnExtraIsServedOnlyUnderItsTitle(t *testing.T) {
 // such item.
 func TestExtrasAreNoItems(t *testing.T) {
 	packages := usePackages(t, filepath.Join("testdata", "packages"))
-	ids := walkCompletedPackageIDs()
-	sort.Strings(ids)
+	packages.PackagedIDs()
+	waitPackagedIDs(t, packages)
 	want := []string{pkgLegacy, pkgLegacyHDR, pkgLegacyHDRNoRange, pkgLadder, pkgHEVCLadder, pkgUHD, pkgSingle, pkgStereoLadder}
 	sort.Strings(want)
-	if !reflect.DeepEqual(ids, want) {
+	if ids := packages.PackagedIDs(); !reflect.DeepEqual(ids, want) {
 		t.Errorf("packaged ids %v, want the items' %v", ids, want)
 	}
 	if p, _, err := packages.itemPackage(context.Background(), extraTrailer, "", true); p != nil || !errors.Is(err, catalog.ErrNotFound) {

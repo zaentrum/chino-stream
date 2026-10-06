@@ -29,135 +29,13 @@ import (
 // library, where the packager wrote them:
 //
 //	{category}/{shard2}/{itemId}/{manifest.json, .complete, hls/, …}
+//	extras/{shard2}/{extraId}/…
 //
 // An item's package is found through katalog-api (resolve.go), in whichever
-// layout it is; the store is still where an extra's package is looked for
-// and what the packaged ids are walked from, until both ask katalog-api too.
-// A variable only so tests can point it at packages under testdata.
+// layout it is, and so are the packaged ids; the store is still where an
+// extra's package is looked for, until that asks katalog-api too. A
+// variable only so tests can point it at packages under testdata.
 var PackagesRoot = "/var/lib/katalog/packages"
-
-// Known top-level category dirs of the package store, which the packaged-ids
-// walk reads.
-//
-// extras, where a title's extras are packaged, is not one and must not
-// become one: an extra is no item, never in the packaged ids or the Zap
-// pool, and served only under its title (extras.go).
-var packageCategories = []string{"movies", "shows", "music", "other"}
-
-// packagedIDsCache memoises the directory walk under PackagesRoot so
-// the listing endpoint doesn't restat ~40k dirs on every Zap session
-// open. 60-second TTL is short enough to pick up new packages within
-// a single user session, long enough that the FS walk amortises to
-// zero on busy paths.
-//
-// The cache is served stale-while-revalidate: a caller never blocks on
-// the NFS walk except on the very first cold call (no value yet). Once
-// a value exists, an expired TTL hands back the stale slice immediately
-// and kicks a SINGLE background refresh (guarded by an atomic in-flight
-// flag) that swaps in a fresh slice when it completes. This matters
-// because the walk was measured at p90 19s / max 37.8s under NFS
-// contention — holding a mutex across it blocked every caller for the
-// whole walk on each 60s TTL expiry.
-var (
-	packagedIDsCacheMu    sync.RWMutex // guards packagedIDsCacheAt + Val
-	packagedIDsCacheAt    time.Time
-	packagedIDsCacheVal   []string
-	packagedIDsRefreshing atomic.Bool // single-flight guard for the bg walk
-)
-
-const packagedIDsCacheTTL = 60 * time.Second
-
-// ListCompletedPackageIDs returns the ids of every item with a finished
-// .complete sentinel. Stale-while-revalidate: the cached slice is
-// returned in microseconds and the slow NFS walk NEVER lands on the
-// request path — not even on a cold start. When the value is missing or
-// stale, a SINGLE background goroutine (single-flighted via the
-// packagedIDsRefreshing CAS) refreshes it and swaps in a fresh slice
-// under a short lock; the current value is returned right away. On a
-// true cold start (no value yet, e.g. the first ~seconds after a pod
-// restart) callers get an empty slice while that one background walk
-// runs — the Zap feed degrades gracefully on an empty packaged set, far
-// cheaper than a thundering herd of multi-second NFS walks on boot.
-//
-// Used by the /api/play/packaged-ids endpoint that the Zap pager
-// consults to filter its candidate pool to instant-start items —
-// packaged items skip ffmpeg entirely and serve in tens of ms,
-// avoiding the 1-3s cold start that on-demand transcode imposes.
-func ListCompletedPackageIDs() []string {
-	packagedIDsCacheMu.RLock()
-	val := packagedIDsCacheVal
-	age := time.Since(packagedIDsCacheAt)
-	packagedIDsCacheMu.RUnlock()
-
-	// Cold (no value) or stale (past TTL): kick a single-flight background
-	// refresh and return whatever we have now — never block on the walk.
-	if val == nil || age >= packagedIDsCacheTTL {
-		if packagedIDsRefreshing.CompareAndSwap(false, true) {
-			go refreshCompletedPackageIDs()
-		}
-	}
-	if val == nil {
-		return []string{} // cold: serve empty until the first walk lands
-	}
-	return val
-}
-
-// refreshCompletedPackageIDs runs the NFS walk off the request path and
-// swaps the result into the cache under a short write lock. The shared
-// slice is SWAPPED (never mutated in place) so a concurrent reader
-// holding the old slice never races with the writer. Panic-safe and
-// always clears the in-flight guard so a failed walk can be retried on
-// the next stale read.
-func refreshCompletedPackageIDs() {
-	defer packagedIDsRefreshing.Store(false)
-	defer func() {
-		if rec := recover(); rec != nil {
-			log.Printf("packaged-ids background refresh panic: %v", rec)
-		}
-	}()
-	ids := walkCompletedPackageIDs()
-	packagedIDsCacheMu.Lock()
-	packagedIDsCacheVal = ids
-	packagedIDsCacheAt = time.Now()
-	packagedIDsCacheMu.Unlock()
-}
-
-// walkCompletedPackageIDs is the actual directory walk under
-// PackagesRoot, factored out of ListCompletedPackageIDs so both the
-// synchronous cold-start path and the background refresh share one
-// implementation. The walk is sharded (4 categories × 256 shards ×
-// ~40 items) so even a fully-populated catalogue is sub-second on
-// local disk, ~1-3s on warm NFS, and up to tens of seconds when the
-// NFS client is contended. Returns a freshly-allocated slice.
-func walkCompletedPackageIDs() []string {
-	ids := make([]string, 0, 256)
-	for _, cat := range packageCategories {
-		catDir := filepath.Join(PackagesRoot, cat)
-		shards, err := os.ReadDir(catDir)
-		if err != nil {
-			continue
-		}
-		for _, sh := range shards {
-			if !sh.IsDir() {
-				continue
-			}
-			shDir := filepath.Join(catDir, sh.Name())
-			items, err := os.ReadDir(shDir)
-			if err != nil {
-				continue
-			}
-			for _, it := range items {
-				if !it.IsDir() {
-					continue
-				}
-				if _, err := os.Stat(filepath.Join(shDir, it.Name(), ".complete")); err == nil {
-					ids = append(ids, it.Name())
-				}
-			}
-		}
-	}
-	return ids
-}
 
 // packagedFile is the file rel of the package the request r is served from
 // — its item's, pinned by the session's v= (resolve.go) — and the retry to
@@ -1124,6 +1002,66 @@ func readManifest(path string, decode func([]byte) (*pkgmanifest.Manifest, error
 	return m, nil
 }
 
+// libraryTitle is the title (and release year, 0 when unknown) of the item
+// whose library version folder is dir: the primary title of its
+// metadata.json, which katalog-manager projects whenever the catalog
+// changes, else the title its item.json was created with. A version's
+// package.json names no item; the item's own records do. "" when neither
+// can be read.
+func libraryTitle(dir string) (string, int) {
+	item := filepath.Dir(filepath.Dir(dir)) // <item>/versions/<versionId>
+	if title, year := recordTitle(filepath.Join(item, "metadata.json")); title != "" {
+		return title, year
+	}
+	return recordTitle(filepath.Join(item, "item.json"))
+}
+
+// recordTitles caches recordTitle per path, by mtime.
+var recordTitles sync.Map // map[string]recordTitleEntry
+
+type recordTitleEntry struct {
+	title string
+	year  int
+	mtime time.Time
+}
+
+// recordTitle reads the title of an item record at path: a metadata.json's
+// titles.primary and the year of its releaseDate, or an item.json's title.
+func recordTitle(path string) (string, int) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return "", 0
+	}
+	if v, ok := recordTitles.Load(path); ok {
+		if e := v.(recordTitleEntry); e.mtime.Equal(st.ModTime()) {
+			return e.title, e.year
+		}
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", 0
+	}
+	var rec struct {
+		Title  string `json:"title"`
+		Titles struct {
+			Primary string `json:"primary"`
+		} `json:"titles"`
+		ReleaseDate string `json:"releaseDate"`
+	}
+	if json.Unmarshal(raw, &rec) != nil {
+		return "", 0
+	}
+	e := recordTitleEntry{title: rec.Titles.Primary, mtime: st.ModTime()}
+	if e.title == "" {
+		e.title = rec.Title
+	}
+	if len(rec.ReleaseDate) >= 4 {
+		e.year, _ = strconv.Atoi(rec.ReleaseDate[:4])
+	}
+	recordTitles.Store(path, e)
+	return e.title, e.year
+}
+
 // writePackagedInfo emits the /play/info JSON shape for a packaged
 // item. The fields match what chino-web's PlayerPage panel expects so
 // it stops claiming a transcode is happening when none is.
@@ -1159,10 +1097,14 @@ func writePackagedInfo(w http.ResponseWriter, p *pkgDir, mf *pkgmanifest.Manifes
 	audioTracks := packagedAudioTracks(mf.Renditions.Audio)
 	// v2 manifests put the title at the top level; v1 manifests had
 	// only Source.Path. Prefer Title when present; fall back to the
-	// source-path basename for legacy packages.
+	// source-path basename for legacy packages. A library version's
+	// record names no title: the item's records do.
 	filename := mf.Title
 	if filename == "" && mf.Source != nil {
 		filename = filepath.Base(mf.Source.Path)
+	}
+	if filename == "" && p.library() {
+		filename, _ = libraryTitle(p.dir)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{

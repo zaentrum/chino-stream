@@ -59,6 +59,10 @@ const (
 	// resolveTimeout bounds one katalog-api lookup (the client's own timeout
 	// is the same).
 	resolveTimeout = 5 * time.Second
+	// packagedIDsTTL is how long the packaged ids are served before they are
+	// asked for again (in the background: the cached ids are served
+	// meanwhile).
+	packagedIDsTTL = 60 * time.Second
 )
 
 // Resolver answers where the packages of items and extras are, through
@@ -75,6 +79,8 @@ type Resolver struct {
 	// folder never changes, so a marker seen once is there for good (until
 	// the folder is removed, which a missing file notices).
 	complete sync.Map // map[string]struct{}
+
+	ids packagedIDs
 }
 
 // NewResolver is a Resolver asking c.
@@ -360,4 +366,53 @@ func (r *Resolver) forgetComplete(dir string) {
 	if r != nil {
 		r.complete.Delete(dir)
 	}
+}
+
+// packagedIDs caches katalog-api's packaged ids, stale-while-revalidate.
+type packagedIDs struct {
+	mu         sync.Mutex
+	val        []string
+	at         time.Time
+	refreshing bool
+}
+
+// PackagedIDs returns the ids of the movies and episodes that have a
+// package, as katalog-api last said. Stale-while-revalidate: the cached ids
+// are returned at once, and past packagedIDsTTL one lookup refreshes them in
+// the background; before the first answer (a pod just started) none — the
+// Zap feed degrades to its cold pool — while it runs. A failed lookup keeps
+// the ids it had.
+func (r *Resolver) PackagedIDs() []string {
+	if r == nil || r.catalog == nil {
+		return []string{}
+	}
+	c := &r.ids
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if (c.val == nil || r.clock().Sub(c.at) >= packagedIDsTTL) && !c.refreshing {
+		c.refreshing = true
+		go r.refreshPackagedIDs()
+	}
+	if c.val == nil {
+		return []string{}
+	}
+	return c.val
+}
+
+// refreshPackagedIDs asks katalog-api for the packaged ids and swaps them in
+// (the slice is replaced, never changed in place, so a caller holding the old
+// one reads it undisturbed).
+func (r *Resolver) refreshPackagedIDs() {
+	ctx, cancel := context.WithTimeout(context.Background(), resolveTimeout)
+	defer cancel()
+	ids, err := r.catalog.PackagedIDs(ctx)
+	c := &r.ids
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.refreshing = false
+	if err != nil {
+		log.Printf("packaged ids: %v (keeping the %d known)", err, len(c.val))
+		return
+	}
+	c.val, c.at = ids, r.clock()
 }

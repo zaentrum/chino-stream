@@ -37,9 +37,9 @@ import (
 // AAC, which every client decodes, and a client that claims to decode none
 // of it is served the master as packaged.
 //
-// extras is not one of packageCategories: an extra is no item, so it is in
-// neither the packaged ids nor the Zap pool, and /api/play/{extraId}/… finds
-// no package.
+// An extra is no item: katalog-api lists it in neither the packaged ids nor
+// answers it as an item, so it is not in the Zap pool, and
+// /api/play/{extraId}/… finds no package.
 
 // extrasCategory is the package store folder of the extras' packages.
 const extrasCategory = "extras"
