@@ -309,18 +309,13 @@ func (h *HLSHandler) warmTranscode(itemID, src string, probe *Probe, ql Quality,
 // on the fly.
 func (h *HLSHandler) playablePackage(r *http.Request, caps Caps) (*pkgDir, *pkgmanifest.Manifest) {
 	itemID := chi.URLParam(r, "itemId")
-	p, _, err := h.Packages.itemPackage(r.Context(), itemID, r.URL.Query().Get("v"), true)
+	p, mf, _, err := h.Packages.itemPackageManifest(r.Context(), itemID, r.URL.Query().Get("v"))
 	if err != nil && !errors.Is(err, catalog.ErrNotFound) {
 		log.Printf("resolve %s: %v — on the fly", itemID, err)
 	}
-	if p == nil {
-		return nil, nil
-	}
-	mf, err := readPkgManifest(p)
-	if err != nil {
-		mf = nil // unreadable: served as packaged (packagedPlayableBy)
-	}
-	if !packagedPlayableBy(mf, caps) {
+	// A manifest that cannot be read (mf nil) is served as packaged
+	// (packagedPlayableBy).
+	if p == nil || !packagedPlayableBy(mf, caps) {
 		return nil, nil
 	}
 	return p, mf

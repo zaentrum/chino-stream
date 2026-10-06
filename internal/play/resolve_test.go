@@ -323,17 +323,24 @@ func TestAMissingFileResolvesTheItemOnceMore(t *testing.T) {
 	}
 	l.katalog.setItem(catalog.Playback{ItemID: libItem, Package: ptr(l.ref(libNew))})
 	now = now.Add(resolveRefetchMin) // asked again once the answer is a second old
-	for route, want := range map[string]string{
-		"v0/seg-00001.m4s":     "b2b2b2b2 seg-00001.m4s",
-		"v0/playlist.m3u8":     "#EXTM3U",
-		"v0/iframes.m3u8":      "#EXTM3U",
-		"v0/init.mp4":          "b2b2b2b2 init.mp4",
-		"s0/seg-00001.vtt":     "WEBVTT",
-		"a0/seg-00004.m4s":     "b2b2b2b2 seg-00004.m4s",
-		"master.m3u8?caps=hvc": "#EXTM3U",
+	// Each request comes first, its cached answer still the removed
+	// version's — the master too: its record missing resolves the item
+	// again, as a missing file does.
+	for _, tc := range []struct{ route, want string }{
+		{"master.m3u8?caps=hvc", "#EXTM3U"},
+		{"v0/seg-00001.m4s", "b2b2b2b2 seg-00001.m4s"},
+		{"v0/playlist.m3u8", "#EXTM3U"},
+		{"v0/iframes.m3u8", "#EXTM3U"},
+		{"v0/init.mp4", "b2b2b2b2 init.mp4"},
+		{"s0/seg-00001.vtt", "WEBVTT"},
+		{"a0/seg-00004.m4s", "b2b2b2b2 seg-00004.m4s"},
 	} {
-		if w := get(h, "/api/play/"+libItem+"/"+route); w.Code != 200 || !strings.HasPrefix(w.Body.String(), want) {
-			t.Errorf("%s: %d %.40q, want %q", route, w.Code, w.Body, want)
+		l.packages.mu.Lock()
+		l.packages.items[libItem].val = catalog.Playback{ItemID: libItem, Type: "movie", Package: ptr(l.ref(libOld))}
+		l.packages.items[libItem].at = now.Add(-resolveRefetchMin)
+		l.packages.mu.Unlock()
+		if w := get(h, "/api/play/"+libItem+"/"+tc.route); w.Code != 200 || !strings.HasPrefix(w.Body.String(), tc.want) {
+			t.Errorf("%s: %d %.40q, want %q", tc.route, w.Code, w.Body, tc.want)
 		}
 	}
 	// What is in no folder is a 404, asked for at most once a second.

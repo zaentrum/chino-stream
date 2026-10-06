@@ -277,12 +277,8 @@ func warmOneZapItem(h *HLSHandler, itemID string) *zapPoolEntry {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), resolveTimeout)
 	defer cancel()
-	p, answer, err := h.Packages.itemPackage(ctx, itemID, "", true)
-	if err != nil || p == nil {
-		return nil
-	}
-	mf, err := readPkgManifest(p)
-	if err != nil || mf == nil {
+	p, mf, answer, err := h.Packages.itemPackageManifest(ctx, itemID, "")
+	if err != nil || p == nil || mf == nil {
 		return nil
 	}
 	dur := mf.EffectiveDurationMs()

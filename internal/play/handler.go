@@ -430,17 +430,16 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 	// would happily mount the static stream, and the user would stare at
 	// a black frame at 00:00.
 	infoCaps := ParseCaps(r.URL.Query().Get("caps"))
-	if p, _, err := h.Packages.itemPackage(r.Context(), itemID, "", true); p != nil {
-		mf, err := readPkgManifest(p)
+	if p, mf, _, err := h.Packages.itemPackageManifest(r.Context(), itemID, ""); p != nil {
 		if packagedPlayableBy(mf, infoCaps) {
-			if err == nil && mf != nil {
+			if mf != nil {
 				writePackagedInfo(w, p, mf, infoCaps, r.URL.Query().Get("q"))
 				return
 			}
 			// Manifest unreadable — fall through to the source-side probe
 			// so the player at least gets *some* info, even if the
 			// pipeline label is wrong.
-			log.Printf("packaged manifest read failed for %s: %v", itemID, err)
+			log.Printf("packaged manifest of %s unreadable: %s", itemID, p.path(p.record))
 		}
 	} else if err != nil && !errors.Is(err, catalog.ErrNotFound) {
 		log.Printf("resolve %s: %v", itemID, err)

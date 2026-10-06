@@ -3,10 +3,12 @@ package play
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"log"
 	"net/http"
 	"net/url"
@@ -955,6 +957,30 @@ func readPkgManifest(p *pkgDir) (*pkgmanifest.Manifest, error) {
 		decode = pkgmanifest.FromPackageRecord
 	}
 	return readManifest(p.path(p.record), decode)
+}
+
+// itemPackageManifest is the package the item is served from (itemPackage,
+// gate on, with pin) and its manifest: the item resolved once more when the
+// package's record is missing — its folder removed since katalog-api
+// answered (a version past its grace) — as a missing file of it is. mf is
+// nil when the record cannot be read.
+func (r *Resolver) itemPackageManifest(ctx context.Context, itemID, pin string) (*pkgDir, *pkgmanifest.Manifest, catalog.Playback, error) {
+	p, a, err := r.itemPackage(ctx, itemID, pin, true)
+	if err != nil || p == nil {
+		return nil, nil, a, err
+	}
+	mf, err := readPkgManifest(p)
+	if errors.Is(err, fs.ErrNotExist) {
+		r.forgetComplete(p.dir)
+		if p, err = r.itemPackageAgain(ctx, itemID, pin, true); err != nil || p == nil {
+			return nil, nil, a, err
+		}
+		mf, err = readPkgManifest(p)
+	}
+	if err != nil {
+		mf = nil
+	}
+	return p, mf, a, nil
 }
 
 // decodeManifest parses a manifest.json.

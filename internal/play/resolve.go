@@ -286,11 +286,22 @@ func pkgDirOf(ref catalog.PackageRef) *pkgDir {
 // it superseded. nil when it has none to serve. gate requires the .complete
 // marker of a package from before the library too, as its master, /info and
 // /prewarm always did (a library version's is always required); its renditions'
-// files are served from its folder as they are. The answer comes with it.
+// files are served from its folder as they are. An answer naming a package
+// none of whose folders can be served is asked for once more. The answer
+// comes with it.
 func (r *Resolver) itemPackage(ctx context.Context, itemID, pin string, gate bool) (*pkgDir, catalog.Playback, error) {
 	a, err := r.item(ctx, itemID, false)
 	if err != nil {
 		return nil, a, err
+	}
+	if p := r.choose(a, pin, gate); p != nil || !hasPackage(a) {
+		return p, a, nil
+	}
+	// The answer names a package none of whose folders may be served: one
+	// may have been removed since it was answered. Ask once more (at most
+	// once a second); katalog-api failing, the answer stands.
+	if again, err := r.item(ctx, itemID, true); err == nil {
+		a = again
 	}
 	return r.choose(a, pin, gate), a, nil
 }
