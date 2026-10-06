@@ -34,10 +34,11 @@ func fakeBin(t *testing.T, name, body string) string {
 }
 
 // windowFFmpeg is a fake ffmpeg for the window transcoders. Each run appends
-// its arguments (one per line, then an empty line) to <state>/args and counts
-// itself in <state>/runs. The first `fails` runs print `stderr` and exit 1;
-// later runs write init.mp4 and `segs` segments next to the playlist (the
-// last argument), as `ffmpeg -f hls` does.
+// its arguments (one per line, then an empty line) to <state>/args — in one
+// write, so runs at the same time (a window's video and audio) do not
+// interleave — and counts itself in <state>/runs. The first `fails` runs
+// print `stderr` and exit 1; later runs write init.mp4 and `segs` segments
+// next to the playlist (the last argument), as `ffmpeg -f hls` does.
 func windowFFmpeg(t *testing.T, state string, fails, segs int, stderr string) string {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(state, "stderr"), []byte(stderr+"\n"), 0o644); err != nil {
@@ -45,8 +46,11 @@ func windowFFmpeg(t *testing.T, state string, fails, segs int, stderr string) st
 	}
 	return fakeBin(t, "ffmpeg", `
 state='`+state+`'
-for a; do printf '%s\n' "$a"; done >> "$state/args"
-printf '\n' >> "$state/args"
+run=$(mktemp "$state/run.XXXXXX")
+for a; do printf '%s\n' "$a"; done > "$run"
+printf '\n' >> "$run"
+cat "$run" >> "$state/args"
+rm -f "$run"
 n=$(cat "$state/runs" 2>/dev/null || echo 0)
 n=$((n+1))
 echo "$n" > "$state/runs"

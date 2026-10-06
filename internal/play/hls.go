@@ -322,10 +322,13 @@ func (h *HLSHandler) warmCopy(src *source) {
 	}
 }
 
-// warmTranscode runs ensureVideoWindow + ensureAudioWindow for window 0
-// of the transcode ladder so the client's first /high/init.mp4 + seg-0
-// request lands on warm cache. Window 0 covers segments 0-9 (~60 s),
-// which is more buffer than the player needs to start.
+// warmTranscode starts window 0 of the transcode ladder — its video and,
+// alongside it, its default audio rendition — so the client's first
+// /high/init.mp4 + seg-0 and audio requests find them under way or done.
+// Window 0 covers segments 0-9 (~60 s), which is more buffer than the
+// player needs to start. It returns once their first segments are there;
+// their productions go on to the window's end (a warm's runs to its end,
+// window.go).
 //
 // 5-minute timeout: an HEVC → H.264 transcode of a 1080p source at
 // `-preset veryfast` runs at roughly 0.5-1× realtime on the cluster's
@@ -337,16 +340,21 @@ func (h *HLSHandler) warmTranscode(src *source, ql Quality, maxHeight int) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	ctx = withWarmContext(ctx)
-	if err := h.ensureVideoWindow(ctx, src, ql.Name, ql, 0, 0, maxHeight); err != nil {
-		log.Printf("warmTranscode video %s: %v", src.key, err)
-		return
-	}
+	var audio sync.WaitGroup
 	if probe := src.probe; probe != nil && len(probe.AudioTracks) > 0 {
 		audioIdx := defaultAudioIndex(probe.AudioTracks)
-		if err := h.ensureAudioWindow(ctx, src, audioIdx, 0, 0); err != nil {
-			log.Printf("warmTranscode audio %s: %v", src.key, err)
-		}
+		audio.Add(1)
+		go func() {
+			defer audio.Done()
+			if err := h.ensureAudioWindow(ctx, src, audioIdx, 0, 0); err != nil {
+				log.Printf("warmTranscode audio %s: %v", src.key, err)
+			}
+		}()
 	}
+	if err := h.ensureVideoWindow(ctx, src, ql.Name, ql, 0, 0, maxHeight); err != nil {
+		log.Printf("warmTranscode video %s: %v", src.key, err)
+	}
+	audio.Wait()
 }
 
 // playablePackage is the package the request's item is served from and its
