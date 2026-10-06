@@ -34,11 +34,13 @@ func extraURL(item, extra, route string) string {
 
 // An extra's master is the client's share of its ladder, as an item's is, its
 // URIs carrying the request's query (the stream token, caps, q) so every
-// rendition fetch is authorised and answered for the same client. Whatever
-// the client says it decodes, the master is the package's: nothing is made
-// on the fly for an extra (the handler has neither a catalog nor an ffmpeg).
+// rendition fetch is authorised and answered for the same client. A client
+// that decodes none of its rungs is served the live path from the extra's
+// package, as an item's package has (TestAnExtraPlaysOnTheFlyFromItsPackage).
 func TestExtraMasterIsTheClientsShareOfItsLadder(t *testing.T) {
-	h := &HLSHandler{Packages: usePackages(t, filepath.Join("testdata", "packages"))}
+	h := &HLSHandler{Packages: usePackages(t, filepath.Join("testdata", "packages")),
+		CacheDir: t.TempDir(), FFmpegBin: fakeBin(t, "ffmpeg", "exit 1")}
+	captureLog(t)
 	const query = "?stream=dXNlci0xfDE3OTEwNjI5NDM.c2ln&caps=avc,aac"
 	w := get(h, extraURL(pkgStereoLadder, extraTrailer, "master.m3u8"+query))
 	if w.Code != 200 || w.Header().Get("Content-Type") != "application/vnd.apple.mpegurl" {
@@ -64,7 +66,7 @@ func TestExtraMasterIsTheClientsShareOfItsLadder(t *testing.T) {
 		{"a quality pick", "?caps=avc,aac&q=v0", []string{"v0/audio"}},
 		{"no caps (the default set): H.264", "", both},
 		{"an HEVC client: the H.264 ladder", "?caps=avc,hvc,aac,eac3", both},
-		{"a client that says it decodes no H.264: as packaged", "?caps=hvc,aac", both},
+		{"a client that says it decodes no H.264: on the fly", "?caps=hvc,aac", []string{"high/aud"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := get(h, extraURL(pkgStereoLadder, extraTrailer, "master.m3u8"+tc.query))
@@ -76,7 +78,9 @@ func TestExtraMasterIsTheClientsShareOfItsLadder(t *testing.T) {
 			}
 			var rungs []string
 			for _, v := range tc.variants {
-				rungs = append(rungs, strings.TrimSuffix(v, "/audio"))
+				if strings.HasSuffix(v, "/audio") {
+					rungs = append(rungs, strings.TrimSuffix(v, "/audio"))
+				}
 			}
 			if got := servedIFrames(w.Body.String()); !reflect.DeepEqual(got, rungs) {
 				t.Errorf("I-frame playlists %v, want %v", got, rungs)

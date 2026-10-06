@@ -36,7 +36,14 @@ import (
 //
 // The master is the client's share of the extra's ladder (serveLadder: the
 // rungs it decodes at its heights, or the one ?q= names), every URI in it
-// carrying the request's query (the stream token, caps, q).
+// carrying the request's query (the stream token, caps, q). An extra is
+// packaged HEVC only, as a title is, so a client that decodes none of its
+// rungs is served the live path an item's package has (source.go): the
+// on-the-fly master and its renditions, transcoded from the extra's package,
+// under the extra's own routes:
+//
+//	/api/play/{itemId}/extras/{extraId}/{high|medium|low}/index.m3u8, init.mp4, {n}.m4s
+//	/api/play/{itemId}/extras/{extraId}/audio/{n}/index.m3u8, init.mp4, {n}.m4s
 //
 // An extra is no item: katalog-api lists it in neither the packaged ids nor
 // answers it as an item, so it is not in the Zap pool, and
@@ -49,6 +56,13 @@ var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 // /api/play/{itemId}/extras/{extraId}.
 func (h *HLSHandler) extraRoutes(r chi.Router) {
 	r.Get("/master.m3u8", h.ExtraMaster)
+	// The live path from the extra's package (requestSource reads extraId).
+	r.Get("/{quality:high|medium|low}/index.m3u8", h.Playlist)
+	r.Get("/{quality:high|medium|low}/init.mp4", h.InitSegment)
+	r.Get("/{quality:high|medium|low}/{seg:[0-9]+}.m4s", h.Segment)
+	r.Get("/audio/{audioIdx:[0-9]+}/index.m3u8", h.AudioPlaylist)
+	r.Get("/audio/{audioIdx:[0-9]+}/init.mp4", h.AudioInitSegment)
+	r.Get("/audio/{audioIdx:[0-9]+}/{seg:[0-9]+}.m4s", h.AudioSegment)
 	r.Get("/{rendId:[vas][0-9]+}/playlist.m3u8", h.ExtraRenditionPlaylist)
 	r.Get("/{rendId:[va][0-9]+}/iframes.m3u8", h.ExtraIframesPlaylist)
 	r.Get("/{rendId:[va][0-9]+}/init.mp4", h.ExtraInitSegment)
@@ -87,19 +101,33 @@ func (h *HLSHandler) extraPackage(ctx context.Context, itemID, extraID string, f
 // that extra is not one to serve (extraPackage), which it has answered 404,
 // or 502 when katalog-api could not say.
 func (h *HLSHandler) extraFile(w http.ResponseWriter, r *http.Request, rel ...string) (string, func() string) {
-	itemID, extraID := chi.URLParam(r, "itemId"), chi.URLParam(r, "extraId")
-	p, err := h.extraPackage(r.Context(), itemID, extraID, false)
+	p := h.servedExtra(w, r)
+	if p == nil {
+		return "", nil
+	}
+	return h.extraRetry(r, p, rel...)
+}
+
+// servedExtra is the package of the extra r names (extraPackage), nil when
+// it has answered 404 (none to serve) or 502 (katalog-api could not say).
+func (h *HLSHandler) servedExtra(w http.ResponseWriter, r *http.Request) *pkgDir {
+	p, err := h.extraPackage(r.Context(), chi.URLParam(r, "itemId"), chi.URLParam(r, "extraId"), false)
 	if err != nil {
 		packagedError(w, err)
-		return "", nil
+		return nil
 	}
 	if p == nil {
 		http.Error(w, "extra not found", http.StatusNotFound)
-		return "", nil
 	}
+	return p
+}
+
+// extraRetry is the file rel of the extra's package p and the retry to serve
+// it with should it be missing: the extra resolved once more.
+func (h *HLSHandler) extraRetry(r *http.Request, p *pkgDir, rel ...string) (string, func() string) {
 	return p.path(rel...), func() string {
 		h.Packages.forgetComplete(p.dir)
-		again, err := h.extraPackage(r.Context(), itemID, extraID, true)
+		again, err := h.extraPackage(r.Context(), chi.URLParam(r, "itemId"), chi.URLParam(r, "extraId"), true)
 		if err != nil || again == nil || again.dir == p.dir {
 			return ""
 		}
@@ -108,13 +136,22 @@ func (h *HLSHandler) extraFile(w http.ResponseWriter, r *http.Request, rel ...st
 }
 
 // ExtraMaster serves an extra's master as the client is served it: its
-// share of the ladder for ?caps= and ?q=, every URI carrying the query.
+// share of the ladder for ?caps= and ?q=, every URI carrying the query; for
+// a client that decodes none of its rungs the on-the-fly master of the
+// extra's package (see the top of this file).
 func (h *HLSHandler) ExtraMaster(w http.ResponseWriter, r *http.Request) {
-	path, retry := h.extraFile(w, r, "hls", "master.m3u8")
-	if path == "" {
+	p := h.servedExtra(w, r)
+	if p == nil {
 		return
 	}
 	caps := ParseCaps(r.URL.Query().Get("caps"))
+	if mf, err := readPkgManifest(p); err == nil && len(mf.Renditions.Video) > 0 && !packagedPlayableBy(mf, caps) {
+		probe := packageProbe(mf)
+		src := &source{key: sourceKey("extra/"+chi.URLParam(r, "extraId"), p), pkg: p, mf: mf, probe: &probe}
+		h.serveOnTheFlyMaster(w, r, src, caps)
+		return
+	}
+	path, retry := h.extraRetry(r, p, "hls", "master.m3u8")
 	q := r.URL.Query().Get("q")
 	servePlaylistCachedTransform(w, r, path, r.URL.RawQuery, retry, func(body string) string {
 		return serveLadder(body, caps, q).body

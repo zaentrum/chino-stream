@@ -263,6 +263,39 @@ func TestATitleWithoutOriginalOrCompletePackageIsNotPlayable(t *testing.T) {
 	}
 }
 
+// An extra is packaged HEVC only, as its title is: a client that decodes
+// none of its rungs gets the live path from its package, under the extra's
+// own routes.
+func TestAnExtraPlaysOnTheFlyFromItsPackage(t *testing.T) {
+	state := t.TempDir()
+	l, h, _ := retiredLibrary(t, windowFFmpeg(t, state, 0, 4, ""))
+	dir := filepath.Join(l.item, "extras", libExtra)
+	l.katalog.setExtra(catalog.ExtraPlayback{ExtraID: libExtra, ItemID: libItem, Dir: dir, Record: "package.json"})
+	// Its ladder is H.264 (the trailer's); an HEVC-only client decodes none of it.
+	w := get(h, extraURL(libItem, libExtra, "master.m3u8?caps=hvc,aac"))
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "\nhigh/index.m3u8?caps=hvc,aac\n") || !strings.Contains(w.Body.String(), `URI="audio/0/index.m3u8?caps=hvc,aac"`) {
+		t.Fatalf("extra master: %d\n%s", w.Code, w.Body)
+	}
+	if w := get(h, extraURL(libItem, libExtra, "high/index.m3u8?caps=hvc,aac")); w.Code != 200 || !strings.Contains(w.Body.String(), "0.m4s") {
+		t.Errorf("extra playlist: %d %q", w.Code, w.Body)
+	}
+	if w := get(h, extraURL(libItem, libExtra, "high/0.m4s?caps=hvc,aac")); w.Code != 200 {
+		t.Fatalf("extra segment: %d %q", w.Code, w.Body)
+	}
+	if in := argAfter(runWith(t, state, "0:v:0"), "-i"); !strings.HasPrefix(in, "concat:"+filepath.Join(dir, "hls", "v0", "init.mp4")+"|") {
+		t.Errorf("extra window input %q", in)
+	}
+	if w := get(h, extraURL(libItem, libExtra, "audio/0/0.m4s")); w.Code != 200 {
+		t.Errorf("extra audio segment: %d %q", w.Code, w.Body)
+	}
+	// Under another title: none of it.
+	for _, route := range []string{"master.m3u8?caps=hvc", "high/index.m3u8", "high/0.m4s", "audio/0/index.m3u8"} {
+		if w := get(h, extraURL(pkgLadder, libExtra, route)); w.Code != 404 {
+			t.Errorf("%s under another title: %d", route, w.Code)
+		}
+	}
+}
+
 // A window's input is its rendition's init and the segments that cover it,
 // from the one holding its start less a second (a playlist's EXTINFs run
 // ahead of the media by the reordering delay) to the one holding its end;
