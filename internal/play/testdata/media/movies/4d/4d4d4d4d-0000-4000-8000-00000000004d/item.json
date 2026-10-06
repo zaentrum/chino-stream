@@ -1,0 +1,9 @@
+{
+  "schema": "zaentrum.library.item/2",
+  "itemId": "4d4d4d4d-0000-4000-8000-00000000004d",
+  "type": "movie",
+  "title": "Test Pattern",
+  "externalIds": {},
+  "createdAt": "2026-10-06T11:00:00Z",
+  "createdBy": "katalog-manager/scanner"
+}

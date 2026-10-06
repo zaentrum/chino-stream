@@ -198,38 +198,81 @@ var (
 
 const probeCacheTTL = 5 * time.Minute
 
-// resolveSource is shared with the progressive Play handler — looks up
-// the asset path, validates against MediaRoot, returns the absolute
-// path on disk and the ffprobe result (so the playlist knows duration).
-// ffprobe is in-memory cached per source path; cache invalidation is
-// driven by source mtime + TTL.
-func (h *HLSHandler) resolveSource(ctx context.Context, itemID, bearer string) (string, *Probe, error) {
+// resolveSource finds what the item itemID plays from on the fly
+// (source.go): its original — looked up as it always was (katalog-api's
+// /asset, validated against MediaRoot, probed with ffprobe, the probe
+// cached per path and mtime) — or, when there is no original to read (none,
+// retired, gone from the storage), its package, the version pin selects
+// (packageSource). errNotPlayable when katalog-api names a package that
+// cannot be read and there is no original.
+func (h *HLSHandler) resolveSource(ctx context.Context, itemID, bearer, pin string) (*source, error) {
 	path, err := h.Catalog.PrimaryAssetPath(ctx, itemID, bearer)
+	if err == nil {
+		clean := filepath.Clean(path)
+		if h.MediaRoot != "" && !strings.HasPrefix(clean, filepath.Clean(h.MediaRoot)+string(os.PathSeparator)) {
+			// Name both sides. This message was the only symptom of a
+			// misconfiguration that made playback impossible for every asset, and
+			// it said neither which path nor which root.
+			return nil, fmt.Errorf(
+				"asset path %q is outside the configured media root %q — "+
+					"chino-stream cannot open it", clean, filepath.Clean(h.MediaRoot))
+		}
+		st, statErr := os.Stat(clean)
+		if statErr == nil {
+			if p, ok := lookupProbe(clean, st.ModTime()); ok {
+				return &source{key: itemID, file: clean, probe: p}, nil
+			}
+			probe, err := RunFFprobe(ctx, h.FFprobeBin, clean)
+			if err != nil {
+				return nil, err
+			}
+			storeProbe(clean, st.ModTime(), probe)
+			return &source{key: itemID, file: clean, probe: &probe}, nil
+		}
+		err = statErr
+	}
+	// No original to read: the package.
+	src, notPlayable := packageSource(ctx, h.Packages, itemID, pin)
+	switch {
+	case src != nil:
+		return src, nil
+	case notPlayable:
+		return nil, errNotPlayable
+	}
+	return nil, err
+}
+
+// requestSource is what the on-the-fly request r transcodes: under
+// /extras/{extraId}/ that extra's package (an extra keeps no original),
+// else its item's source (resolveSource, pinned by v=).
+func (h *HLSHandler) requestSource(r *http.Request) (*source, error) {
+	itemID := chi.URLParam(r, "itemId")
+	if extraID := chi.URLParam(r, "extraId"); extraID != "" {
+		return h.extraSource(r.Context(), itemID, extraID)
+	}
+	return h.resolveSource(r.Context(), itemID, bearerFrom(r), r.URL.Query().Get("v"))
+}
+
+// errExtraNotFound answers an extra there is none of to serve.
+var errExtraNotFound = errors.New("extra not found")
+
+// extraSource is the package of the extra extraID of the title itemID as an
+// on-the-fly source (extraPackage's rules); errExtraNotFound when there is
+// none to serve.
+func (h *HLSHandler) extraSource(ctx context.Context, itemID, extraID string) (*source, error) {
+	p, err := h.extraPackage(ctx, itemID, extraID, false)
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
-	clean := filepath.Clean(path)
-	if h.MediaRoot != "" && !strings.HasPrefix(clean, filepath.Clean(h.MediaRoot)+string(os.PathSeparator)) {
-		// Name both sides. This message was the only symptom of a
-		// misconfiguration that made playback impossible for every asset, and
-		// it said neither which path nor which root.
-		return "", nil, fmt.Errorf(
-			"asset path %q is outside the configured media root %q — "+
-				"chino-stream cannot open it", clean, filepath.Clean(h.MediaRoot))
+	if p == nil {
+		return nil, errExtraNotFound
 	}
-	st, err := os.Stat(clean)
-	if err != nil {
-		return "", nil, err
+	mf, err := readPkgManifest(p)
+	if err != nil || len(mf.Renditions.Video) == 0 {
+		return nil, errExtraNotFound
 	}
-	if p, ok := lookupProbe(clean, st.ModTime()); ok {
-		return clean, p, nil
-	}
-	probe, err := RunFFprobe(ctx, h.FFprobeBin, clean)
-	if err != nil {
-		return clean, nil, err
-	}
-	storeProbe(clean, st.ModTime(), probe)
-	return clean, &probe, nil
+	probe := packageProbe(mf)
+	return &source{key: sourceKey("extra/"+extraID, p), pkg: p, mf: mf, probe: &probe}, nil
 }
 
 func lookupProbe(path string, mtime time.Time) (*Probe, bool) {
@@ -260,17 +303,17 @@ func storeProbe(path string, mtime time.Time, probe Probe) {
 // even for 4 GB remuxes, and the init.mp4 ffmpeg run is ~200 ms, so 3
 // min is plenty of headroom. Set high enough that an NFS hiccup on
 // the first read of a cold file doesn't kill the warm prematurely.
-func (h *HLSHandler) warmCopy(itemID, src string) {
+func (h *HLSHandler) warmCopy(src *source) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	ctx = withWarmContext(ctx)
-	if _, err := h.loadOrBuildPlan(ctx, itemID, src); err != nil {
-		log.Printf("warmCopy plan %s: %v", itemID, err)
+	if _, err := h.loadOrBuildPlan(ctx, src.key, src.file); err != nil {
+		log.Printf("warmCopy plan %s: %v", src.key, err)
 		return
 	}
-	initPath := h.cachePath(itemID, "copy-"+copyPipelineVersion, "init")
-	if err := h.ensurePassthroughInit(ctx, src, initPath); err != nil {
-		log.Printf("warmCopy init %s: %v", itemID, err)
+	initPath := h.cachePath(src.key, "copy-"+copyPipelineVersion, "init")
+	if err := h.ensurePassthroughInit(ctx, src.file, initPath); err != nil {
+		log.Printf("warmCopy init %s: %v", src.key, err)
 	}
 }
 
@@ -285,19 +328,18 @@ func (h *HLSHandler) warmCopy(itemID, src string) {
 // shorter risks killing the goroutine mid-window and leaving the cache
 // half-populated — the request-context ffmpeg path then has to restart
 // from scratch instead of inheriting partial work.
-func (h *HLSHandler) warmTranscode(itemID, src string, probe *Probe, ql Quality, maxHeight int) {
+func (h *HLSHandler) warmTranscode(src *source, ql Quality, maxHeight int) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	ctx = withWarmContext(ctx)
-	isHDR := probe != nil && probe.IsHDR()
-	if err := h.ensureVideoWindow(ctx, itemID, src, ql.Name, ql, isHDR, probe, 0, 0, maxHeight); err != nil {
-		log.Printf("warmTranscode video %s: %v", itemID, err)
+	if err := h.ensureVideoWindow(ctx, src, ql.Name, ql, 0, 0, maxHeight); err != nil {
+		log.Printf("warmTranscode video %s: %v", src.key, err)
 		return
 	}
-	if probe != nil && len(probe.AudioTracks) > 0 {
+	if probe := src.probe; probe != nil && len(probe.AudioTracks) > 0 {
 		audioIdx := defaultAudioIndex(probe.AudioTracks)
-		if err := h.ensureAudioWindow(ctx, itemID, src, audioIdx, probe, 0, 0); err != nil {
-			log.Printf("warmTranscode audio %s: %v", itemID, err)
+		if err := h.ensureAudioWindow(ctx, src, audioIdx, 0, 0); err != nil {
+			log.Printf("warmTranscode audio %s: %v", src.key, err)
 		}
 	}
 }
@@ -343,7 +385,6 @@ func (h *HLSHandler) playablePackage(r *http.Request, caps Caps) (*pkgDir, *pkgm
 // packaging endpoint; existing in-flight viewers keep using legacy on
 // the URLs they already fetched, new viewers get packaged.
 func (h *HLSHandler) Master(w http.ResponseWriter, r *http.Request) {
-	itemID := chi.URLParam(r, "itemId")
 	// Caps come from ?caps= on the client (chino-web's MediaCapabilities
 	// probe). We need them BEFORE the packaged check too — if the
 	// packaged master only advertises HEVC and the client can't decode
@@ -356,11 +397,20 @@ func (h *HLSHandler) Master(w http.ResponseWriter, r *http.Request) {
 		h.servePackagedMaster(w, r, p, mf)
 		return
 	}
-	clean, probe, err := h.resolveSource(r.Context(), itemID, bearerFrom(r))
+	src, err := h.requestSource(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
+	h.serveOnTheFlyMaster(w, r, src, caps)
+}
+
+// serveOnTheFlyMaster serves the on-the-fly master of src for the client
+// with caps (see Master), and warms the start of what it points the client
+// at. A package's master pins the session to the version read (pinnedQuery),
+// as a packaged master does.
+func (h *HLSHandler) serveOnTheFlyMaster(w http.ResponseWriter, r *http.Request, src *source, caps Caps) {
+	probe := src.probe
 	// Dispatch matrix:
 	//
 	//   probe + caps → mode → pipeline
@@ -392,13 +442,16 @@ func (h *HLSHandler) Master(w http.ResponseWriter, r *http.Request) {
 	// every modern browser handles).
 	qParam := r.URL.Query().Get("q")
 	ql := ResolveQuality(qParam)
-	mode, _ := probe.DecideWith(caps)
+	mode, _ := decideSource(src, caps)
 	// useCopy is reserved for TRUE stream-copy of both tracks. Remux
 	// takes the transcode ladder (see above). Forcing q != high also
 	// takes the transcode path (the quality switcher only makes sense
-	// when we're actually encoding).
-	useCopy := (qParam == "" || qParam == "high") && mode == "passthrough"
+	// when we're actually encoding). A package is never stream-copied.
+	useCopy := (qParam == "" || qParam == "high") && mode == "passthrough" && !src.fromPackage()
 	q := r.URL.RawQuery
+	if src.fromPackage() {
+		q = pinnedQuery(q, src.pkg.versionID)
+	}
 	if q != "" {
 		q = "?" + q
 	}
@@ -454,9 +507,9 @@ func (h *HLSHandler) Master(w http.ResponseWriter, r *http.Request) {
 	// follow this master.m3u8 race the work that's already in flight. Cuts
 	// ~400 ms off cold start on a libx264 transcode path.
 	if useCopy {
-		go h.warmCopy(itemID, clean)
+		goWarm(func() { h.warmCopy(src) })
 	} else {
-		go h.warmTranscode(itemID, clean, probe, ql, caps.MaxVideoHeight())
+		goWarm(func() { h.warmTranscode(src, ql, caps.MaxVideoHeight()) })
 	}
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Cache-Control", "no-store")
@@ -523,7 +576,6 @@ func (h *HLSHandler) PackagedIDs(w http.ResponseWriter, _ *http.Request) {
 // Authn rides on the same verifier middleware as Master; the bearer
 // can come from Authorization or ?stream=token.
 func (h *HLSHandler) Prewarm(w http.ResponseWriter, r *http.Request) {
-	itemID := chi.URLParam(r, "itemId")
 	caps := ParseCaps(r.URL.Query().Get("caps"))
 	tSec := 0.0
 	if v := r.URL.Query().Get("t"); v != "" {
@@ -544,19 +596,19 @@ func (h *HLSHandler) Prewarm(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("packaged-warming"))
 		return
 	}
-	clean, probe, err := h.resolveSource(r.Context(), itemID, bearerFrom(r))
+	src, err := h.requestSource(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
 	qParam := r.URL.Query().Get("q")
 	ql := ResolveQuality(qParam)
-	mode, _ := probe.DecideWith(caps)
-	useCopy := (qParam == "" || qParam == "high") && mode == "passthrough"
+	mode, _ := decideSource(src, caps)
+	useCopy := (qParam == "" || qParam == "high") && mode == "passthrough" && !src.fromPackage()
 	if useCopy {
-		go h.warmCopy(itemID, clean)
+		goWarm(func() { h.warmCopy(src) })
 	} else {
-		go h.warmTranscode(itemID, clean, probe, ql, caps.MaxVideoHeight())
+		goWarm(func() { h.warmTranscode(src, ql, caps.MaxVideoHeight()) })
 	}
 	w.WriteHeader(http.StatusAccepted)
 	_, _ = w.Write([]byte("warming"))
@@ -582,18 +634,17 @@ func defaultAudioIndex(tracks []TrackInfo) int {
 // #EXTINF duration. Always a VOD playlist (#EXT-X-PLAYLIST-TYPE:VOD)
 // with #EXT-X-ENDLIST so the player knows the full length up front.
 func (h *HLSHandler) Playlist(w http.ResponseWriter, r *http.Request) {
-	itemID := chi.URLParam(r, "itemId")
 	quality := chi.URLParam(r, "quality")
 	if _, ok := QualityLadder[quality]; !ok {
 		http.Error(w, "unknown quality", http.StatusBadRequest)
 		return
 	}
-	_, probe, err := h.resolveSource(r.Context(), itemID, bearerFrom(r))
+	src, err := h.requestSource(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	durSec := float64(probe.DurationMs) / 1000.0
+	durSec := float64(src.probe.DurationMs) / 1000.0
 	if durSec <= 0 {
 		http.Error(w, "source has no duration", http.StatusBadGateway)
 		return
@@ -629,14 +680,13 @@ func (h *HLSHandler) Playlist(w http.ResponseWriter, r *http.Request) {
 // so the avcC/esds in init and the samples in the segments come from
 // one encoder instance — byte-for-byte compatible by construction.
 func (h *HLSHandler) InitSegment(w http.ResponseWriter, r *http.Request) {
-	itemID := chi.URLParam(r, "itemId")
 	quality := chi.URLParam(r, "quality")
 	ql, ok := QualityLadder[quality]
 	if !ok {
 		http.Error(w, "unknown quality", http.StatusBadRequest)
 		return
 	}
-	src, probe, err := h.resolveSource(r.Context(), itemID, bearerFrom(r))
+	src, err := h.requestSource(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -645,13 +695,12 @@ func (h *HLSHandler) InitSegment(w http.ResponseWriter, r *http.Request) {
 	// every leg (init / segment) re-derives the identical cache namespace
 	// and serves the bytes ensureVideoWindow wrote under it.
 	maxHeight := ParseCaps(r.URL.Query().Get("caps")).MaxVideoHeight()
-	isHDR := probe != nil && probe.IsHDR()
-	if err := h.ensureVideoWindow(r.Context(), itemID, src, quality, ql, isHDR, probe, 0, 0, maxHeight); err != nil {
-		log.Printf("hls init %s/%s: %v", itemID, quality, err)
+	if err := h.ensureVideoWindow(r.Context(), src, quality, ql, 0, 0, maxHeight); err != nil {
+		log.Printf("hls init %s/%s: %v", src.key, quality, err)
 		windowError(w, err, "init segment")
 		return
 	}
-	h.serveCached(w, r, h.cachePath(itemID, videoCacheQuality(quality, maxHeight), "init"), "video/mp4")
+	h.serveCached(w, r, h.cachePath(src.key, videoCacheQuality(quality, maxHeight), "init"), "video/mp4")
 }
 
 // Segment serves one HLS media segment. On a cache miss, the entire
@@ -659,7 +708,6 @@ func (h *HLSHandler) InitSegment(w http.ResponseWriter, r *http.Request) {
 // keeping encoder state across internal boundaries so the segments
 // within the window are seamlessly adjacent.
 func (h *HLSHandler) Segment(w http.ResponseWriter, r *http.Request) {
-	itemID := chi.URLParam(r, "itemId")
 	quality := chi.URLParam(r, "quality")
 	segStr := chi.URLParam(r, "seg")
 	ql, ok := QualityLadder[quality]
@@ -672,12 +720,12 @@ func (h *HLSHandler) Segment(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad segment number", http.StatusBadRequest)
 		return
 	}
-	src, probe, err := h.resolveSource(r.Context(), itemID, bearerFrom(r))
+	src, err := h.requestSource(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	if probe != nil && probe.DurationMs > 0 {
+	if probe := src.probe; probe != nil && probe.DurationMs > 0 {
 		total := float64(probe.DurationMs) / 1000.0
 		if float64(seg*segmentSec) >= total {
 			http.Error(w, "segment past end", http.StatusNotFound)
@@ -685,14 +733,13 @@ func (h *HLSHandler) Segment(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	maxHeight := ParseCaps(r.URL.Query().Get("caps")).MaxVideoHeight()
-	isHDR := probe != nil && probe.IsHDR()
 	windowIdx := seg / windowSize
-	if err := h.ensureVideoWindow(r.Context(), itemID, src, quality, ql, isHDR, probe, windowIdx, seg, maxHeight); err != nil {
-		log.Printf("hls seg %s/%s/%d (win %d): %v", itemID, quality, seg, windowIdx, err)
+	if err := h.ensureVideoWindow(r.Context(), src, quality, ql, windowIdx, seg, maxHeight); err != nil {
+		log.Printf("hls seg %s/%s/%d (win %d): %v", src.key, quality, seg, windowIdx, err)
 		windowError(w, err, "segment")
 		return
 	}
-	cachePath := h.cachePath(itemID, videoCacheQuality(quality, maxHeight), strconv.Itoa(seg))
+	cachePath := h.cachePath(src.key, videoCacheQuality(quality, maxHeight), strconv.Itoa(seg))
 	if _, err := os.Stat(cachePath); err != nil {
 		// Produced and gone again (the sweeper raced us): let the client
 		// ABR-fall to a lower rung rather than blocking the player.
@@ -719,7 +766,7 @@ func (h *HLSHandler) Segment(w http.ResponseWriter, r *http.Request) {
 //
 // Concurrent requests for any segment in the same window dedupe on
 // the per-window mutex, so we never burn N× CPU on the same transcode.
-func (h *HLSHandler) ensureVideoWindow(ctx context.Context, itemID, src, quality string, ql Quality, isHDR bool, probe *Probe, windowIdx, requestedSeg, maxHeight int) error {
+func (h *HLSHandler) ensureVideoWindow(ctx context.Context, src *source, quality string, ql Quality, windowIdx, requestedSeg, maxHeight int) error {
 	// capQuality is the on-disk cache namespace. When a HW height cap is
 	// in play the encoder output differs (downscaled to the ceiling), so
 	// it must NOT share the uncapped rung's cache — otherwise a capped
@@ -727,25 +774,25 @@ func (h *HLSHandler) ensureVideoWindow(ctx context.Context, itemID, src, quality
 	// segments. The player URL path stays "{quality}"; only the cache dir
 	// is namespaced (each handler re-derives the same cap from ?caps=).
 	capQuality := videoCacheQuality(quality, maxHeight)
-	initPath := h.cachePath(itemID, capQuality, "init")
-	requestedSegPath := h.cachePath(itemID, capQuality, strconv.Itoa(requestedSeg))
+	initPath := h.cachePath(src.key, capQuality, "init")
+	requestedSegPath := h.cachePath(src.key, capQuality, strconv.Itoa(requestedSeg))
 	if statOK(initPath) && statOK(requestedSegPath) {
 		return nil
 	}
-	mu := h.lockFor(fmt.Sprintf("vwin/%s/%s/%d", itemID, capQuality, windowIdx))
+	mu := h.lockFor(fmt.Sprintf("vwin/%s/%s/%d", src.key, capQuality, windowIdx))
 	mu.Lock()
 	defer mu.Unlock()
 	if statOK(initPath) && statOK(requestedSegPath) {
 		return nil
 	}
 
-	windowKey := fmt.Sprintf("%s/%s/%d", itemID, capQuality, windowIdx)
+	windowKey := fmt.Sprintf("%s/%s/%d", src.key, capQuality, windowIdx)
 	return h.produceWindow(ctx, "vwin", windowKey, requestedSeg,
 		func() bool { return statOK(initPath) && statOK(requestedSegPath) },
 		func() (string, error) {
-			return h.transcodeVideoWindow(ctx, itemID, src, quality, ql, isHDR, probe, windowIdx, maxHeight)
+			return h.transcodeVideoWindow(ctx, src, quality, ql, windowIdx, maxHeight)
 		},
-		func() error { return h.invalidateWindowSegments(itemID, capQuality, windowIdx) },
+		func() error { return h.invalidateWindowSegments(src.key, capQuality, windowIdx) },
 	)
 }
 
@@ -765,9 +812,11 @@ func videoCacheQuality(quality string, maxHeight int) string {
 // produced segments into the cache, returning the tail of ffmpeg's
 // stderr. Split out from ensureVideoWindow so the partial-install retry
 // loop can re-invoke it without duplicating the arg-building code.
-func (h *HLSHandler) transcodeVideoWindow(ctx context.Context, itemID, src, quality string, ql Quality, isHDR bool, probe *Probe, windowIdx, maxHeight int) (string, error) {
+func (h *HLSHandler) transcodeVideoWindow(ctx context.Context, src *source, quality string, ql Quality, windowIdx, maxHeight int) (string, error) {
+	probe := src.probe
+	isHDR := probe != nil && probe.IsHDR()
 	capQuality := videoCacheQuality(quality, maxHeight)
-	initPath := h.cachePath(itemID, capQuality, "init")
+	initPath := h.cachePath(src.key, capQuality, "init")
 	windowStartSec := windowIdx * windowSize * segmentSec
 	windowDurSec := windowSize * segmentSec
 	if probe != nil && probe.DurationMs > 0 {
@@ -826,9 +875,18 @@ func (h *HLSHandler) transcodeVideoWindow(ctx context.Context, itemID, src, qual
 		// "no path" error.
 		args = append(args, "-hwaccel", "cuda", "-hwaccel_output_format", "cuda")
 	}
+	// The input: the original, or the window's segments of the package's
+	// top video rendition (source.input).
+	videoDir := ""
+	if src.fromPackage() {
+		videoDir = src.mf.Renditions.Video[0].Dir
+	}
+	in, err := src.input(videoDir, "v", windowStartSec, windowDurSec)
+	if err != nil {
+		return "", err
+	}
+	args = append(args, in...)
 	args = append(args,
-		"-ss", strconv.Itoa(windowStartSec),
-		"-i", src,
 		"-t", strconv.Itoa(windowDurSec),
 		"-map", "0:v:0",
 	)
@@ -847,11 +905,11 @@ func (h *HLSHandler) transcodeVideoWindow(ctx context.Context, itemID, src, qual
 		"-hls_segment_filename", filepath.Join(tmpDir, "seg_%d.m4s"),
 		filepath.Join(tmpDir, "playlist.m3u8"),
 	)
-	tail, err := h.runFFmpeg(ctx, args, fmt.Sprintf("vwin %d %s/%s", windowIdx, capQuality, filepath.Base(src)))
+	tail, err := h.runFFmpeg(ctx, args, fmt.Sprintf("vwin %d %s/%s", windowIdx, capQuality, src.label()))
 	if err != nil {
 		return tail, err
 	}
-	return tail, h.installWindow(tmpDir, itemID, capQuality, windowIdx)
+	return tail, h.installWindow(tmpDir, src.key, capQuality, windowIdx)
 }
 
 // invalidateWindowSegments removes every cached segment for one
@@ -874,32 +932,33 @@ func (h *HLSHandler) invalidateWindowSegments(itemID, quality string, windowIdx 
 // deterministic (AAC + LC + plain ffmpeg path, no NVENC) so the retry
 // is rarely needed in practice, but symmetry keeps the recovery
 // behaviour predictable across both pipelines.
-func (h *HLSHandler) ensureAudioWindow(ctx context.Context, itemID, src string, audioIdx int, probe *Probe, windowIdx, requestedSeg int) error {
+func (h *HLSHandler) ensureAudioWindow(ctx context.Context, src *source, audioIdx, windowIdx, requestedSeg int) error {
 	audioKey := "audio-" + strconv.Itoa(audioIdx)
-	initPath := h.cachePath(itemID, audioKey, "init")
-	requestedSegPath := h.cachePath(itemID, audioKey, strconv.Itoa(requestedSeg))
+	initPath := h.cachePath(src.key, audioKey, "init")
+	requestedSegPath := h.cachePath(src.key, audioKey, strconv.Itoa(requestedSeg))
 	if statOK(initPath) && statOK(requestedSegPath) {
 		return nil
 	}
-	mu := h.lockFor(fmt.Sprintf("awin/%s/%d/%d", itemID, audioIdx, windowIdx))
+	mu := h.lockFor(fmt.Sprintf("awin/%s/%d/%d", src.key, audioIdx, windowIdx))
 	mu.Lock()
 	defer mu.Unlock()
 	if statOK(initPath) && statOK(requestedSegPath) {
 		return nil
 	}
 
-	windowKey := fmt.Sprintf("%s/%s/%d", itemID, audioKey, windowIdx)
+	windowKey := fmt.Sprintf("%s/%s/%d", src.key, audioKey, windowIdx)
 	return h.produceWindow(ctx, "awin", windowKey, requestedSeg,
 		func() bool { return statOK(initPath) && statOK(requestedSegPath) },
 		func() (string, error) {
-			return h.transcodeAudioWindow(ctx, itemID, src, audioIdx, audioKey, probe, windowIdx)
+			return h.transcodeAudioWindow(ctx, src, audioIdx, audioKey, windowIdx)
 		},
-		func() error { return h.invalidateWindowSegments(itemID, audioKey, windowIdx) },
+		func() error { return h.invalidateWindowSegments(src.key, audioKey, windowIdx) },
 	)
 }
 
-func (h *HLSHandler) transcodeAudioWindow(ctx context.Context, itemID, src string, audioIdx int, audioKey string, probe *Probe, windowIdx int) (string, error) {
-	initPath := h.cachePath(itemID, audioKey, "init")
+func (h *HLSHandler) transcodeAudioWindow(ctx context.Context, src *source, audioIdx int, audioKey string, windowIdx int) (string, error) {
+	probe := src.probe
+	initPath := h.cachePath(src.key, audioKey, "init")
 	windowStartSec := windowIdx * windowSize * segmentSec
 	windowDurSec := windowSize * segmentSec
 	if probe != nil && probe.DurationMs > 0 {
@@ -921,16 +980,31 @@ func (h *HLSHandler) transcodeAudioWindow(ctx context.Context, itemID, src strin
 	}
 	defer os.RemoveAll(tmpDir)
 
+	// The input: the original's audio track audioIdx, or the window's
+	// segments of the package's stereo rendition audioIdx (source.input),
+	// whose one track is 0:a:0.
+	audioDir, stream := "", fmt.Sprintf("0:a:%d", audioIdx)
+	if src.fromPackage() {
+		if audioIdx >= len(src.mf.Renditions.Audio) {
+			return "", fmt.Errorf("the package has no audio rendition %d", audioIdx)
+		}
+		audioDir, stream = src.mf.Renditions.Audio[audioIdx].Dir, "0:a:0"
+	}
+	in, err := src.input(audioDir, "a", windowStartSec, windowDurSec)
+	if err != nil {
+		return "", err
+	}
 	args := []string{
 		"-y", "-hide_banner", "-loglevel", "warning",
 		"-fflags", "+genpts+igndts+discardcorrupt",
 		"-err_detect", "ignore_err",
-		"-ss", strconv.Itoa(windowStartSec),
-		"-i", src,
+	}
+	args = append(args, in...)
+	args = append(args,
 		"-t", strconv.Itoa(windowDurSec),
 		"-vn",
-		"-map", fmt.Sprintf("0:a:%d", audioIdx),
-	}
+		"-map", stream,
+	)
 	args = append(args, aacArgs(h.AACEncoder, windowAudioBitrate)...)
 	args = append(args,
 		"-output_ts_offset", strconv.Itoa(windowStartSec),
@@ -945,11 +1019,11 @@ func (h *HLSHandler) transcodeAudioWindow(ctx context.Context, itemID, src strin
 		"-hls_segment_filename", filepath.Join(tmpDir, "seg_%d.m4s"),
 		filepath.Join(tmpDir, "playlist.m3u8"),
 	)
-	tail, err := h.runFFmpeg(ctx, args, fmt.Sprintf("awin %d/%d %s", audioIdx, windowIdx, filepath.Base(src)))
+	tail, err := h.runFFmpeg(ctx, args, fmt.Sprintf("awin %d/%d %s", audioIdx, windowIdx, src.label()))
 	if err != nil {
 		return tail, err
 	}
-	return tail, h.installWindow(tmpDir, itemID, audioKey, windowIdx)
+	return tail, h.installWindow(tmpDir, src.key, audioKey, windowIdx)
 }
 
 // installWindow patches each per-window segment's tfdt to land in the
@@ -1359,19 +1433,18 @@ func statOK(p string) bool {
 // audio track. Same shape as the video Playlist: VOD, fixed
 // segmentSec segments, #EXT-X-MAP to init.mp4.
 func (h *HLSHandler) AudioPlaylist(w http.ResponseWriter, r *http.Request) {
-	itemID := chi.URLParam(r, "itemId")
 	audioStr := chi.URLParam(r, "audioIdx")
 	audioIdx, err := strconv.Atoi(audioStr)
 	if err != nil || audioIdx < 0 {
 		http.Error(w, "bad audio index", http.StatusBadRequest)
 		return
 	}
-	_, probe, err := h.resolveSource(r.Context(), itemID, bearerFrom(r))
+	src, err := h.requestSource(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	durSec := float64(probe.DurationMs) / 1000.0
+	durSec := float64(src.probe.DurationMs) / 1000.0
 	if durSec <= 0 {
 		http.Error(w, "source has no duration", http.StatusBadGateway)
 		return
@@ -1406,31 +1479,29 @@ func (h *HLSHandler) AudioPlaylist(w http.ResponseWriter, r *http.Request) {
 // track. Produced by the same window 0 invocation that emits the audio
 // segments, mirroring the video init/segment alignment guarantee.
 func (h *HLSHandler) AudioInitSegment(w http.ResponseWriter, r *http.Request) {
-	itemID := chi.URLParam(r, "itemId")
 	audioStr := chi.URLParam(r, "audioIdx")
 	audioIdx, err := strconv.Atoi(audioStr)
 	if err != nil || audioIdx < 0 {
 		http.Error(w, "bad audio index", http.StatusBadRequest)
 		return
 	}
-	src, probe, err := h.resolveSource(r.Context(), itemID, bearerFrom(r))
+	src, err := h.requestSource(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	if err := h.ensureAudioWindow(r.Context(), itemID, src, audioIdx, probe, 0, 0); err != nil {
-		log.Printf("hls audio init %s/%d: %v", itemID, audioIdx, err)
+	if err := h.ensureAudioWindow(r.Context(), src, audioIdx, 0, 0); err != nil {
+		log.Printf("hls audio init %s/%d: %v", src.key, audioIdx, err)
 		windowError(w, err, "audio init")
 		return
 	}
-	h.serveCached(w, r, h.cachePath(itemID, "audio-"+audioStr, "init"), "video/mp4")
+	h.serveCached(w, r, h.cachePath(src.key, "audio-"+audioStr, "init"), "video/mp4")
 }
 
 // AudioSegment serves one audio segment. Windowed transcode: a cache
 // miss runs one ffmpeg for the whole containing window so the AAC
 // frame boundaries inside the window line up without overlap.
 func (h *HLSHandler) AudioSegment(w http.ResponseWriter, r *http.Request) {
-	itemID := chi.URLParam(r, "itemId")
 	audioStr := chi.URLParam(r, "audioIdx")
 	segStr := chi.URLParam(r, "seg")
 	audioIdx, err := strconv.Atoi(audioStr)
@@ -1443,12 +1514,12 @@ func (h *HLSHandler) AudioSegment(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad segment number", http.StatusBadRequest)
 		return
 	}
-	src, probe, err := h.resolveSource(r.Context(), itemID, bearerFrom(r))
+	src, err := h.requestSource(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	if probe != nil && probe.DurationMs > 0 {
+	if probe := src.probe; probe != nil && probe.DurationMs > 0 {
 		total := float64(probe.DurationMs) / 1000.0
 		if float64(seg*segmentSec) >= total {
 			http.Error(w, "segment past end", http.StatusNotFound)
@@ -1456,12 +1527,12 @@ func (h *HLSHandler) AudioSegment(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	windowIdx := seg / windowSize
-	if err := h.ensureAudioWindow(r.Context(), itemID, src, audioIdx, probe, windowIdx, seg); err != nil {
-		log.Printf("hls audio seg %s/%d/%d (win %d): %v", itemID, audioIdx, seg, windowIdx, err)
+	if err := h.ensureAudioWindow(r.Context(), src, audioIdx, windowIdx, seg); err != nil {
+		log.Printf("hls audio seg %s/%d/%d (win %d): %v", src.key, audioIdx, seg, windowIdx, err)
 		windowError(w, err, "audio segment")
 		return
 	}
-	cachePath := h.cachePath(itemID, "audio-"+audioStr, strconv.Itoa(seg))
+	cachePath := h.cachePath(src.key, "audio-"+audioStr, strconv.Itoa(seg))
 	if _, err := os.Stat(cachePath); err != nil {
 		http.Error(w, "segment unavailable", http.StatusNotFound)
 		return

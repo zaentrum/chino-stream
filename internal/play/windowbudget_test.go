@@ -104,20 +104,20 @@ printf 'init' > "$out/init.mp4"; printf 'seg' > "$out/seg_0.m4s"`)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
-	if err := h.ensureAudioWindow(ctx, "i1", src, 0, probe, 0, 0); err == nil {
+	if err := h.ensureAudioWindow(ctx, &source{key: "i1", file: src, probe: probe}, 0, 0, 0); err == nil {
 		t.Fatal("a run killed with its request must fail")
 	}
 	dead, cancelDead := context.WithCancel(context.Background())
 	cancelDead()
 	for i := 0; i < 3; i++ {
-		if err := h.ensureAudioWindow(dead, "i1", src, 0, probe, 0, 0); err == nil {
+		if err := h.ensureAudioWindow(dead, &source{key: "i1", file: src, probe: probe}, 0, 0, 0); err == nil {
 			t.Fatal("a request already gone must not produce the window")
 		}
 	}
 	if rec, _ := h.windowFails.check("i1/audio-0/0"); rec.count != 0 {
 		t.Fatalf("abandoned runs were charged: %+v", rec)
 	}
-	if err := h.ensureAudioWindow(context.Background(), "i1", src, 0, probe, 0, 0); err != nil {
+	if err := h.ensureAudioWindow(context.Background(), &source{key: "i1", file: src, probe: probe}, 0, 0, 0); err != nil {
 		t.Fatalf("the next live request: %v", err)
 	}
 }

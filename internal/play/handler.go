@@ -78,6 +78,9 @@ func (h *Handler) Play(w http.ResponseWriter, r *http.Request) {
 	path, err := h.Catalog.PrimaryAssetPath(r.Context(), itemID, bearerFrom(r))
 	if err != nil {
 		if errors.Is(err, catalog.ErrNotFound) {
+			if h.noOriginal(w, r, itemID, nil) {
+				return
+			}
 			http.Error(w, "no playback asset for item", http.StatusNotFound)
 			return
 		}
@@ -97,6 +100,9 @@ func (h *Handler) Play(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := os.Stat(clean); err != nil {
+		if h.noOriginal(w, r, itemID, nil) {
+			return
+		}
 		http.Error(w, "file missing on filesystem", http.StatusNotFound)
 		return
 	}
@@ -271,9 +277,22 @@ func (h *Handler) EmbeddedSubtitle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad stream index", http.StatusBadRequest)
 		return
 	}
+	// A package's subtitle sub<idx> when there is no original to read
+	// (source.go): its WebVTT file, the one stream of it extracted alike.
+	fromPackage := func(src *source) {
+		sub := packageSubtitle(src.mf, idx)
+		if sub == nil || sub.Format != "webvtt" {
+			http.Error(w, "the package has no WebVTT subtitle "+idxStr, http.StatusNotFound)
+			return
+		}
+		h.serveSubtitleExtract(w, r, src.pkg.path(sub.Path), 0, src.key, itemID+"#sub:"+idxStr)
+	}
 	path, err := h.Catalog.PrimaryAssetPath(r.Context(), itemID, bearerFrom(r))
 	if err != nil {
 		if errors.Is(err, catalog.ErrNotFound) {
+			if h.noOriginal(w, r, itemID, fromPackage) {
+				return
+			}
 			http.Error(w, "no playback asset for item", http.StatusNotFound)
 			return
 		}
@@ -291,9 +310,19 @@ func (h *Handler) EmbeddedSubtitle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := os.Stat(clean); err != nil {
+		if h.noOriginal(w, r, itemID, fromPackage) {
+			return
+		}
 		http.Error(w, "file missing on filesystem", http.StatusNotFound)
 		return
 	}
+	h.serveSubtitleExtract(w, r, clean, idx, itemID, itemID+"#sub:"+idxStr)
+}
+
+// serveSubtitleExtract serves the subtitle stream idx of the file src as
+// WebVTT from ?t= on (see EmbeddedSubtitle), cached under key.
+func (h *Handler) serveSubtitleExtract(w http.ResponseWriter, r *http.Request, src string, idx int, key, label string) {
+	clean := src
 	startSec := 0
 	if v := r.URL.Query().Get("t"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
@@ -313,15 +342,15 @@ func (h *Handler) EmbeddedSubtitle(w http.ResponseWriter, r *http.Request) {
 	if h.CacheDir == "" {
 		w.WriteHeader(http.StatusOK)
 		cmd := BuildEmbeddedSubtitleFFmpeg(r.Context(), h.FFmpegBin, clean, idx, startSec)
-		if err := PipeFFmpegTo(cmd, w, itemID+"#sub:"+idxStr); err != nil {
-			log.Printf("subtitle extract %s#sub:%s: %v", itemID, idxStr, err)
+		if err := PipeFFmpegTo(cmd, w, label); err != nil {
+			log.Printf("subtitle extract %s: %v", label, err)
 		}
 		return
 	}
 
-	cachePath := h.subCachePath(itemID, idx, startSec)
-	if err := h.ensureSubtitleCached(r.Context(), clean, idx, startSec, itemID, cachePath); err != nil {
-		log.Printf("subtitle extract %s#sub:%d: %v", itemID, idx, err)
+	cachePath := h.subCachePath(key, idx, startSec)
+	if err := h.ensureSubtitleCached(r.Context(), clean, idx, startSec, label, cachePath); err != nil {
+		log.Printf("subtitle extract %s: %v", label, err)
 		http.Error(w, "subtitle extract failed", http.StatusBadGateway)
 		return
 	}
@@ -359,7 +388,7 @@ func (h *Handler) subLockFor(key string) *sync.Mutex {
 // missing. Concurrent callers for the same (item, idx, startSec) all
 // block on a single mutex; the loser of the lock race re-checks the
 // file on entry and serves from disk without re-running ffmpeg.
-func (h *Handler) ensureSubtitleCached(ctx context.Context, src string, idx, startSec int, itemID, cachePath string) error {
+func (h *Handler) ensureSubtitleCached(ctx context.Context, src string, idx, startSec int, label, cachePath string) error {
 	if st, err := os.Stat(cachePath); err == nil && st.Size() > 0 {
 		return nil
 	}
@@ -378,7 +407,6 @@ func (h *Handler) ensureSubtitleCached(ctx context.Context, src string, idx, sta
 	}
 	tmpName := tmp.Name()
 	cmd := BuildEmbeddedSubtitleFFmpeg(ctx, h.FFmpegBin, src, idx, startSec)
-	label := fmt.Sprintf("%s#sub:%d", itemID, idx)
 	if err := PipeFFmpegTo(cmd, tmp, label); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpName)
@@ -393,6 +421,27 @@ func (h *Handler) ensureSubtitleCached(ctx context.Context, src string, idx, sta
 		return err
 	}
 	return nil
+}
+
+// noOriginal answers a request for the item itemID that has no original to
+// read (none, retired, gone from the storage) from its package: serve, when
+// set, serves it; without serve only the original can answer and it is 404
+// errNeedsOriginal. 404 errNotPlayable when katalog-api names a package that
+// cannot be read. false when the item has no package either: the caller
+// answers as it did.
+func (h *Handler) noOriginal(w http.ResponseWriter, r *http.Request, itemID string, serve func(*source)) bool {
+	src, notPlayable := packageSource(r.Context(), h.Packages, itemID, r.URL.Query().Get("v"))
+	switch {
+	case src != nil && serve != nil:
+		serve(src)
+	case src != nil:
+		http.Error(w, errNeedsOriginal.Error(), http.StatusNotFound)
+	case notPlayable:
+		http.Error(w, errNotPlayable.Error(), http.StatusNotFound)
+	default:
+		return false
+	}
+	return true
 }
 
 // Info returns the codec probe + dispatch decision as JSON so the player
@@ -445,9 +494,21 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 		log.Printf("resolve %s: %v", itemID, err)
 	}
 
+	// No original to read: the package, transcoded on the fly.
+	fromPackage := func(src *source) {
+		mode, reason := decideSource(src, infoCaps)
+		title := src.mf.Title
+		if title == "" && src.pkg.library() {
+			title, _ = libraryTitle(src.pkg.dir)
+		}
+		h.writeSourceInfo(w, title, src.probe, mode, reason)
+	}
 	path, err := h.Catalog.PrimaryAssetPath(r.Context(), itemID, bearerFrom(r))
 	if err != nil {
 		if errors.Is(err, catalog.ErrNotFound) {
+			if h.noOriginal(w, r, itemID, fromPackage) {
+				return
+			}
 			http.Error(w, "no playback asset for item", http.StatusNotFound)
 			return
 		}
@@ -466,6 +527,9 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if _, err := os.Stat(clean); err != nil {
+		if h.noOriginal(w, r, itemID, fromPackage) {
+			return
+		}
 		http.Error(w, "file missing on filesystem", http.StatusNotFound)
 		return
 	}
@@ -481,6 +545,12 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 	// say "passthrough" for h264 sources even when the player is
 	// going to be routed to remux because of multichannel audio.
 	mode, reason := probe.DecideWith(infoCaps)
+	h.writeSourceInfo(w, filepath.Base(clean), &probe, mode, reason)
+}
+
+// writeSourceInfo answers /play/info for an on-the-fly source: its file
+// name (a package's title), its probe, the mode and why.
+func (h *Handler) writeSourceInfo(w http.ResponseWriter, filename string, probe *Probe, mode, reason string) {
 	// Surface the available quality rungs so the client can render a
 	// picker. Passthrough ignores the q parameter. Remux honours it on
 	// the HLS path (it runs the same ladder) but is not offered the
@@ -502,7 +572,7 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"filename":        filepath.Base(clean),
+		"filename":        filename,
 		"container":       probe.Container,
 		"video_codec":     probe.VideoCodec,
 		"audio_codec":     probe.AudioCodec,

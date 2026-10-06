@@ -219,7 +219,7 @@ func TestAdvertisedResolutionIsWhatFFmpegEncodes(t *testing.T) {
 		h := &HLSHandler{FFmpegBin: ffmpeg, FFprobeBin: ffprobe, CacheDir: t.TempDir(), TranscodePreset: "ultrafast"}
 		ql := QualityLadder[tc.rung]
 		probe := &Probe{Width: size[0], Height: size[1], DurationMs: 2000}
-		if err := h.ensureVideoWindow(context.Background(), "i1", src, tc.rung, ql, false, probe, 0, 0, tc.cap); err != nil {
+		if err := h.ensureVideoWindow(context.Background(), &source{key: "i1", file: src, probe: probe}, tc.rung, ql, 0, 0, tc.cap); err != nil {
 			t.Fatalf("%s %s: %v", tc.src, tc.rung, err)
 		}
 		q := videoCacheQuality(tc.rung, tc.cap)

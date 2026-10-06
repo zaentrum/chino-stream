@@ -1,0 +1,88 @@
+{
+  "schema": "zaentrum.library.package/2",
+  "packageId": "6f6f6f6f-0000-4000-8000-00000000006f",
+  "createdAt": "2026-10-06T12:00:00Z",
+  "packagedBy": "packager version v3.4.2-c819dea-release",
+  "state": "complete",
+  "role": "canonical",
+  "durationMs": 24000,
+  "renditions": {
+    "video": [
+      {
+        "id": "v0",
+        "dir": "hls/v0",
+        "codec": "hvc1.1.6.L30.90",
+        "width": 128,
+        "height": 72,
+        "bitrateBps": 0,
+        "hdr": false,
+        "frameRate": "24000/1001",
+        "segments": 4,
+        "targetDuration": 11,
+        "videoRange": "SDR",
+        "label": "source",
+        "encoder": "copy",
+        "dynamicRange": "sdr",
+        "sourceStreamIndex": 0
+      }
+    ],
+    "audio": [
+      {
+        "id": "a0",
+        "dir": "hls/a0",
+        "codec": "mp4a.40.2",
+        "language": "eng",
+        "title": "",
+        "default": true,
+        "channels": 2,
+        "bitrateBps": 12000,
+        "segments": 4,
+        "visible": true,
+        "sourceStreamIndex": 1,
+        "purpose": "main",
+        "purposeFrom": "assumed",
+        "group": "audio",
+        "name": "English"
+      }
+    ]
+  },
+  "subtitles": [
+    {
+      "id": "sub0",
+      "path": "subs/0.vtt",
+      "language": "eng",
+      "title": "",
+      "default": false,
+      "forced": false,
+      "format": "webvtt",
+      "visible": true,
+      "sourceStreamIndex": 2,
+      "purpose": "dialogue",
+      "purposeFrom": "assumed",
+      "name": "English"
+    }
+  ],
+  "trickplay": null,
+  "hls": {
+    "master": "hls/master.m3u8",
+    "segmentSeconds": 6,
+    "audioGroups": [
+      "audio"
+    ],
+    "subtitleGroup": null
+  },
+  "sizeBytes": null,
+  "peakBandwidthBps": null,
+  "fidelity": {
+    "lossless": true,
+    "losses": []
+  },
+  "essence": {},
+  "checksums": {
+    "file": "checksums.sha256",
+    "algorithm": "sha256",
+    "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "files": 0,
+    "bytes": 0
+  }
+}

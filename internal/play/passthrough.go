@@ -250,17 +250,32 @@ func probeKeyframes(ctx context.Context, ffprobeBin, src string) ([]float64, err
 	return kf, nil
 }
 
+// copySource is the original the stream-copy request r reads: /copy/ needs
+// the original's own bytes, so a package is never stream-copied (the master
+// never points a client there for one) and answers 404.
+func (h *HLSHandler) copySource(w http.ResponseWriter, r *http.Request) *source {
+	src, err := h.requestSource(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return nil
+	}
+	if src.fromPackage() {
+		http.Error(w, "stream copy needs the original", http.StatusNotFound)
+		return nil
+	}
+	return src
+}
+
 // PassthroughPlaylist serves the single-rendition media playlist for a
 // stream-copy passthrough. EXTINF durations come from the source's
 // actual IDR spacing because -c copy can't re-time samples.
 func (h *HLSHandler) PassthroughPlaylist(w http.ResponseWriter, r *http.Request) {
-	itemID := chi.URLParam(r, "itemId")
-	src, _, err := h.resolveSource(r.Context(), itemID, bearerFrom(r))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+	src := h.copySource(w, r)
+	if src == nil {
 		return
 	}
-	plan, err := h.loadOrBuildPlan(r.Context(), itemID, src)
+	itemID := src.key
+	plan, err := h.loadOrBuildPlan(r.Context(), itemID, src.file)
 	if err != nil {
 		log.Printf("passthrough plan %s: %v", itemID, err)
 		http.Error(w, "plan failed", http.StatusBadGateway)
@@ -298,14 +313,13 @@ func (h *HLSHandler) PassthroughPlaylist(w http.ResponseWriter, r *http.Request)
 // valid init.mp4 with codec configs derived from the source's avcC /
 // esds boxes.
 func (h *HLSHandler) PassthroughInit(w http.ResponseWriter, r *http.Request) {
-	itemID := chi.URLParam(r, "itemId")
-	src, _, err := h.resolveSource(r.Context(), itemID, bearerFrom(r))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+	src := h.copySource(w, r)
+	if src == nil {
 		return
 	}
+	itemID := src.key
 	initPath := h.cachePath(itemID, "copy-"+copyPipelineVersion, "init")
-	if err := h.ensurePassthroughInit(r.Context(), src, initPath); err != nil {
+	if err := h.ensurePassthroughInit(r.Context(), src.file, initPath); err != nil {
 		log.Printf("passthrough init %s: %v", itemID, err)
 		http.Error(w, "init failed", http.StatusBadGateway)
 		return
@@ -374,12 +388,12 @@ func (h *HLSHandler) PassthroughSegment(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "bad segment", http.StatusBadRequest)
 		return
 	}
-	src, _, err := h.resolveSource(r.Context(), itemID, bearerFrom(r))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+	src := h.copySource(w, r)
+	if src == nil {
 		return
 	}
-	plan, err := h.loadOrBuildPlan(r.Context(), itemID, src)
+	itemID = src.key
+	plan, err := h.loadOrBuildPlan(r.Context(), itemID, src.file)
 	if err != nil {
 		log.Printf("passthrough plan %s: %v", itemID, err)
 		http.Error(w, "plan failed", http.StatusBadGateway)
@@ -390,7 +404,7 @@ func (h *HLSHandler) PassthroughSegment(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	cachePath := h.cachePath(itemID, "copy-"+copyPipelineVersion, strconv.Itoa(seg))
-	if err := h.ensurePassthroughSegment(r.Context(), itemID, src, plan, seg, cachePath); err != nil {
+	if err := h.ensurePassthroughSegment(r.Context(), itemID, src.file, plan, seg, cachePath); err != nil {
 		log.Printf("passthrough seg %s/%d: %v", itemID, seg, err)
 		http.Error(w, "segment failed", http.StatusBadGateway)
 		return
