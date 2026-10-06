@@ -9,6 +9,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -356,8 +357,11 @@ func servePlaylistCachedTransform(w http.ResponseWriter, r *http.Request, path, 
 // rendition URI rewritten to carry the inbound query string. Without the
 // rewrite the player would resolve `v0/playlist.m3u8` against the master's
 // URL and drop `?stream=…`, leaving subsequent rendition fetches
-// unauthenticated. A master with one video rendition and one audio group is
-// served as packaged.
+// unauthenticated. A library version's master adds v=<versionId>
+// (pinnedQuery), which pins the session to that version: a newer one
+// superseding it meanwhile, the session ends on the bytes it started on. A
+// master with one video rendition and one audio group is served as
+// packaged.
 //
 // Off the request path it warms the variant the client starts on (the
 // served master's first variant and its audio rendition): their media
@@ -379,7 +383,7 @@ func (h *HLSHandler) servePackagedMaster(w http.ResponseWriter, r *http.Request,
 	if manifestHasHDR(mf) {
 		videoRange = injectVideoRangeTransform(mf)
 	}
-	served := servePlaylistCachedTransform(w, r, p.path("hls", "master.m3u8"), r.URL.RawQuery, nil, func(body string) string {
+	served := servePlaylistCachedTransform(w, r, p.path("hls", "master.m3u8"), pinnedQuery(r.URL.RawQuery, p.versionID), nil, func(body string) string {
 		if videoRange != nil {
 			body = videoRange(body)
 		}
@@ -396,6 +400,24 @@ func (h *HLSHandler) servePackagedMaster(w http.ResponseWriter, r *http.Request,
 		}
 	}
 	goWarm(func() { warmStart(p, start, tSec, segments) })
+}
+
+// pinnedQuery is the query the master of version versionID writes onto its
+// URIs: the request's, any v= it had replaced by v=<versionID>, so every
+// playlist and segment request of the session names the version it plays
+// (resolve.go). The other parameters stay as they came, byte for byte. A
+// package from before the library has no version: the query as it came.
+func pinnedQuery(raw, versionID string) string {
+	if versionID == "" {
+		return raw
+	}
+	var out []string
+	for _, kv := range strings.Split(raw, "&") {
+		if kv != "" && kv != "v" && !strings.HasPrefix(kv, "v=") {
+			out = append(out, kv)
+		}
+	}
+	return strings.Join(append(out, "v="+url.QueryEscape(versionID)), "&")
 }
 
 // goWarm runs a cache warm off the request path. Tests run it in place.
