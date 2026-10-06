@@ -2,7 +2,6 @@ package play
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -39,8 +38,7 @@ func extraURL(item, extra, route string) string {
 // the client says it decodes, the master is the package's: nothing is made
 // on the fly for an extra (the handler has neither a catalog nor an ffmpeg).
 func TestExtraMasterIsTheClientsShareOfItsLadder(t *testing.T) {
-	usePackages(t, filepath.Join("testdata", "packages"))
-	h := &HLSHandler{}
+	h := &HLSHandler{Packages: usePackages(t, filepath.Join("testdata", "packages"))}
 	const query = "?stream=dXNlci0xfDE3OTEwNjI5NDM.c2ln&caps=avc,aac"
 	w := get(h, extraURL(pkgStereoLadder, extraTrailer, "master.m3u8"+query))
 	if w.Code != 200 || w.Header().Get("Content-Type") != "application/vnd.apple.mpegurl" {
@@ -93,8 +91,7 @@ func TestExtraMasterIsTheClientsShareOfItsLadder(t *testing.T) {
 // where the package has one. What the package has not, and the routes of an
 // item that an extra has none of (trickplay, /info), are 404.
 func TestExtraRenditionsAreServed(t *testing.T) {
-	stagePackages(t, nil, extraTrailer)
-	h := &HLSHandler{}
+	h := &HLSHandler{Packages: stagePackages(t, nil, extraTrailer)}
 	const query = "?stream=dXNlci0xfDE3OTEwNjI5NDM.c2ln&caps=avc,aac"
 	url := func(route string) string { return extraURL(pkgStereoLadder, extraTrailer, route) }
 	for _, rend := range []string{"v0", "v1", "a0"} {
@@ -134,7 +131,7 @@ func TestExtraRenditionsAreServed(t *testing.T) {
 	}
 
 	// A WebVTT rendition, as an extra with a subtitle track has one.
-	root := filepath.Join(PackagesRoot, "extras", extraTrailer[:2], extraTrailer, "hls", "s0")
+	root := filepath.Join(testPackagesRoot, "extras", extraTrailer[:2], extraTrailer, "hls", "s0")
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -165,14 +162,17 @@ func TestExtraRenditionsAreServed(t *testing.T) {
 }
 
 // An extra plays only under its own title, once it is complete: every route
-// of it is 404 under another title (a packaged one, one without a package,
-// the extra's own id), while its package is not complete (.complete
-// missing), when its manifest names no title or cannot be read, for an id
-// that is no UUID, and for the id of an item's package.
+// of it is 404 under another title than the one katalog-api answers it as
+// an extra of (a packaged one, one without a package, the extra's own id),
+// for an extra katalog-api does not know (not packaged, removed) or answers
+// with no title, while its package is not complete (.complete missing), and
+// for an id that is no UUID or the id of an item's package. When
+// katalog-api answers it as another title's, that title's it is from the
+// next lookup on; while katalog-api cannot say, 502.
 func TestAnExtraIsServedOnlyUnderItsTitle(t *testing.T) {
 	routes := []string{"master.m3u8", "v0/playlist.m3u8", "a0/playlist.m3u8", "v0/iframes.m3u8", "v0/init.mp4",
 		"v0/seg-00001.m4s", "a0/seg-00004.m4s"}
-	h := &HLSHandler{}
+	var h *HLSHandler
 	codes := func(item, extra string) map[string]int {
 		out := map[string]int{}
 		for _, route := range routes {
@@ -194,7 +194,7 @@ func TestAnExtraIsServedOnlyUnderItsTitle(t *testing.T) {
 		}
 	}
 
-	stagePackages(t, nil, extraTrailer)
+	h = &HLSHandler{Packages: stagePackages(t, nil, extraTrailer)}
 	check(t, pkgStereoLadder, extraTrailer, http.StatusOK)
 	for _, other := range []string{pkgLadder, "00000000-0000-4000-8000-000000000000", extraTrailer, strings.ToUpper(pkgStereoLadder)} {
 		check(t, other, extraTrailer, http.StatusNotFound)
@@ -203,55 +203,64 @@ func TestAnExtraIsServedOnlyUnderItsTitle(t *testing.T) {
 		"7", "7a11e700", "7a11e700-0000-4000-8000-00000000000", "7a11e700-0000-4000-8000-0000000000091",
 		"7a11e700-0000-4000-8000-00000000000g", "7a11e700_0000_4000_8000_000000000009", "..",
 		"..%2F..%2Fmovies%2F57%2F" + pkgStereoLadder, pkgStereoLadder,
+		"7a11e700-0000-4000-8000-00000000000a", // a UUID katalog-api knows no extra of
 	} {
 		check(t, pkgStereoLadder, id, http.StatusNotFound)
 	}
 
 	// Not complete: its package is in place, its .complete not yet.
-	if err := os.Remove(filepath.Join(PackagesRoot, "extras", extraTrailer[:2], extraTrailer, ".complete")); err != nil {
+	dir := filepath.Join(testPackagesRoot, "extras", extraTrailer[:2], extraTrailer)
+	if err := os.Remove(filepath.Join(dir, ".complete")); err != nil {
 		t.Fatal(err)
 	}
 	check(t, pkgStereoLadder, extraTrailer, http.StatusNotFound)
 
-	// A manifest that names no title.
-	stagePackages(t, func(m map[string]any) { delete(m, "parentId") }, extraTrailer)
-	check(t, pkgStereoLadder, extraTrailer, http.StatusNotFound)
-
-	// A manifest that names another title, rewritten in place: the new one
-	// counts, not the one read before.
+	// katalog-api names no title.
+	f := newFakeLibrary(t)
+	h = &HLSHandler{Packages: f.resolver()}
 	stagePackages(t, nil, extraTrailer)
+	dir = filepath.Join(testPackagesRoot, "extras", extraTrailer[:2], extraTrailer)
+	f.setExtra(catalog.ExtraPlayback{ExtraID: extraTrailer, Dir: dir, Record: "manifest.json"})
+	check(t, pkgStereoLadder, extraTrailer, http.StatusNotFound)
+
+	// katalog-api answers it as another title's: that one's from the next
+	// lookup on — the title in its manifest no longer counts.
+	now := time.Now()
+	h = &HLSHandler{Packages: f.resolver()}
+	h.Packages.now = func() time.Time { return now }
+	f.setExtra(catalog.ExtraPlayback{ExtraID: extraTrailer, ItemID: pkgStereoLadder, Dir: dir, Record: "manifest.json"})
 	check(t, pkgStereoLadder, extraTrailer, http.StatusOK)
-	mfPath := filepath.Join(PackagesRoot, "extras", extraTrailer[:2], extraTrailer, "manifest.json")
-	raw, err := os.ReadFile(mfPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		t.Fatal(err)
-	}
-	m["parentId"] = pkgLadder
-	if raw, err = json.Marshal(m); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(mfPath, raw, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	future := time.Now().Add(time.Minute) // a new mtime, whatever the file system's resolution
-	if err := os.Chtimes(mfPath, future, future); err != nil {
-		t.Fatal(err)
-	}
+	f.setExtra(catalog.ExtraPlayback{ExtraID: extraTrailer, ItemID: pkgLadder, Dir: dir, Record: "manifest.json"})
+	now = now.Add(resolveFresh + time.Second)
+	get(h, extraURL(pkgLadder, extraTrailer, "master.m3u8")) // the stale answer, revalidated meanwhile
+	waitLookups(t, h.Packages)
 	check(t, pkgStereoLadder, extraTrailer, http.StatusNotFound)
 	check(t, pkgLadder, extraTrailer, http.StatusOK)
 
-	// A manifest that cannot be read.
-	if err := os.WriteFile(mfPath, []byte("{"), 0o644); err != nil {
-		t.Fatal(err)
+	// katalog-api down, nothing cached.
+	captureLog(t)
+	f.setDown(true)
+	h = &HLSHandler{Packages: f.resolver()}
+	check(t, pkgLadder, extraTrailer, http.StatusBadGateway)
+}
+
+// An extra in the library (<title>/extras/<extraId>/, read by its
+// package.json) is served as one in the package store is.
+func TestALibraryExtraIsServed(t *testing.T) {
+	l := stageLibrary(t)
+	dir := filepath.Join(l.item, "extras", libExtra)
+	l.katalog.setExtra(catalog.ExtraPlayback{ExtraID: libExtra, ItemID: libItem, Dir: dir, Record: "package.json"})
+	h := &HLSHandler{Packages: l.packages}
+	w := get(h, extraURL(libItem, libExtra, "master.m3u8?caps=avc,aac"))
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "\nv0/playlist.m3u8?caps=avc,aac\n") {
+		t.Fatalf("master: %d\n%s", w.Code, w.Body)
 	}
-	if err := os.Chtimes(mfPath, future.Add(time.Minute), future.Add(time.Minute)); err != nil {
-		t.Fatal(err)
+	if w := get(h, extraURL(libItem, libExtra, "v1/seg-00002.m4s")); w.Code != 200 || w.Body.String() != "e3e3e3e3 seg-00002.m4s" {
+		t.Errorf("segment: %d %q", w.Code, w.Body)
 	}
-	check(t, pkgLadder, extraTrailer, http.StatusNotFound)
+	if w := get(h, extraURL(libExtra, libExtra, "master.m3u8")); w.Code != 404 {
+		t.Errorf("under its own id: %d", w.Code)
+	}
 }
 
 // An extra is no item: its package is not among the packaged ids (the Zap

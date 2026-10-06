@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/zaentrum/chino-stream/internal/catalog"
-	"github.com/zaentrum/chino-stream/internal/play"
 )
 
 // signingKey is a STREAM_SIGNING_KEY (32 bytes, base64).
@@ -59,13 +58,23 @@ func oidcIssuer(t *testing.T) string {
 // package folder dir, as it does for a package from before the library.
 func katalogAPI(t *testing.T, item, dir string) *catalog.Client {
 	t.Helper()
+	return katalogAnswering(t, map[string]any{
+		"/api/v1/items/" + item + "/playback": map[string]any{"itemId": item, "type": "movie",
+			"package": map[string]any{"versionId": nil, "dir": dir, "record": "manifest.json"}, "previous": []any{}, "original": nil},
+	})
+}
+
+// katalogAnswering is a katalog-api answering each path with its JSON,
+// "not found" for any other.
+func katalogAnswering(t *testing.T, answers map[string]any) *catalog.Client {
+	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/items/"+item+"/playback" {
+		a, ok := answers[r.URL.Path]
+		if !ok {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"itemId": item, "type": "movie",
-			"package": map[string]any{"versionId": nil, "dir": dir, "record": "manifest.json"}, "previous": []any{}, "original": nil})
+		_ = json.NewEncoder(w).Encode(a)
 	}))
 	t.Cleanup(srv.Close)
 	return catalog.New(srv.URL)
@@ -148,11 +157,11 @@ func TestExtrasTakeTheStreamToken(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	old := play.PackagesRoot
-	play.PackagesRoot = root
-	t.Cleanup(func() { play.PackagesRoot = old })
-
 	h, err := NewRouter(Deps{
+		Catalog: katalogAnswering(t, map[string]any{
+			"/api/v1/extras/" + extra + "/playback": map[string]any{"extraId": extra, "itemId": item, "dir": dir,
+				"record": "manifest.json", "packagedAt": "2026-10-06T08:00:00Z"},
+		}),
 		OIDCIssuer: oidcIssuer(t), OIDCAudience: "chino-web", AuthEnabled: true,
 		StreamSigningKey: signingKey, FFmpegBin: "ffmpeg", FFprobeBin: "ffprobe", HLSCacheDir: t.TempDir(),
 	})

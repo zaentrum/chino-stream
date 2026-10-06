@@ -31,9 +31,12 @@ const (
 	pkgSingle = "5119e000-0000-4000-8000-000000000004"
 )
 
+// testPackagesRoot is the package store a test serves (usePackages).
+var testPackagesRoot string
+
 // usePackages serves the package store at root for the test: a resolver
 // asking a katalog-api that answers its folders as katalog-api does before
-// the library (legacyLibrary), PackagesRoot pointed at it, the per-item
+// the library (legacyLibrary), testPackagesRoot pointed at it, the per-item
 // caches emptied before and after, cache warms run in place (no goroutine
 // outlives the test).
 func usePackages(t *testing.T, root string) *Resolver {
@@ -42,12 +45,12 @@ func usePackages(t *testing.T, root string) *Resolver {
 	if err != nil {
 		t.Fatal(err)
 	}
-	old, oldWarm := PackagesRoot, goWarm
-	PackagesRoot = abs
+	old, oldWarm := testPackagesRoot, goWarm
+	testPackagesRoot = abs
 	goWarm = func(f func()) { f() }
 	resetPackageCaches()
 	t.Cleanup(func() {
-		PackagesRoot, goWarm = old, oldWarm
+		testPackagesRoot, goWarm = old, oldWarm
 		resetPackageCaches()
 	})
 	return legacyLibrary(t, abs).resolver()

@@ -179,9 +179,9 @@ func legacyLibrary(t *testing.T, root string) *fakeLibrary {
 // test uses (usePackages).
 func legacyDir(t *testing.T, id string) string {
 	t.Helper()
-	dirs, err := filepath.Glob(filepath.Join(PackagesRoot, "*", id[:2], id))
+	dirs, err := filepath.Glob(filepath.Join(testPackagesRoot, "*", id[:2], id))
 	if err != nil || len(dirs) != 1 {
-		t.Fatalf("package %s under %s: %v %v", id, PackagesRoot, dirs, err)
+		t.Fatalf("package %s under %s: %v %v", id, testPackagesRoot, dirs, err)
 	}
 	return dirs[0]
 }

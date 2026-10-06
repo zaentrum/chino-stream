@@ -94,7 +94,7 @@ func cached(t *testing.T) []string {
 	var out []string
 	packagedCache.Range(func(k, _ any) bool {
 		p := k.(string)
-		rel, err := filepath.Rel(PackagesRoot, p)
+		rel, err := filepath.Rel(testPackagesRoot, p)
 		if err != nil {
 			t.Fatal(err)
 		}

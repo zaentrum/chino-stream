@@ -25,18 +25,6 @@ import (
 	"github.com/zaentrum/chino-stream/internal/pkgmanifest"
 )
 
-// PackagesRoot is the package store of the packages from before the
-// library, where the packager wrote them:
-//
-//	{category}/{shard2}/{itemId}/{manifest.json, .complete, hls/, …}
-//	extras/{shard2}/{extraId}/…
-//
-// An item's package is found through katalog-api (resolve.go), in whichever
-// layout it is, and so are the packaged ids; the store is still where an
-// extra's package is looked for, until that asks katalog-api too. A
-// variable only so tests can point it at packages under testdata.
-var PackagesRoot = "/var/lib/katalog/packages"
-
 // packagedFile is the file rel of the package the request r is served from
 // — its item's, pinned by the session's v= (resolve.go) — and the retry to
 // serve it with should it be missing there: the item resolved once more (a
