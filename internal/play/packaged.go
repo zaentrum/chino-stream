@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -19,64 +20,28 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/zaentrum/chino-stream/internal/catalog"
 	"github.com/zaentrum/chino-stream/internal/pkgmanifest"
 )
 
-// PackagesRoot is where katalog-analyzer writes the per-item CMAF
-// trees. Mounted RO into chino-stream pods via the katalog-packages
-// PVC; the path here must match the volumeMount in k8s/deployment.yaml.
-// A variable only so tests can point it at packages under testdata.
-//
-// Layout under PackagesRoot is sharded to keep any single directory's
-// child count bounded:
+// PackagesRoot is the package store of the packages from before the
+// library, where the packager wrote them:
 //
 //	{category}/{shard2}/{itemId}/{manifest.json, .complete, hls/, …}
 //
-// where category is one of {movies, shows, music, other} (mapped from
-// the katalog item type) and shard2 is the first two hex chars of the
-// item uuid. At 10k items per category, ~40 per shard — every fs
-// (incl. NFS) reads that fast.
+// An item's package is found through katalog-api (resolve.go), in whichever
+// layout it is; the store is still where an extra's package is looked for
+// and what the packaged ids are walked from, until both ask katalog-api too.
+// A variable only so tests can point it at packages under testdata.
 var PackagesRoot = "/var/lib/katalog/packages"
 
-// Known top-level category dirs the analyzer writes to. The stream
-// side probes these on read to locate a package for a given item id
-// (it doesn't know the item type from the URL alone).
+// Known top-level category dirs of the package store, which the packaged-ids
+// walk reads.
 //
 // extras, where a title's extras are packaged, is not one and must not
 // become one: an extra is no item, never in the packaged ids or the Zap
 // pool, and served only under its title (extras.go).
 var packageCategories = []string{"movies", "shows", "music", "other"}
-
-// itemRootCache memoises the resolved package directory per item id
-// so subsequent requests skip the probe loop. Entries are kept until
-// pod restart — the only invalidation we'd ever need is when an item
-// gets repackaged into a different category, which doesn't happen in
-// practice (category is derived from a stable item type).
-var itemRootCache sync.Map // map[string]string (itemId -> abs package dir)
-
-// itemRoot returns the on-disk package directory for the given item
-// id, probing each category until one is found. Returns "" when the
-// item has no package on any category. Result is cached.
-func itemRoot(itemID string) string {
-	if itemID == "" {
-		return ""
-	}
-	if v, ok := itemRootCache.Load(itemID); ok {
-		return v.(string)
-	}
-	if len(itemID) < 2 {
-		return ""
-	}
-	shard := strings.ToLower(itemID[:2])
-	for _, cat := range packageCategories {
-		path := filepath.Join(PackagesRoot, cat, shard, itemID)
-		if st, err := os.Stat(path); err == nil && st.IsDir() {
-			itemRootCache.Store(itemID, path)
-			return path
-		}
-	}
-	return ""
-}
 
 // packagedIDsCache memoises the directory walk under PackagesRoot so
 // the listing endpoint doesn't restat ~40k dirs on every Zap session
@@ -193,37 +158,43 @@ func walkCompletedPackageIDs() []string {
 	return ids
 }
 
-// HasCompletedPackage reports whether the given item has a finished
-// CMAF package on disk. Cheap on a cache hit (single stat); cold-path
-// is at most len(packageCategories) stats. Used by the master / init
-// / segment handlers to dispatch between "serve static files from
-// /media/packages" and "fall through to the legacy on-demand
-// transcode".
-func HasCompletedPackage(itemID string) bool {
-	root := itemRoot(itemID)
-	if root == "" {
-		return false
+// packagedFile is the file rel of the package the request r is served from
+// — its item's, pinned by the session's v= (resolve.go) — and the retry to
+// serve it with should it be missing there: the item resolved once more (a
+// version removed after its grace, an answer katalog-api has changed since)
+// and the file in the folder answered then; "" when that is the same folder.
+// path is "" when the item has no package to serve, err set when katalog-api
+// could not say (packagedError).
+func (h *HLSHandler) packagedFile(r *http.Request, rel ...string) (path string, retry func() string, err error) {
+	itemID := chi.URLParam(r, "itemId")
+	pin := r.URL.Query().Get("v")
+	p, _, err := h.Packages.itemPackage(r.Context(), itemID, pin, false)
+	if err != nil || p == nil {
+		if errors.Is(err, catalog.ErrNotFound) {
+			err = nil
+		}
+		return "", nil, err
 	}
-	st, err := os.Stat(filepath.Join(root, ".complete"))
-	return err == nil && !st.IsDir()
+	return p.path(rel...), func() string {
+		h.Packages.forgetComplete(p.dir)
+		again, err := h.Packages.itemPackageAgain(r.Context(), itemID, pin, false)
+		if err != nil || again == nil || again.dir == p.dir {
+			return ""
+		}
+		return again.path(rel...)
+	}, nil
 }
 
-// packagePath joins {item-root}/rel safely. The chi URL params are
-// constrained by route regex (^[va][0-9]+$ or ^s[0-9]+$ for rendId,
-// digits for seg) so a hostile rendId can't traverse out of the item
-// directory, but we still filepath.Clean before stat as a belt-and-
-// braces measure.
-func packagePath(itemID string, rel ...string) string {
-	root := itemRoot(itemID)
-	if root == "" {
-		return ""
-	}
-	parts := append([]string{root}, rel...)
-	return filepath.Clean(filepath.Join(parts...))
+// packagedError answers a packaged request katalog-api could not resolve
+// (down, nothing cached of the item): 502, which players retry, where a file
+// that is not there is a 404.
+func packagedError(w http.ResponseWriter, err error) {
+	log.Printf("resolve: %v", err)
+	http.Error(w, "catalog unavailable", http.StatusBadGateway)
 }
 
-// PackagedPlayableBy reports whether at least one packaged video
-// rendition is HARDWARE-playable on the client: it uses a codec the
+// packagedPlayableBy reports whether at least one packaged video
+// rendition of mf is HARDWARE-playable on the client: it uses a codec the
 // client says it can decode AND its frame height is within the device's
 // HW decoder ceiling for that codec family (caps.VideoMaxHeight). A
 // package from before renditions.json has a single video rendition
@@ -241,14 +212,10 @@ func packagePath(itemID string, rel ...string) string {
 // NOT HW-playable; if NO rendition is HW-playable we return false so
 // the master/playlist paths fall through to the transcode ladder.
 //
-// Returns true when the manifest is unreadable so we don't 404 the
-// player just because we couldn't introspect renditions.
-func PackagedPlayableBy(itemID string, caps Caps) bool {
-	mf, err := ReadPackageManifest(itemID)
-	if err != nil || mf == nil {
-		return true
-	}
-	if len(mf.Renditions.Video) == 0 {
+// Returns true when the manifest could not be read (mf nil) so we don't
+// 404 the player just because we couldn't introspect renditions.
+func packagedPlayableBy(mf *pkgmanifest.Manifest, caps Caps) bool {
+	if mf == nil || len(mf.Renditions.Video) == 0 {
 		return true
 	}
 	for _, v := range mf.Renditions.Video {
@@ -308,21 +275,29 @@ type playlistCacheEntry struct {
 
 var playlistCache sync.Map // map[string]*playlistCacheEntry (cacheKey -> entry)
 
-// servePlaylistCached reads + rewrites + caches an m3u8 file, then
-// serves it with an ETag and a short max-age so browser revisits
-// short-circuit at the cache layer.
-func servePlaylistCached(w http.ResponseWriter, r *http.Request, path string) {
-	servePlaylistCachedTransform(w, r, path, nil)
+// servePlaylistCached reads + rewrites + caches an m3u8 file, its URIs
+// carrying the request's query, then serves it with an ETag and a short
+// max-age so browser revisits short-circuit at the cache layer. retry, when
+// set, finds the file anew should it be missing (packagedFile).
+func servePlaylistCached(w http.ResponseWriter, r *http.Request, path string, retry func() string) {
+	servePlaylistCachedTransform(w, r, path, r.URL.RawQuery, retry, nil)
 }
 
-// servePlaylistCachedTransform is servePlaylistCached with an optional
-// post-rewrite transform applied to the playlist body before it's cached and
-// served. Used for the packaged master: the client's share of a ladder, and
-// VIDEO-RANGE on HDR titles whose master lacks it. The transform runs once per
-// (path, query) cache miss; cache hits serve the already-transformed body. It
-// returns the body served (also on a 304), nil when there is none.
-func servePlaylistCachedTransform(w http.ResponseWriter, r *http.Request, path string, transform func(string) string) []byte {
+// servePlaylistCachedTransform is servePlaylistCached with the query its
+// URIs carry and an optional post-rewrite transform applied to the playlist
+// body before it's cached and served. Used for the packaged master: the
+// client's share of a ladder, and VIDEO-RANGE on HDR titles whose master
+// lacks it. The transform runs once per (path, query) cache miss; cache hits
+// serve the already-transformed body. It returns the body served (also on a
+// 304), nil when there is none.
+func servePlaylistCachedTransform(w http.ResponseWriter, r *http.Request, path, query string, retry func() string, transform func(string) string) []byte {
 	st, err := os.Stat(path)
+	if err != nil && retry != nil {
+		if again := retry(); again != "" {
+			path = again
+			st, err = os.Stat(path)
+		}
+	}
 	if err != nil {
 		http.Error(w, "playlist not found", http.StatusNotFound)
 		return nil
@@ -330,7 +305,7 @@ func servePlaylistCachedTransform(w http.ResponseWriter, r *http.Request, path s
 	// Cache key includes the query so different ?stream=…/?caps=…
 	// rewrites stay distinct. Cap at the lifetime of the file mtime
 	// — different mtime = different entry, so a repackage shows up.
-	cacheKey := path + "?" + r.URL.RawQuery
+	cacheKey := path + "?" + query
 	if v, ok := playlistCache.Load(cacheKey); ok {
 		if e := v.(*playlistCacheEntry); e.mtime.Equal(st.ModTime()) {
 			if match := r.Header.Get("If-None-Match"); match != "" && match == e.etag {
@@ -356,7 +331,7 @@ func servePlaylistCachedTransform(w http.ResponseWriter, r *http.Request, path s
 		http.Error(w, "playlist not found", http.StatusNotFound)
 		return nil
 	}
-	body := rewriteM3U8URIs(string(raw), r.URL.RawQuery)
+	body := rewriteM3U8URIs(string(raw), query)
 	if transform != nil {
 		body = transform(body)
 	}
@@ -375,24 +350,22 @@ func servePlaylistCachedTransform(w http.ResponseWriter, r *http.Request, path s
 	return out
 }
 
-// PackagedMaster serves the package's master.m3u8 as the client may
-// play it (serveLadder: one codec family at the heights its decoder
-// takes, the audio groups it decodes, or the one rung ?q= names), with
-// every rendition URI rewritten to carry the inbound query string.
-// Without the rewrite the player would resolve `v0/playlist.m3u8`
-// against the master's URL and drop `?stream=…`, leaving subsequent
-// rendition fetches unauthenticated. A master with one video rendition
-// and one audio group is served as packaged.
+// servePackagedMaster serves the master of the package p as the client may
+// play it (serveLadder: one codec family at the heights its decoder takes,
+// the audio groups it decodes, or the one rung ?q= names), with every
+// rendition URI rewritten to carry the inbound query string. Without the
+// rewrite the player would resolve `v0/playlist.m3u8` against the master's
+// URL and drop `?stream=…`, leaving subsequent rendition fetches
+// unauthenticated. A master with one video rendition and one audio group is
+// served as packaged.
 //
 // Off the request path it warms the variant the client starts on (the
 // served master's first variant and its audio rendition): their media
-// playlists and init segments, and with ?t=<sec> the segments from
-// there. Not the other rungs or audio groups — a ladder's other
-// renditions are bytes no player asked for — and no segments without t,
-// since the player may start anywhere (a resume, a Zap card's midpoint).
-func (h *HLSHandler) PackagedMaster(w http.ResponseWriter, r *http.Request) {
-	itemID := chi.URLParam(r, "itemId")
-	masterPath := packagePath(itemID, "hls", "master.m3u8")
+// playlists and init segments, and with ?t=<sec> the segments from there.
+// Not the other rungs or audio groups — a ladder's other renditions are
+// bytes no player asked for — and no segments without t, since the player
+// may start anywhere (a resume, a Zap card's midpoint).
+func (h *HLSHandler) servePackagedMaster(w http.ResponseWriter, r *http.Request, p *pkgDir, mf *pkgmanifest.Manifest) {
 	caps := ParseCaps(r.URL.Query().Get("caps"))
 	q := r.URL.Query().Get("q")
 	// An older shaka didn't emit VIDEO-RANGE, so a packaged HDR HEVC
@@ -403,10 +376,10 @@ func (h *HLSHandler) PackagedMaster(w http.ResponseWriter, r *http.Request) {
 	// VIDEO-RANGE onto the variant lines that lack it when the package has
 	// any HDR rendition.
 	var videoRange func(string) string
-	if mf, err := ReadPackageManifest(itemID); err == nil && manifestHasHDR(mf) {
+	if manifestHasHDR(mf) {
 		videoRange = injectVideoRangeTransform(mf)
 	}
-	served := servePlaylistCachedTransform(w, r, masterPath, func(body string) string {
+	served := servePlaylistCachedTransform(w, r, p.path("hls", "master.m3u8"), r.URL.RawQuery, nil, func(body string) string {
 		if videoRange != nil {
 			body = videoRange(body)
 		}
@@ -422,7 +395,7 @@ func (h *HLSHandler) PackagedMaster(w http.ResponseWriter, r *http.Request) {
 			tSec, segments = n, true
 		}
 	}
-	goWarm(func() { warmStart(itemID, start, tSec, segments) })
+	goWarm(func() { warmStart(p, start, tSec, segments) })
 }
 
 // goWarm runs a cache warm off the request path. Tests run it in place.
@@ -488,27 +461,39 @@ func injectVideoRangeTransform(mf *pkgmanifest.Manifest) func(string) string {
 }
 
 // PackagedRenditionPlaylist serves the per-rendition playlist.m3u8
-// (video or audio), again rewriting segment URIs to carry the query
-// string. Path is /api/play/{itemId}/{rendId}/playlist.m3u8.
+// (video, audio or WebVTT), again rewriting segment URIs to carry the
+// query string. Path is /api/play/{itemId}/{rendId}/playlist.m3u8.
 func (h *HLSHandler) PackagedRenditionPlaylist(w http.ResponseWriter, r *http.Request) {
-	itemID := chi.URLParam(r, "itemId")
-	rendID := chi.URLParam(r, "rendId")
-	servePlaylistCached(w, r, packagePath(itemID, "hls", rendID, "playlist.m3u8"))
+	path, retry, err := h.packagedFile(r, "hls", chi.URLParam(r, "rendId"), "playlist.m3u8")
+	if err != nil {
+		packagedError(w, err)
+		return
+	}
+	servePlaylistCached(w, r, path, retry)
 }
 
 // PackagedIframesPlaylist serves shaka's I-frame trick-play playlist.
 // Same shape as the regular rendition playlist; the player loads it
 // when the user scrubs.
 func (h *HLSHandler) PackagedIframesPlaylist(w http.ResponseWriter, r *http.Request) {
-	itemID := chi.URLParam(r, "itemId")
-	rendID := chi.URLParam(r, "rendId")
-	serveIframesPlaylist(w, r, packagePath(itemID, "hls", rendID, "iframes.m3u8"))
+	path, retry, err := h.packagedFile(r, "hls", chi.URLParam(r, "rendId"), "iframes.m3u8")
+	if err != nil {
+		packagedError(w, err)
+		return
+	}
+	serveIframesPlaylist(w, r, path, retry)
 }
 
 // serveIframesPlaylist serves the I-frame playlist at path, its URIs
-// carrying the request's query.
-func serveIframesPlaylist(w http.ResponseWriter, r *http.Request, path string) {
+// carrying the request's query; retry, when set, finds it anew should it be
+// missing.
+func serveIframesPlaylist(w http.ResponseWriter, r *http.Request, path string, retry func() string) {
 	body, err := os.ReadFile(path)
+	if err != nil && retry != nil {
+		if again := retry(); again != "" {
+			body, err = os.ReadFile(again)
+		}
+	}
 	if err != nil {
 		http.Error(w, "iframes not found", http.StatusNotFound)
 		return
@@ -524,10 +509,7 @@ func serveIframesPlaylist(w http.ResponseWriter, r *http.Request, path string) {
 // subsequent Range requests from the buffer — see servePackagedStatic
 // for the rationale (NFS Range-read contention).
 func (h *HLSHandler) PackagedInitSegment(w http.ResponseWriter, r *http.Request) {
-	itemID := chi.URLParam(r, "itemId")
-	rendID := chi.URLParam(r, "rendId")
-	path := packagePath(itemID, "hls", rendID, "init.mp4")
-	servePackagedStatic(w, r, path, "video/mp4", "init not found")
+	h.servePackaged(w, r, "video/mp4", "init not found", "hls", chi.URLParam(r, "rendId"), "init.mp4")
 }
 
 // PackagedSegment serves one CMAF media segment from the packages
@@ -535,22 +517,27 @@ func (h *HLSHandler) PackagedInitSegment(w http.ResponseWriter, r *http.Request)
 // value is matched as 5-digit zero-padded in the route so shaka's
 // seg-00001.m4s naming flows through unchanged.
 func (h *HLSHandler) PackagedSegment(w http.ResponseWriter, r *http.Request) {
-	itemID := chi.URLParam(r, "itemId")
-	rendID := chi.URLParam(r, "rendId")
-	seg := chi.URLParam(r, "seg")
-	path := packagePath(itemID, "hls", rendID, "seg-"+seg+".m4s")
-	servePackagedStatic(w, r, path, "video/iso.segment", "segment not found")
+	h.servePackaged(w, r, "video/iso.segment", "segment not found",
+		"hls", chi.URLParam(r, "rendId"), "seg-"+chi.URLParam(r, "seg")+".m4s")
 }
 
 // PackagedSubtitleSegment serves one WebVTT segment of a packaged
 // subtitle rendition. Path: /api/play/{itemId}/{rendId}/seg-{seg}.vtt,
 // rendId sN, the name shaka writes (seg-00001.vtt).
 func (h *HLSHandler) PackagedSubtitleSegment(w http.ResponseWriter, r *http.Request) {
-	itemID := chi.URLParam(r, "itemId")
-	rendID := chi.URLParam(r, "rendId")
-	seg := chi.URLParam(r, "seg")
-	path := packagePath(itemID, "hls", rendID, "seg-"+seg+".vtt")
-	servePackagedStatic(w, r, path, "text/vtt; charset=utf-8", "subtitle segment not found")
+	h.servePackaged(w, r, "text/vtt; charset=utf-8", "subtitle segment not found",
+		"hls", chi.URLParam(r, "rendId"), "seg-"+chi.URLParam(r, "seg")+".vtt")
+}
+
+// servePackaged serves the file rel of the request's package (packagedFile)
+// as servePackagedStatic does.
+func (h *HLSHandler) servePackaged(w http.ResponseWriter, r *http.Request, contentType, notFoundMsg string, rel ...string) {
+	path, retry, err := h.packagedFile(r, rel...)
+	if err != nil {
+		packagedError(w, err)
+		return
+	}
+	servePackagedStaticRetry(w, r, path, retry, contentType, notFoundMsg)
 }
 
 // packagedFileCache is an in-memory LRU-ish cache for packaged
@@ -605,7 +592,19 @@ func packagedLoadLock(path string) *sync.Mutex {
 // duplicates. Returns 404 with `notFoundMsg` if the file doesn't
 // exist; 500 if the read fails.
 func servePackagedStatic(w http.ResponseWriter, r *http.Request, path, contentType, notFoundMsg string) {
+	servePackagedStaticRetry(w, r, path, nil, contentType, notFoundMsg)
+}
+
+// servePackagedStaticRetry is servePackagedStatic with retry, which finds
+// the file anew should it be missing at path (packagedFile).
+func servePackagedStaticRetry(w http.ResponseWriter, r *http.Request, path string, retry func() string, contentType, notFoundMsg string) {
 	st, err := os.Stat(path)
+	if err != nil && retry != nil {
+		if again := retry(); again != "" {
+			path = again
+			st, err = os.Stat(path)
+		}
+	}
 	if err != nil {
 		http.Error(w, notFoundMsg, http.StatusNotFound)
 		return
@@ -703,7 +702,7 @@ func UnpinPaths(paths []string) {
 	}
 }
 
-// warmPackaged primes the caches for a packaged item OFF the request
+// warmPackaged primes the caches for the package p OFF the request
 // path so the player's follow-up master / playlist / init / segment
 // fetches all land hot. It is fire-and-forget, panic-safe, and bounded:
 // the master plus the variant the client starts on, nothing else.
@@ -724,22 +723,22 @@ func UnpinPaths(paths []string) {
 //	    asked for.
 //
 // A client that decodes none of the package's rungs is not warmed at
-// all (PackagedPlayableBy): it falls through to the transcode.
-func (h *HLSHandler) warmPackaged(itemID string, caps Caps, q string, tSec float64) {
+// all (packagedPlayableBy): it falls through to the transcode.
+func (h *HLSHandler) warmPackaged(p *pkgDir, mf *pkgmanifest.Manifest, caps Caps, q string, tSec float64) {
 	defer func() {
 		if rec := recover(); rec != nil {
-			log.Printf("warmPackaged %s panic: %v", itemID, rec)
+			log.Printf("warmPackaged %s panic: %v", p.dir, rec)
 		}
 	}()
-	if !PackagedPlayableBy(itemID, caps) {
+	if !packagedPlayableBy(mf, caps) {
 		return
 	}
-	warmPackagedFile(packagePath(itemID, "hls", "master.m3u8"))
-	master, err := readPackagedMaster(itemID)
+	warmPackagedFile(p.path("hls", "master.m3u8"))
+	master, err := readPackagedMaster(p)
 	if err != nil {
 		return
 	}
-	warmStart(itemID, serveLadder(master, caps, q), tSec, true)
+	warmStart(p, serveLadder(master, caps, q), tSec, true)
 }
 
 // warmStart warms the variant a client starts on: s.video and s.audio,
@@ -748,18 +747,18 @@ func (h *HLSHandler) warmPackaged(itemID string, caps Caps, q string, tSec float
 // in packagedCache afterwards and whether the video rendition is
 // playable from there: its playlist, its init and, with segments, at
 // least one segment landed.
-func warmStart(itemID string, s servedLadder, tSec float64, segments bool) (paths []string, videoOK bool) {
+func warmStart(p *pkgDir, s servedLadder, tSec float64, segments bool) (paths []string, videoOK bool) {
 	defer func() {
 		if rec := recover(); rec != nil {
-			log.Printf("warmStart %s panic: %v", itemID, rec)
+			log.Printf("warmStart %s panic: %v", p.dir, rec)
 		}
 	}()
-	paths, videoOK = warmRendition(itemID, s.video, tSec, segments)
+	paths, videoOK = warmRendition(p, s.video, tSec, segments)
 	if !videoOK {
 		return nil, false
 	}
 	if s.audio != "" {
-		audio, _ := warmRendition(itemID, s.audio, tSec, segments)
+		audio, _ := warmRendition(p, s.audio, tSec, segments)
 		paths = append(paths, audio...)
 	}
 	return paths, true
@@ -767,12 +766,12 @@ func warmStart(itemID string, s servedLadder, tSec float64, segments bool) (path
 
 // warmRendition warms one packaged rendition (see warmStart). ok: its
 // playlist and init landed, and with segments at least one segment.
-func warmRendition(itemID, rendID string, tSec float64, segments bool) (paths []string, ok bool) {
+func warmRendition(p *pkgDir, rendID string, tSec float64, segments bool) (paths []string, ok bool) {
 	if rendID == "" {
 		return nil, false
 	}
-	playlistPath := packagePath(itemID, "hls", rendID, "playlist.m3u8")
-	initPath := packagePath(itemID, "hls", rendID, "init.mp4")
+	playlistPath := p.path("hls", rendID, "playlist.m3u8")
+	initPath := p.path("hls", rendID, "init.mp4")
 	if !warmPackagedFile(playlistPath) || !warmPackagedFile(initPath) {
 		return nil, false
 	}
@@ -781,8 +780,8 @@ func warmRendition(itemID, rendID string, tSec float64, segments bool) (paths []
 		return paths, true
 	}
 	for _, seg := range pickWarmSegments(playlistPath, tSec) {
-		if p := packagePath(itemID, "hls", rendID, seg); warmPackagedFile(p) {
-			paths = append(paths, p)
+		if path := p.path("hls", rendID, seg); warmPackagedFile(path) {
+			paths = append(paths, path)
 		}
 	}
 	return paths, len(paths) > 2
@@ -964,19 +963,14 @@ func warmPackagedFile(path string) bool {
 // preview thumbnails to their position inside the sprite sheets.
 // Path: /api/play/{itemId}/trickplay/thumbnails.vtt.
 func (h *HLSHandler) PackagedTrickplayVTT(w http.ResponseWriter, r *http.Request) {
-	itemID := chi.URLParam(r, "itemId")
-	path := packagePath(itemID, "trickplay", "thumbnails.vtt")
-	servePackagedStatic(w, r, path, "text/vtt; charset=utf-8", "trickplay vtt not found")
+	h.servePackaged(w, r, "text/vtt; charset=utf-8", "trickplay vtt not found", "trickplay", "thumbnails.vtt")
 }
 
 // PackagedTrickplaySprite serves one sprite-sheet JPG. The VTT cues
 // reference these by relative name (sprite-NNNN.jpg) so the player's
 // resolved URL lands here.
 func (h *HLSHandler) PackagedTrickplaySprite(w http.ResponseWriter, r *http.Request) {
-	itemID := chi.URLParam(r, "itemId")
-	n := chi.URLParam(r, "n")
-	path := packagePath(itemID, "trickplay", "sprite-"+n+".jpg")
-	servePackagedStatic(w, r, path, "image/jpeg", "trickplay sprite not found")
+	h.servePackaged(w, r, "image/jpeg", "trickplay sprite not found", "trickplay", "sprite-"+chi.URLParam(r, "n")+".jpg")
 }
 
 // rewriteM3U8URIs walks every line of an m3u8 and appends ?query (or
@@ -1041,44 +1035,57 @@ func appendQuery(uri, query string) string {
 	return uri + "?" + query
 }
 
-// manifestCache memoises parsed manifest.json blobs per itemId,
-// invalidated by file mtime. The Master / Info / PackagedPlayableBy
-// hot path used to ReadFile + Unmarshal on EVERY request — at
-// 5-30 ms per call this dominated packaged.m3u8 latency for Zap
-// (CDP probe 2026-06-02). Cached lookups are sub-microsecond.
+// manifestCache memoises parsed package records per path, invalidated by
+// file mtime. The Master / Info / packagedPlayableBy hot path used to
+// ReadFile + Unmarshal on EVERY request — at 5-30 ms per call this
+// dominated packaged.m3u8 latency for Zap (CDP probe 2026-06-02). Cached
+// lookups are sub-microsecond.
 type manifestCacheEntry struct {
 	mf    *pkgmanifest.Manifest
 	mtime time.Time
 }
 
-// manifestCache is keyed by an item's id, and by extras/<extraId> for an
-// extra's package (extras.go).
-var manifestCache sync.Map // map[string]*manifestCacheEntry (key -> entry)
+// manifestCache is keyed by the record's path: a version's package.json, a
+// package's or an extra's manifest.json.
+var manifestCache sync.Map // map[string]*manifestCacheEntry (path -> entry)
 
-// ReadPackageManifest parses the manifest.json sitting next to the
-// .complete sentinel. Returns nil + an error on read or parse failure
-// — the Info handler then logs and falls through to the source-side
-// probe so the player at least gets *some* info.
+// readPkgManifest is the Manifest of the package p: its package.json in the
+// library (pkgmanifest.FromPackageRecord), its manifest.json before it.
+// Returns nil + an error on read or parse failure — the Info handler then
+// logs and falls through to the source-side probe so the player at least
+// gets *some* info.
 //
 // The parsed manifest is cached in-process keyed on the file's mtime,
 // so an operator who repackages an item picks up the new manifest on
 // the next request without a pod restart.
-func ReadPackageManifest(itemID string) (*pkgmanifest.Manifest, error) {
-	root := itemRoot(itemID)
-	if root == "" {
+func readPkgManifest(p *pkgDir) (*pkgmanifest.Manifest, error) {
+	if p == nil {
 		return nil, os.ErrNotExist
 	}
-	return readManifest(itemID, filepath.Join(root, "manifest.json"))
+	decode := decodeManifest
+	if p.library() {
+		decode = pkgmanifest.FromPackageRecord
+	}
+	return readManifest(p.path(p.record), decode)
 }
 
-// readManifest parses the manifest.json at path, cached in manifestCache
-// under key until the file's mtime changes.
-func readManifest(key, path string) (*pkgmanifest.Manifest, error) {
+// decodeManifest parses a manifest.json.
+func decodeManifest(raw []byte) (*pkgmanifest.Manifest, error) {
+	var m pkgmanifest.Manifest
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+// readManifest parses the record at path with decode, cached in
+// manifestCache until the file's mtime changes.
+func readManifest(path string, decode func([]byte) (*pkgmanifest.Manifest, error)) (*pkgmanifest.Manifest, error) {
 	st, err := os.Stat(path)
 	if err != nil {
 		return nil, err
 	}
-	if v, ok := manifestCache.Load(key); ok {
+	if v, ok := manifestCache.Load(path); ok {
 		if e := v.(*manifestCacheEntry); e.mtime.Equal(st.ModTime()) {
 			return e.mf, nil
 		}
@@ -1087,12 +1094,12 @@ func readManifest(key, path string) (*pkgmanifest.Manifest, error) {
 	if err != nil {
 		return nil, err
 	}
-	var m pkgmanifest.Manifest
-	if err := json.Unmarshal(raw, &m); err != nil {
+	m, err := decode(raw)
+	if err != nil {
 		return nil, err
 	}
-	manifestCache.Store(key, &manifestCacheEntry{mf: &m, mtime: st.ModTime()})
-	return &m, nil
+	manifestCache.Store(path, &manifestCacheEntry{mf: m, mtime: st.ModTime()})
+	return m, nil
 }
 
 // writePackagedInfo emits the /play/info JSON shape for a packaged
@@ -1112,13 +1119,13 @@ func readManifest(key, path string) (*pkgmanifest.Manifest, error) {
 // choice it may offer (packagedQualities) — null for a package with one
 // rendition, as before — and default_quality is "auto": the client's
 // ladder, adaptive. Clients put the name they pick in ?q=.
-func writePackagedInfo(w http.ResponseWriter, itemID string, mf *pkgmanifest.Manifest, caps Caps, q string) {
+func writePackagedInfo(w http.ResponseWriter, p *pkgDir, mf *pkgmanifest.Manifest, caps Caps, q string) {
 	video := pkgmanifest.VideoRendition{}
 	if len(mf.Renditions.Video) > 0 {
 		video = mf.Renditions.Video[0]
 	}
 	var qualities []map[string]any
-	if master, err := readPackagedMaster(itemID); err == nil {
+	if master, err := readPackagedMaster(p); err == nil {
 		start := serveLadder(master, caps, q).video
 		for _, v := range mf.Renditions.Video {
 			if v.ID == start {
@@ -1214,10 +1221,10 @@ func packagedSubtitleTracks(subs []pkgmanifest.Subtitle) []map[string]any {
 	return out
 }
 
-// readPackagedMaster is the item's hls/master.m3u8 as packaged, through
+// readPackagedMaster is the package's hls/master.m3u8 as packaged, through
 // packagedCache.
-func readPackagedMaster(itemID string) (string, error) {
-	path := packagePath(itemID, "hls", "master.m3u8")
+func readPackagedMaster(p *pkgDir) (string, error) {
+	path := p.path("hls", "master.m3u8")
 	st, err := os.Stat(path)
 	if err != nil {
 		return "", err

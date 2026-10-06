@@ -1,0 +1,20 @@
+{
+  "schema": "zaentrum.library.metadata/2",
+  "itemId": "11b2a7e0-0000-4000-8000-00000000000a",
+  "type": "movie",
+  "asOf": "2026-10-06T10:00:00Z",
+  "projectedBy": "katalog-manager",
+  "databaseUpdatedAt": "2026-10-06T09:59:00Z",
+  "titles": {
+    "primary": "Clip (Remastered)",
+    "original": "Clip",
+    "sort": "clip",
+    "qualifier": null,
+    "localized": {}
+  },
+  "releaseDate": "2026-04-01",
+  "images": [],
+  "library": {
+    "primaryVersionId": "b2b2b2b2-0000-4000-8000-0000000000b2"
+  }
+}

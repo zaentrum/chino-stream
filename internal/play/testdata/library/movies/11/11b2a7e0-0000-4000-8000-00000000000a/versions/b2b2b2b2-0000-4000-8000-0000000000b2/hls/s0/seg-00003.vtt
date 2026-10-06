@@ -1,0 +1,6 @@
+WEBVTT
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:9000
+
+00:00:13.000 --> 00:00:15.000 align:center
+Third segment.
+

@@ -1,0 +1,9 @@
+{
+  "schema": "zaentrum.library.item/2",
+  "itemId": "11b2a7e0-0000-4000-8000-00000000000a",
+  "type": "movie",
+  "title": "Clip",
+  "externalIds": {},
+  "createdAt": "2026-10-05T08:00:00Z",
+  "createdBy": "katalog-manager/scanner"
+}

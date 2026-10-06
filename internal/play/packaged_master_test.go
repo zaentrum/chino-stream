@@ -31,10 +31,12 @@ const (
 	pkgSingle = "5119e000-0000-4000-8000-000000000004"
 )
 
-// usePackages points PackagesRoot at root for the test, empties the
-// per-item caches, before and after, and runs cache warms in place (no
-// goroutine outlives the test).
-func usePackages(t *testing.T, root string) {
+// usePackages serves the package store at root for the test: a resolver
+// asking a katalog-api that answers its folders as katalog-api does before
+// the library (legacyLibrary), PackagesRoot pointed at it, the per-item
+// caches emptied before and after, cache warms run in place (no goroutine
+// outlives the test).
+func usePackages(t *testing.T, root string) *Resolver {
 	t.Helper()
 	abs, err := filepath.Abs(root)
 	if err != nil {
@@ -48,13 +50,14 @@ func usePackages(t *testing.T, root string) {
 		PackagesRoot, goWarm = old, oldWarm
 		resetPackageCaches()
 	})
+	return legacyLibrary(t, abs).resolver()
 }
 
 func resetPackageCaches() {
 	for _, m := range []interface {
 		Range(func(k, v any) bool)
 		Delete(k any)
-	}{&itemRootCache, &manifestCache, &playlistCache, &packagedCache, &zapPinnedPaths} {
+	}{&manifestCache, &playlistCache, &packagedCache, &zapPinnedPaths} {
 		m.Range(func(k, _ any) bool { m.Delete(k); return true })
 	}
 	packagedCacheBytes.Store(0)
@@ -89,8 +92,7 @@ func golden(t *testing.T, name, got string) {
 // package whose master lacks it. The golden files are what chino-stream
 // served for these packages before the ladder work.
 func TestGoldenSingleRenditionMasterIsServedAsPackaged(t *testing.T) {
-	usePackages(t, filepath.Join("testdata", "packages"))
-	h := &HLSHandler{}
+	h := &HLSHandler{Packages: usePackages(t, filepath.Join("testdata", "packages"))}
 	packages := map[string]string{
 		"legacy":             pkgLegacy,
 		"legacy-hdr":         pkgLegacyHDR,
@@ -125,8 +127,7 @@ func TestGoldenSingleRenditionMasterIsServedAsPackaged(t *testing.T) {
 // it, its URIs carrying the request's query (the stream token, caps, q),
 // so every rendition fetch is authorised and answered for the same client.
 func TestPackagedMasterServesTheClientsShareOfTheLadder(t *testing.T) {
-	usePackages(t, filepath.Join("testdata", "packages"))
-	h := &HLSHandler{}
+	h := &HLSHandler{Packages: usePackages(t, filepath.Join("testdata", "packages"))}
 	const query = "?stream=dXNlci0xfDE3OTEwNjI5NDM.c2ln&caps=avc,aac"
 	w := get(h, "/api/play/"+pkgLadder+"/master.m3u8"+query)
 	if w.Code != 200 {
@@ -163,7 +164,7 @@ func TestPackagedMasterServesTheClientsShareOfTheLadder(t *testing.T) {
 // master falls through to the on-the-fly pipeline, as for any package
 // before the ladder.
 func TestPackagedLadderNoRungPlaysFallsThroughToTheTranscode(t *testing.T) {
-	usePackages(t, filepath.Join("testdata", "packages"))
+	packages := usePackages(t, filepath.Join("testdata", "packages"))
 	captureLog(t)
 	root, src := mediaFile(t, "film.mkv")
 	cache, err := os.MkdirTemp("", "chino-stream-master-")
@@ -173,6 +174,7 @@ func TestPackagedLadderNoRungPlaysFallsThroughToTheTranscode(t *testing.T) {
 	t.Cleanup(func() { _ = os.RemoveAll(cache) })
 	h := &HLSHandler{
 		Catalog:    fakeKatalog(t, src),
+		Packages:   packages,
 		MediaRoot:  root,
 		FFmpegBin:  fakeBin(t, "ffmpeg", "exit 1"),
 		FFprobeBin: probeFFprobe(t, probeJSON("matroska,webm", "hevc", 1920, 1080, "aac", 2, 8_000_000)),

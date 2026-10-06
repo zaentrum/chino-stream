@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -19,6 +20,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/zaentrum/chino-stream/internal/catalog"
+	"github.com/zaentrum/chino-stream/internal/pkgmanifest"
 )
 
 // HLS-on-demand handler. Replaces the previous progressive-MP4 /play
@@ -44,7 +46,10 @@ import (
 // segments the connection lifetime is bounded (~5-8s of TCP per
 // segment), so the heuristic never fires.
 type HLSHandler struct {
-	Catalog         *catalog.Client
+	Catalog *catalog.Client
+	// Packages says where an item's package is (resolve.go); nil: none is,
+	// everything plays on the fly.
+	Packages        *Resolver
 	MediaRoot       string
 	FFmpegBin       string
 	FFprobeBin      string
@@ -297,11 +302,36 @@ func (h *HLSHandler) warmTranscode(itemID, src string, probe *Probe, ql Quality,
 	}
 }
 
+// playablePackage is the package the request's item is served from and its
+// manifest, when the client can play it (packagedPlayableBy); nil when the
+// item has no package to serve (none, or one not complete), one the client
+// decodes none of, or katalog-api cannot say (logged) — then the item plays
+// on the fly.
+func (h *HLSHandler) playablePackage(r *http.Request, caps Caps) (*pkgDir, *pkgmanifest.Manifest) {
+	itemID := chi.URLParam(r, "itemId")
+	p, _, err := h.Packages.itemPackage(r.Context(), itemID, r.URL.Query().Get("v"), true)
+	if err != nil && !errors.Is(err, catalog.ErrNotFound) {
+		log.Printf("resolve %s: %v — on the fly", itemID, err)
+	}
+	if p == nil {
+		return nil, nil
+	}
+	mf, err := readPkgManifest(p)
+	if err != nil {
+		mf = nil // unreadable: served as packaged (packagedPlayableBy)
+	}
+	if !packagedPlayableBy(mf, caps) {
+		return nil, nil
+	}
+	return p, mf
+}
+
 // Master returns the master playlist. Two source-of-truth modes:
 //
-//   - Packaged: the analyzer has already written a CMAF tree under
-//     /var/lib/katalog/packages/{id}/ and dropped a .complete sentinel.
-//     We serve shaka's master.m3u8 unchanged (only the URI query
+//   - Packaged: the item's package — the folder katalog-api answers
+//     (resolve.go), a library version or the package store's — has its
+//     .complete sentinel and the client decodes a rung of it. We serve
+//     its master.m3u8 as the client may play it (only the URI query
 //     strings are rewritten so the player keeps the inbound ?stream=
 //     token on each rendition fetch).
 //
@@ -327,8 +357,8 @@ func (h *HLSHandler) Master(w http.ResponseWriter, r *http.Request) {
 	// that case and fall through to the on-demand transcode path,
 	// which produces libx264 from the source file.
 	caps := ParseCaps(r.URL.Query().Get("caps"))
-	if HasCompletedPackage(itemID) && PackagedPlayableBy(itemID, caps) {
-		h.PackagedMaster(w, r)
+	if p, mf := h.playablePackage(r, caps); p != nil {
+		h.servePackagedMaster(w, r, p, mf)
 		return
 	}
 	clean, probe, err := h.resolveSource(r.Context(), itemID, bearerFrom(r))
@@ -505,7 +535,7 @@ func (h *HLSHandler) Prewarm(w http.ResponseWriter, r *http.Request) {
 			tSec = n
 		}
 	}
-	if HasCompletedPackage(itemID) && PackagedPlayableBy(itemID, caps) {
+	if p, mf := h.playablePackage(r, caps); p != nil {
 		// Fire-and-forget background warm: prime the NFS client, OS
 		// page cache and packagedCache so the real playlist/init/seg
 		// fetches that follow are hot — for the variant this client
@@ -513,7 +543,7 @@ func (h *HLSHandler) Prewarm(w http.ResponseWriter, r *http.Request) {
 		// body so client telemetry can distinguish "packaged-warming"
 		// from "warming" (transcode) and the old "packaged" no-op.
 		q := r.URL.Query().Get("q")
-		goWarm(func() { h.warmPackaged(itemID, caps, q, tSec) })
+		goWarm(func() { h.warmPackaged(p, mf, caps, q, tSec) })
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = w.Write([]byte("packaged-warming"))
 		return
@@ -1663,6 +1693,7 @@ func (h *HLSHandler) StartCacheSweeper(ctx context.Context, every, maxAge time.D
 
 func (h *HLSHandler) sweep(maxAge time.Duration) {
 	h.windowFails.prune()
+	h.Packages.prune()
 	cutoff := time.Now().Add(-maxAge)
 	_ = filepath.Walk(h.CacheDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {

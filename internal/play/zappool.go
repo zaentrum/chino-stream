@@ -271,8 +271,17 @@ func refillZapPool(h *HLSHandler) {
 // Each successful warmPackagedFile path is recorded on entry.Paths so
 // ZapFeed can validate the bytes haven't been LRU-evicted between
 // warm and serve.
-func warmOneZapItem(_ *HLSHandler, itemID string) *zapPoolEntry {
-	mf, err := ReadPackageManifest(itemID)
+func warmOneZapItem(h *HLSHandler, itemID string) *zapPoolEntry {
+	if h == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), resolveTimeout)
+	defer cancel()
+	p, _, err := h.Packages.itemPackage(ctx, itemID, "", true)
+	if err != nil || p == nil {
+		return nil
+	}
+	mf, err := readPkgManifest(p)
 	if err != nil || mf == nil {
 		return nil
 	}
@@ -293,11 +302,11 @@ func warmOneZapItem(_ *HLSHandler, itemID string) *zapPoolEntry {
 	}
 
 	// Master playlist — required.
-	masterPath := packagePath(itemID, "hls", "master.m3u8")
+	masterPath := p.path("hls", "master.m3u8")
 	if !warmPackagedFile(masterPath) {
 		return nil
 	}
-	master, err := readPackagedMaster(itemID)
+	master, err := readPackagedMaster(p)
 	if err != nil {
 		return nil
 	}
@@ -317,7 +326,7 @@ func warmOneZapItem(_ *HLSHandler, itemID string) *zapPoolEntry {
 			continue
 		}
 		started[key] = true
-		landed, ok := warmStart(itemID, start, seekSec, true)
+		landed, ok := warmStart(p, start, seekSec, true)
 		if !ok {
 			continue
 		}

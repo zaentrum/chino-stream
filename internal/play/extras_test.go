@@ -1,7 +1,9 @@
 package play
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -257,7 +259,7 @@ func TestAnExtraIsServedOnlyUnderItsTitle(t *testing.T) {
 // id find no package of it — the master asks the catalog, which knows no
 // such item.
 func TestExtrasAreNoItems(t *testing.T) {
-	usePackages(t, filepath.Join("testdata", "packages"))
+	packages := usePackages(t, filepath.Join("testdata", "packages"))
 	ids := walkCompletedPackageIDs()
 	sort.Strings(ids)
 	want := []string{pkgLegacy, pkgLegacyHDR, pkgLegacyHDRNoRange, pkgLadder, pkgHEVCLadder, pkgUHD, pkgSingle, pkgStereoLadder}
@@ -265,19 +267,16 @@ func TestExtrasAreNoItems(t *testing.T) {
 	if !reflect.DeepEqual(ids, want) {
 		t.Errorf("packaged ids %v, want the items' %v", ids, want)
 	}
-	if HasCompletedPackage(extraTrailer) || itemRoot(extraTrailer) != "" {
-		t.Errorf("the extra's package is found as an item's")
+	if p, _, err := packages.itemPackage(context.Background(), extraTrailer, "", true); p != nil || !errors.Is(err, catalog.ErrNotFound) {
+		t.Errorf("the extra's package is found as an item's: %+v %v", p, err)
 	}
-	if mf, err := ReadPackageManifest(extraTrailer); err == nil {
-		t.Errorf("the extra's manifest is read as an item's: %+v", mf)
-	}
-	if e := warmOneZapItem(nil, extraTrailer); e != nil {
+	if e := warmOneZapItem(&HLSHandler{Packages: packages}, extraTrailer); e != nil {
 		t.Errorf("the extra is a Zap pool entry: %+v", e)
 	}
 
 	katalog := httptest.NewServer(http.NotFoundHandler())
 	t.Cleanup(katalog.Close)
-	h := &HLSHandler{Catalog: catalog.New(katalog.URL)}
+	h := &HLSHandler{Catalog: catalog.New(katalog.URL), Packages: packages}
 	for _, route := range []string{"master.m3u8", "v0/playlist.m3u8", "v0/init.mp4", "v0/seg-00001.m4s"} {
 		if w := get(h, "/api/play/"+extraTrailer+"/"+route); w.Code != http.StatusNotFound {
 			t.Errorf("/api/play/%s/%s: %d %q, want 404", extraTrailer, route, w.Code, w.Body)

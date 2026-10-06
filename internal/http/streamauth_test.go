@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zaentrum/chino-stream/internal/catalog"
 	"github.com/zaentrum/chino-stream/internal/play"
 )
 
@@ -54,6 +55,22 @@ func oidcIssuer(t *testing.T) string {
 	return srv.URL
 }
 
+// katalogAPI is a katalog-api answering the playback lookup of item with the
+// package folder dir, as it does for a package from before the library.
+func katalogAPI(t *testing.T, item, dir string) *catalog.Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/items/"+item+"/playback" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"itemId": item, "type": "movie",
+			"package": map[string]any{"versionId": nil, "dir": dir, "record": "manifest.json"}, "previous": []any{}, "original": nil})
+	}))
+	t.Cleanup(srv.Close)
+	return catalog.New(srv.URL)
+}
+
 // A package's WebVTT renditions sit behind the same auth as its other
 // renditions: a stream token in ?stream= (what chino-api's proxy carries
 // on every URL) or a bearer; nothing or a forged token is a 401.
@@ -76,11 +93,8 @@ func TestSubtitleRenditionsTakeTheStreamToken(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	old := play.PackagesRoot
-	play.PackagesRoot = root
-	t.Cleanup(func() { play.PackagesRoot = old })
-
 	h, err := NewRouter(Deps{
+		Catalog:    katalogAPI(t, item, dir),
 		OIDCIssuer: oidcIssuer(t), OIDCAudience: "chino-web", AuthEnabled: true,
 		StreamSigningKey: signingKey, FFmpegBin: "ffmpeg", FFprobeBin: "ffprobe", HLSCacheDir: t.TempDir(),
 	})

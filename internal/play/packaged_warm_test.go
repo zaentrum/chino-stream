@@ -17,9 +17,9 @@ import (
 
 // stagePackages copies test packages into a fresh packages root with a
 // stand-in for every init.mp4 and media segment their playlists name (the
-// fixtures carry no media) and points PackagesRoot at it (usePackages).
-// edit, when set, rewrites each manifest.
-func stagePackages(t *testing.T, edit func(map[string]any), ids ...string) {
+// fixtures carry no media) and serves it (usePackages), returning its
+// resolver. edit, when set, rewrites each manifest.
+func stagePackages(t *testing.T, edit func(map[string]any), ids ...string) *Resolver {
 	t.Helper()
 	root := t.TempDir()
 	for _, id := range ids {
@@ -68,7 +68,7 @@ func stagePackages(t *testing.T, edit func(map[string]any), ids ...string) {
 			t.Fatal(err)
 		}
 	}
-	usePackages(t, root)
+	return usePackages(t, root)
 }
 
 // playlistMedia lists the files a media playlist names: its init (EXT-X-MAP)
@@ -141,8 +141,8 @@ func TestMasterFetchWarmsTheStartingVariant(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			stagePackages(t, nil, tc.pkg)
-			if w := get(&HLSHandler{}, "/api/play/"+tc.pkg+"/master.m3u8"+tc.query); w.Code != 200 {
+			h := &HLSHandler{Packages: stagePackages(t, nil, tc.pkg)}
+			if w := get(h, "/api/play/"+tc.pkg+"/master.m3u8"+tc.query); w.Code != 200 {
 				t.Fatalf("master: %d %q", w.Code, w.Body)
 			}
 			if got, want := cached(t), files(tc.pkg, tc.want...); !reflect.DeepEqual(got, want) {
@@ -155,9 +155,9 @@ func TestMasterFetchWarmsTheStartingVariant(t *testing.T) {
 // POST /prewarm warms the variant the client will start on, for its caps
 // and q, from ?t= — not every rendition of the ladder.
 func TestPrewarmWarmsTheStartingVariant(t *testing.T) {
-	stagePackages(t, nil, pkgLadder)
+	h := &HLSHandler{Packages: stagePackages(t, nil, pkgLadder)}
 	r := chi.NewRouter()
-	r.Route("/api/play/{itemId}", (&HLSHandler{}).Routes)
+	r.Route("/api/play/{itemId}", h.Routes)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/play/"+pkgLadder+"/prewarm?caps=avc,aac,eac3&q=medium&t=13", nil))
 	if w.Code != http.StatusAccepted || w.Body.String() != "packaged-warming" {
@@ -171,7 +171,7 @@ func TestPrewarmWarmsTheStartingVariant(t *testing.T) {
 	}
 
 	// Without t, from the start.
-	stagePackages(t, nil, pkgLadder)
+	h.Packages = stagePackages(t, nil, pkgLadder)
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/play/"+pkgLadder+"/prewarm?caps=avc,hvc,aac&q=v2", nil))
 	if got := cached(t); !reflect.DeepEqual(got, files(pkgLadder, "hls/master.m3u8",
@@ -186,7 +186,7 @@ func TestPrewarmWarmsTheStartingVariant(t *testing.T) {
 // package with one rendition, that one once.
 func TestZapPoolWarmsTheStartingVariants(t *testing.T) {
 	long := func(m map[string]any) { m["durationMs"] = 600_000 } // long enough for a midpoint
-	stagePackages(t, long, pkgLadder, pkgLegacy)
+	h := &HLSHandler{Packages: stagePackages(t, long, pkgLadder, pkgLegacy)}
 	for _, tc := range []struct {
 		pkg  string
 		want []string
@@ -195,13 +195,13 @@ func TestZapPoolWarmsTheStartingVariants(t *testing.T) {
 			"hls/a0/playlist.m3u8", "hls/a0/init.mp4"}},
 		{pkgLegacy, []string{"hls/master.m3u8", "hls/v0/playlist.m3u8", "hls/v0/init.mp4", "hls/a0/playlist.m3u8", "hls/a0/init.mp4"}},
 	} {
-		e := warmOneZapItem(nil, tc.pkg)
+		e := warmOneZapItem(h, tc.pkg)
 		if e == nil {
 			t.Fatalf("%s: no entry", tc.pkg)
 		}
 		var got []string
 		for _, p := range e.Paths {
-			if rel, _ := filepath.Rel(filepath.Dir(packagePath(tc.pkg, "hls")), p); !strings.HasSuffix(rel, ".m4s") {
+			if rel, _ := filepath.Rel(legacyDir(t, tc.pkg), p); !strings.HasSuffix(rel, ".m4s") {
 				got = append(got, tc.pkg[:8]+"/"+filepath.ToSlash(rel))
 			}
 		}

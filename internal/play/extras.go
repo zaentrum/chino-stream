@@ -70,7 +70,7 @@ func extraRoot(itemID, extraID string) string {
 	if st, err := os.Stat(filepath.Join(root, ".complete")); err != nil || st.IsDir() {
 		return ""
 	}
-	mf, err := readManifest(extrasCategory+"/"+extraID, filepath.Join(root, "manifest.json"))
+	mf, err := readManifest(filepath.Join(root, "manifest.json"), decodeManifest)
 	if err != nil || mf.ParentID == "" || mf.ParentID != itemID {
 		return ""
 	}
@@ -97,7 +97,7 @@ func (h *HLSHandler) ExtraMaster(w http.ResponseWriter, r *http.Request) {
 	}
 	caps := ParseCaps(r.URL.Query().Get("caps"))
 	q := r.URL.Query().Get("q")
-	servePlaylistCachedTransform(w, r, path, func(body string) string {
+	servePlaylistCachedTransform(w, r, path, r.URL.RawQuery, nil, func(body string) string {
 		return serveLadder(body, caps, q).body
 	})
 }
@@ -106,14 +106,14 @@ func (h *HLSHandler) ExtraMaster(w http.ResponseWriter, r *http.Request) {
 // audio or WebVTT rendition, its URIs carrying the query.
 func (h *HLSHandler) ExtraRenditionPlaylist(w http.ResponseWriter, r *http.Request) {
 	if path := extraFile(w, r, "hls", chi.URLParam(r, "rendId"), "playlist.m3u8"); path != "" {
-		servePlaylistCached(w, r, path)
+		servePlaylistCached(w, r, path, nil)
 	}
 }
 
 // ExtraIframesPlaylist serves the I-frame playlist of an extra's video rung.
 func (h *HLSHandler) ExtraIframesPlaylist(w http.ResponseWriter, r *http.Request) {
 	if path := extraFile(w, r, "hls", chi.URLParam(r, "rendId"), "iframes.m3u8"); path != "" {
-		serveIframesPlaylist(w, r, path)
+		serveIframesPlaylist(w, r, path, nil)
 	}
 }
 

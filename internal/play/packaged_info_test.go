@@ -23,11 +23,12 @@ type playInfo struct {
 	AudioTracks    []map[string]any `json:"audio_tracks"`
 }
 
-// getInfo answers GET /api/play/{id}/info?{query} for a packaged item.
-func getInfo(t *testing.T, id, query string) (playInfo, map[string]any) {
+// getInfo answers GET /api/play/{id}/info?{query} for a packaged item, its
+// package where packages says.
+func getInfo(t *testing.T, packages *Resolver, id, query string) (playInfo, map[string]any) {
 	t.Helper()
 	root, src := mediaFile(t, "film.mkv")
-	h := &Handler{Catalog: fakeKatalog(t, src), MediaRoot: root}
+	h := &Handler{Catalog: fakeKatalog(t, src), Packages: packages, MediaRoot: root}
 	r := chi.NewRouter()
 	r.Get("/api/play/{itemId}/info", h.Info)
 	w := httptest.NewRecorder()
@@ -60,7 +61,7 @@ func qualityNames(qs []map[string]any) []string {
 // families (a pick loads that rung's own master). Its video fields are the
 // rung the client starts on; default_quality is auto.
 func TestPlayInfoListsTheRungsAClientMayPick(t *testing.T) {
-	usePackages(t, filepath.Join("testdata", "packages"))
+	packages := usePackages(t, filepath.Join("testdata", "packages"))
 	cases := []struct {
 		name, pkg, query string
 		qualities        []string
@@ -84,7 +85,7 @@ func TestPlayInfoListsTheRungsAClientMayPick(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			info, raw := getInfo(t, tc.pkg, tc.query)
+			info, raw := getInfo(t, packages, tc.pkg, tc.query)
 			if info.Mode != "packaged" || info.DefaultQuality != "auto" {
 				t.Errorf("mode %q default_quality %q", info.Mode, info.DefaultQuality)
 			}
@@ -106,8 +107,8 @@ func TestPlayInfoListsTheRungsAClientMayPick(t *testing.T) {
 // frame, the codec, the bit rate of its variant, the video range. Auto has
 // a name and a label only.
 func TestPlayInfoQualityEntries(t *testing.T) {
-	usePackages(t, filepath.Join("testdata", "packages"))
-	info, _ := getInfo(t, pkgLadder, "?caps=avc,hvc,aac")
+	packages := usePackages(t, filepath.Join("testdata", "packages"))
+	info, _ := getInfo(t, packages, pkgLadder, "?caps=avc,hvc,aac")
 	want := []map[string]any{
 		{"name": "auto", "label": "Auto"},
 		{"name": "v0", "id": "v0", "label": "1080p", "width": 1920.0, "height": 1080.0,
@@ -125,9 +126,9 @@ func TestPlayInfoQualityEntries(t *testing.T) {
 // A package with one rendition offers no choice, as before (qualities
 // null); its video fields are that rendition's from the manifest.
 func TestPlayInfoOfASingleRenditionPackage(t *testing.T) {
-	usePackages(t, filepath.Join("testdata", "packages"))
+	packages := usePackages(t, filepath.Join("testdata", "packages"))
 	for _, q := range []string{"", "&q=v0", "&q=high"} {
-		info, raw := getInfo(t, pkgLegacy, "?caps=avc,hvc,aac"+q)
+		info, raw := getInfo(t, packages, pkgLegacy, "?caps=avc,hvc,aac"+q)
 		if raw["qualities"] != nil || info.DefaultQuality != "auto" {
 			t.Errorf("q=%q: qualities %v, default_quality %q", q, raw["qualities"], info.DefaultQuality)
 		}

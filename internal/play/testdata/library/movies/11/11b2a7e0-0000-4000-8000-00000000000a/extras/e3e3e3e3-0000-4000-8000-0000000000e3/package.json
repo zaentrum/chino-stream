@@ -1,0 +1,97 @@
+{
+  "schema": "zaentrum.library.package/2",
+  "packageId": "e3e3e3e3-0000-4000-8000-0000000000ee",
+  "createdAt": "2026-10-06T08:00:00Z",
+  "packagedBy": "packager version v3.4.2-c819dea-release",
+  "state": "complete",
+  "role": "canonical",
+  "durationMs": 20021,
+  "renditions": {
+    "video": [
+      {
+        "id": "v0",
+        "dir": "hls/v0",
+        "codec": "avc1.64001f",
+        "width": 1280,
+        "height": 720,
+        "bitrateBps": 1296569,
+        "hdr": false,
+        "frameRate": "24000/1001",
+        "segments": 4,
+        "targetDuration": 7,
+        "peakBitrateBps": 1312188,
+        "videoRange": "SDR",
+        "label": "720p",
+        "encoder": "libx264",
+        "dynamicRange": "sdr",
+        "sourceStreamIndex": 0
+      },
+      {
+        "id": "v1",
+        "dir": "hls/v1",
+        "codec": "avc1.64001e",
+        "width": 854,
+        "height": 480,
+        "bitrateBps": 510444,
+        "hdr": false,
+        "frameRate": "24000/1001",
+        "segments": 4,
+        "targetDuration": 7,
+        "peakBitrateBps": 513570,
+        "videoRange": "SDR",
+        "label": "480p",
+        "encoder": "libx264",
+        "dynamicRange": "sdr",
+        "sourceStreamIndex": 0
+      }
+    ],
+    "audio": [
+      {
+        "id": "a0",
+        "dir": "hls/a0",
+        "codec": "mp4a.40.2",
+        "language": "eng",
+        "title": "",
+        "default": true,
+        "channels": 2,
+        "bitrateBps": 192439,
+        "segments": 4,
+        "visible": true,
+        "sourceStreamIndex": 1,
+        "purpose": "main",
+        "purposeFrom": "assumed",
+        "group": "audio",
+        "name": "English"
+      }
+    ]
+  },
+  "subtitles": [],
+  "trickplay": null,
+  "sizeBytes": 0,
+  "peakBandwidthBps": null,
+  "fidelity": {
+    "lossless": false,
+    "losses": [
+      {
+        "kind": "audio-downmix",
+        "detail": "a test package"
+      }
+    ]
+  },
+  "essence": {},
+  "checksums": {
+    "file": "checksums.sha256",
+    "algorithm": "sha256",
+    "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "files": 0,
+    "bytes": 0
+  },
+  "hls": {
+    "master": "hls/master.m3u8",
+    "segmentSeconds": 6,
+    "audioGroups": [
+      "audio"
+    ],
+    "subtitleGroup": null
+  }
+}

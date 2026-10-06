@@ -17,8 +17,7 @@ import (
 // on disk whether or not the master references them (HLS_SUBTITLES only
 // changes the master), so the routes serve them either way.
 func TestPackagedSubtitleRenditionsAreServed(t *testing.T) {
-	usePackages(t, filepath.Join("testdata", "packages"))
-	h := &HLSHandler{}
+	h := &HLSHandler{Packages: usePackages(t, filepath.Join("testdata", "packages"))}
 	const query = "?stream=dXNlci0xfDE3OTEwNjI5NDM.c2ln"
 	for _, id := range []string{pkgLadder, pkgSingle} {
 		w := get(h, "/api/play/"+id+"/s0/playlist.m3u8"+query)
@@ -30,7 +29,7 @@ func TestPackagedSubtitleRenditionsAreServed(t *testing.T) {
 				t.Errorf("%s playlist lacks %s%s:\n%s", id, seg, query, w.Body)
 			}
 		}
-		want, err := os.ReadFile(packagePath(id, "hls", "s0", "seg-00001.vtt"))
+		want, err := os.ReadFile(filepath.Join(legacyDir(t, id), "hls", "s0", "seg-00001.vtt"))
 		if err != nil {
 			t.Fatal(err)
 		}

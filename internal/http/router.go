@@ -64,8 +64,12 @@ func NewRouter(d Deps) (http.Handler, error) {
 		log.Printf("on-the-fly audio: AAC-LC via %s", aacEncoder)
 	}
 
+	// One resolver for both handlers: where an item's or an extra's package
+	// is, as katalog-api answers it (cached, play/resolve.go).
+	packages := play.NewResolver(d.Catalog)
 	playH := &play.Handler{
 		Catalog:         d.Catalog,
+		Packages:        packages,
 		MediaRoot:       d.MediaRoot,
 		FFmpegBin:       d.FFmpegBin,
 		FFprobeBin:      d.FFprobeBin,
@@ -78,6 +82,7 @@ func NewRouter(d Deps) (http.Handler, error) {
 	}
 	hlsH := &play.HLSHandler{
 		Catalog:         d.Catalog,
+		Packages:        packages,
 		MediaRoot:       d.MediaRoot,
 		FFmpegBin:       d.FFmpegBin,
 		FFprobeBin:      d.FFprobeBin,

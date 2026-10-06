@@ -46,7 +46,7 @@ import (
 // is served exactly as packaged (shaka's own masters mark no audio
 // rendition DEFAULT; that stays as it is). A choice that would leave the
 // client nothing to play (no rung it decodes) serves the master as
-// packaged, as before: PackagedPlayableBy has already sent clients that
+// packaged, as before: packagedPlayableBy has already sent clients that
 // decode none of a package's rungs to the on-the-fly transcode.
 
 // masterVariant is one EXT-X-STREAM-INF of a master and its URI line.

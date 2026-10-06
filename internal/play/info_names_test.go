@@ -15,9 +15,9 @@ import (
 )
 
 // copyPackage copies the test package id under testdata/packages into a
-// fresh packages root, its manifest changed by edit, points PackagesRoot at
-// that root and returns the package's folder there.
-func copyPackage(t *testing.T, id string, edit func(m map[string]any)) string {
+// fresh packages root, its manifest changed by edit, serves that root
+// (usePackages) and returns the package's folder there and the resolver.
+func copyPackage(t *testing.T, id string, edit func(m map[string]any)) (string, *Resolver) {
 	t.Helper()
 	srcs, err := filepath.Glob(filepath.Join("testdata", "packages", "*", id[:2], id))
 	if err != nil || len(srcs) != 1 {
@@ -62,8 +62,7 @@ func copyPackage(t *testing.T, id string, edit func(m map[string]any)) string {
 	if err := os.WriteFile(filepath.Join(dst, "manifest.json"), b, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	usePackages(t, root)
-	return dst
+	return dst, usePackages(t, root)
 }
 
 // infoBody is GET /api/play/{id}/info for the item, its body as a string
@@ -108,7 +107,7 @@ func names(t *testing.T, tracks []map[string]any) []string {
 // from next to the source is listed after the source's tracks, its sN past
 // theirs, and served.
 func TestPlayInfoNamesAPackagesTracksNeverByTheSourcesTitle(t *testing.T) {
-	dir := copyPackage(t, pkgSingle, func(m map[string]any) {
+	dir, packages := copyPackage(t, pkgSingle, func(m map[string]any) {
 		audio := m["renditions"].(map[string]any)["audio"].([]any)
 		a0, a1 := audio[0].(map[string]any), audio[1].(map[string]any)
 		a0["language"], a0["title"], a0["name"] = "zxx", "AC3 5.1 @ 640 Kbps", "" // a manifest from before names
@@ -135,7 +134,7 @@ func TestPlayInfoNamesAPackagesTracksNeverByTheSourcesTitle(t *testing.T) {
 	}
 
 	root, src := mediaFile(t, "film.mkv")
-	body, audio, subs := infoBody(t, &Handler{Catalog: fakeKatalog(t, src), MediaRoot: root}, pkgSingle)
+	body, audio, subs := infoBody(t, &Handler{Catalog: fakeKatalog(t, src), Packages: packages, MediaRoot: root}, pkgSingle)
 	if got, want := names(t, audio), []string{"No dialogue", "English · Commentary"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("audio names %q, want %q", got, want)
 	}
@@ -149,7 +148,7 @@ func TestPlayInfoNamesAPackagesTracksNeverByTheSourcesTitle(t *testing.T) {
 		t.Errorf("a source title reaches the player:\n%s", body)
 	}
 
-	h := &HLSHandler{}
+	h := &HLSHandler{Packages: packages}
 	if w := get(h, "/api/play/"+pkgSingle+"/s3/playlist.m3u8"); w.Code != 200 || !strings.Contains(w.Body.String(), "seg-00001.vtt") {
 		t.Errorf("s3 playlist: %d %q", w.Code, w.Body)
 	}
@@ -160,9 +159,9 @@ func TestPlayInfoNamesAPackagesTracksNeverByTheSourcesTitle(t *testing.T) {
 
 // A package from before names: its tracks by their language.
 func TestPlayInfoNamesAnOldPackagesTracksByTheirLanguage(t *testing.T) {
-	usePackages(t, filepath.Join("testdata", "packages"))
+	packages := usePackages(t, filepath.Join("testdata", "packages"))
 	root, src := mediaFile(t, "film.mkv")
-	_, audio, subs := infoBody(t, &Handler{Catalog: fakeKatalog(t, src), MediaRoot: root}, pkgLegacy)
+	_, audio, subs := infoBody(t, &Handler{Catalog: fakeKatalog(t, src), Packages: packages, MediaRoot: root}, pkgLegacy)
 	if got, want := names(t, audio), []string{"English", "German"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("audio names %q, want %q", got, want)
 	}
@@ -175,7 +174,7 @@ func TestPlayInfoNamesAnOldPackagesTracksByTheirLanguage(t *testing.T) {
 // do and its subtitles by their language and what their titles say besides;
 // title is the same name, never the source's title as it is.
 func TestPlayInfoNamesASourcesTracksNeverByItsTitle(t *testing.T) {
-	usePackages(t, t.TempDir())
+	packages := usePackages(t, t.TempDir())
 	probe := `{"streams":[` +
 		`{"codec_type":"video","codec_name":"h264","width":1280,"height":720},` +
 		`{"codec_type":"audio","codec_name":"ac3","channels":6,"tags":{"language":"eng","title":"AC3 5.1 @ 640 Kbps"},"disposition":{"default":1}},` +
@@ -187,7 +186,7 @@ func TestPlayInfoNamesASourcesTracksNeverByItsTitle(t *testing.T) {
 		`{"codec_type":"subtitle","codec_name":"subrip","tags":{"title":"Signs"}}` +
 		`],"format":{"format_name":"matroska,webm","duration":"600.0","bit_rate":"4000000"}}`
 	root, src := mediaFile(t, "film.mkv")
-	h := &Handler{Catalog: fakeKatalog(t, src), MediaRoot: root, FFprobeBin: probeFFprobe(t, probe)}
+	h := &Handler{Catalog: fakeKatalog(t, src), Packages: packages, MediaRoot: root, FFprobeBin: probeFFprobe(t, probe)}
 	body, audio, subs := infoBody(t, h, "i1")
 	if got, want := names(t, audio), []string{"English", "No dialogue", "Unknown", "English · Commentary"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("audio names %q, want %q", got, want)

@@ -28,7 +28,9 @@ import (
 const passthroughBuf = 64 * 1024
 
 type Handler struct {
-	Catalog         *catalog.Client
+	Catalog *catalog.Client
+	// Packages says where an item's package is (resolve.go); nil: none is.
+	Packages        *Resolver
 	MediaRoot       string
 	FFmpegBin       string
 	FFprobeBin      string
@@ -411,15 +413,39 @@ func (h *Handler) ensureSubtitleCached(ctx context.Context, src string, idx, sta
 //     as "transcode", video included (see Master).
 //   - "passthrough" → everything client-OK: /copy/ stream copy.
 //
-// The packaged check is cheap (a single stat per cached itemRoot) and
-// runs first so a packaged item doesn't kick off an ffprobe just to be
-// told something it doesn't apply to.
+// The packaged check is cheap (a cached katalog-api answer and a stat of
+// the package's .complete) and runs first, before the original is looked
+// up, so a packaged item doesn't kick off an ffprobe just to be told
+// something it doesn't apply to, and plays once its original is retired.
 func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 	itemID := chi.URLParam(r, "itemId")
 	if itemID == "" {
 		http.Error(w, "missing itemId", http.StatusBadRequest)
 		return
 	}
+	// Packaged mode dispatches before the original is looked up at all —
+	// an item whose original is retired has none — but only when the
+	// client can actually decode the packaged codec. Otherwise we'd
+	// advertise mode=packaged to a phone that can't play HEVC, the player
+	// would happily mount the static stream, and the user would stare at
+	// a black frame at 00:00.
+	infoCaps := ParseCaps(r.URL.Query().Get("caps"))
+	if p, _, err := h.Packages.itemPackage(r.Context(), itemID, "", true); p != nil {
+		mf, err := readPkgManifest(p)
+		if packagedPlayableBy(mf, infoCaps) {
+			if err == nil && mf != nil {
+				writePackagedInfo(w, p, mf, infoCaps, r.URL.Query().Get("q"))
+				return
+			}
+			// Manifest unreadable — fall through to the source-side probe
+			// so the player at least gets *some* info, even if the
+			// pipeline label is wrong.
+			log.Printf("packaged manifest read failed for %s: %v", itemID, err)
+		}
+	} else if err != nil && !errors.Is(err, catalog.ErrNotFound) {
+		log.Printf("resolve %s: %v", itemID, err)
+	}
+
 	path, err := h.Catalog.PrimaryAssetPath(r.Context(), itemID, bearerFrom(r))
 	if err != nil {
 		if errors.Is(err, catalog.ErrNotFound) {
@@ -438,24 +464,6 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "this file is stored outside the configured media root — "+
 			"check MEDIA_ROOT on chino-stream", http.StatusInternalServerError)
 		return
-	}
-
-	// Packaged mode dispatches before any source-side probing — but
-	// only when the client can actually decode the packaged codec.
-	// Otherwise we'd advertise mode=packaged to a phone that can't
-	// play HEVC, the player would happily mount the static stream,
-	// and the user would stare at a black frame at 00:00.
-	infoCaps := ParseCaps(r.URL.Query().Get("caps"))
-	if HasCompletedPackage(itemID) && PackagedPlayableBy(itemID, infoCaps) {
-		mf, err := ReadPackageManifest(itemID)
-		if err == nil && mf != nil {
-			writePackagedInfo(w, itemID, mf, infoCaps, r.URL.Query().Get("q"))
-			return
-		}
-		// Manifest unreadable — fall through to the source-side probe
-		// so the player at least gets *some* info, even if the
-		// pipeline label is wrong.
-		log.Printf("packaged manifest read failed for %s: %v", itemID, err)
 	}
 
 	if _, err := os.Stat(clean); err != nil {
