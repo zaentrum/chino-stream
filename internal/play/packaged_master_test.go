@@ -153,7 +153,7 @@ func TestPackagedMasterServesTheClientsShareOfTheLadder(t *testing.T) {
 	// The same package, another client: its own share, not the first
 	// client's from the cache.
 	w = get(h, "/api/play/"+pkgLadder+"/master.m3u8?caps=avc,hvc,aac,eac3&q=auto")
-	if got := servedVariants(w.Body.String()); !reflect.DeepEqual(got, []string{"v0/audio", "v0/audio-surround"}) {
+	if got := servedVariants(w.Body.String()); !reflect.DeepEqual(got, []string{"v0/audio-surround"}) {
 		t.Errorf("an HEVC + E-AC-3 client: %v", got)
 	}
 	// And the one rung it asks for.

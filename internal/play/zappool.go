@@ -316,7 +316,7 @@ func warmOneZapItem(h *HLSHandler, itemID string) *zapPoolEntry {
 	videoOK := false
 	started := map[string]bool{}
 	for _, caps := range zapClients {
-		start := serveLadder(master, caps, "")
+		start := serveLadder(master, caps, "", twinsOf(mf))
 		key := start.video + "/" + start.audio
 		if started[key] {
 			continue

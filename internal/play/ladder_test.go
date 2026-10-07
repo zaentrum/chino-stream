@@ -129,59 +129,66 @@ func checkServed(t *testing.T, body string, caps Caps) {
 }
 
 // Each client is served one codec family — HEVC when an HEVC rung fits
-// its HEVC cap, else H.264 — never a rung over its cap, and the 5.1 group
-// only when it decodes E-AC-3.
+// its HEVC cap, else H.264 — never a rung over its cap, and the 5.1
+// companions only when it decodes E-AC-3: then one variant per rung, its
+// group the stereo renditions and the companions (serveUnion), starting on
+// the default English's companion a2.
 func TestLadderServesEachClientOneCodecFamily(t *testing.T) {
 	cases := []struct {
 		name, pkg, caps string
 		variants        []string
 		iframes         []string
+		audio           string // the rendition it starts on; "" = a0
 	}{
 		{"HEVC browser: the HEVC rung, not the H.264 ones", pkgLadder, "avc,hvc,aac",
-			[]string{"v0/audio"}, []string{"v0"}},
+			[]string{"v0/audio"}, []string{"v0"}, ""},
 		{"browser without HEVC: the H.264 rungs", pkgLadder, "avc,aac",
-			[]string{"v1/audio", "v2/audio"}, []string{"v1", "v2"}},
+			[]string{"v1/audio", "v2/audio"}, []string{"v1", "v2"}, ""},
 		{"no caps (the default set has no HEVC): H.264", pkgLadder, "",
-			[]string{"v1/audio", "v2/audio"}, []string{"v1", "v2"}},
-		{"E-AC-3 client gets the 5.1 group", pkgLadder, "avc,hvc,aac,eac3",
-			[]string{"v0/audio", "v0/audio-surround"}, []string{"v0"}},
+			[]string{"v1/audio", "v2/audio"}, []string{"v1", "v2"}, ""},
+		{"E-AC-3 client gets the 5.1 companions, one variant per rung", pkgLadder, "avc,hvc,aac,eac3",
+			[]string{"v0/audio-surround"}, []string{"v0"}, "a2"},
 		{"AC-3 is not E-AC-3", pkgLadder, "avc,hvc,aac,ac3",
-			[]string{"v0/audio"}, []string{"v0"}},
+			[]string{"v0/audio"}, []string{"v0"}, ""},
 		{"H.264 and E-AC-3", pkgLadder, "avc,aac,ec3",
-			[]string{"v1/audio", "v2/audio", "v1/audio-surround", "v2/audio-surround"}, []string{"v1", "v2"}},
+			[]string{"v1/audio-surround", "v2/audio-surround"}, []string{"v1", "v2"}, "a2"},
 		{"two HEVC rungs: ABR between them", pkgHEVCLadder, "avc,hvc,aac",
-			[]string{"v0/audio", "v1/audio"}, []string{"v0", "v1"}},
+			[]string{"v0/audio", "v1/audio"}, []string{"v0", "v1"}, ""},
 		{"HEVC capped at 720: the 720p HEVC rung, not the H.264 one", pkgHEVCLadder, "avc,hvc:720,aac",
-			[]string{"v1/audio"}, []string{"v1"}},
+			[]string{"v1/audio"}, []string{"v1"}, ""},
 		{"no HEVC: the one H.264 rung", pkgHEVCLadder, "avc,aac",
-			[]string{"v2/audio"}, []string{"v2"}},
+			[]string{"v2/audio"}, []string{"v2"}, ""},
 		{"4K HEVC over a 1080 HEVC cap: the H.264 rungs", pkgUHD, "avc:1080,hvc:1080,aac",
-			[]string{"v1/audio", "v2/audio"}, []string{"v1", "v2"}},
+			[]string{"v1/audio", "v2/audio"}, []string{"v1", "v2"}, ""},
 		{"4K HEVC client", pkgUHD, "avc:2160,hvc:2160,aac",
-			[]string{"v0/audio"}, []string{"v0"}},
+			[]string{"v0/audio"}, []string{"v0"}, ""},
 		{"H.264 capped at 720", pkgUHD, "avc:720,aac",
-			[]string{"v2/audio"}, []string{"v2"}},
+			[]string{"v2/audio"}, []string{"v2"}, ""},
 		{"a 4K TV decoding AC-3 and E-AC-3", pkgUHD, "avc:2160,hvc:2160,aac,mp3,ac3,eac3",
-			[]string{"v0/audio", "v0/audio-surround"}, []string{"v0"}},
+			[]string{"v0/audio-surround"}, []string{"v0"}, "a2"},
 		{"one audio group: HEVC browser", pkgStereoLadder, "avc,hvc,aac,eac3",
-			[]string{"v0/audio"}, []string{"v0"}},
+			[]string{"v0/audio"}, []string{"v0"}, ""},
 		{"one audio group: H.264", pkgStereoLadder, "avc,aac",
-			[]string{"v1/audio", "v2/audio"}, []string{"v1", "v2"}},
+			[]string{"v1/audio", "v2/audio"}, []string{"v1", "v2"}, ""},
 		{"one audio group: H.264 capped at 480", pkgStereoLadder, "hvc:480,avc:480,aac",
-			[]string{"v2/audio"}, []string{"v2"}},
+			[]string{"v2/audio"}, []string{"v2"}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			caps := ParseCaps(tc.caps)
-			s := serveLadder(packagedMasterBody(t, tc.pkg), caps, "")
+			s := serveLadder(packagedMasterBody(t, tc.pkg), caps, "", nil)
 			if got := servedVariants(s.body); !reflect.DeepEqual(got, tc.variants) {
 				t.Errorf("variants %v, want %v", got, tc.variants)
 			}
 			if got := servedIFrames(s.body); !reflect.DeepEqual(got, tc.iframes) {
 				t.Errorf("I-frame playlists %v, want %v", got, tc.iframes)
 			}
-			if s.video != tc.variants[0][:2] || s.audio != "a0" {
-				t.Errorf("starts on %s/%s, want %s/a0", s.video, s.audio, tc.variants[0][:2])
+			audio := tc.audio
+			if audio == "" {
+				audio = "a0"
+			}
+			if s.video != tc.variants[0][:2] || s.audio != audio {
+				t.Errorf("starts on %s/%s, want %s/%s", s.video, s.audio, tc.variants[0][:2], audio)
 			}
 			checkServed(t, s.body, caps)
 		})
@@ -192,7 +199,7 @@ func TestLadderServesEachClientOneCodecFamily(t *testing.T) {
 // served, the SUBTITLES group as packaged, the lines in their order.
 func TestLadderKeepsWhatItServesAsPackaged(t *testing.T) {
 	body := packagedMasterBody(t, pkgLadder)
-	s := serveLadder(body, ParseCaps("avc,aac"), "")
+	s := serveLadder(body, ParseCaps("avc,aac"), "", nil)
 	want := []string{
 		"AUDIO audio a0 YES", "AUDIO audio a1 NO",
 		"SUBTITLES subs s0 NO", "SUBTITLES subs s1 NO", "SUBTITLES subs s2 NO",
@@ -226,7 +233,7 @@ func TestLadderKeepsWhatItServesAsPackaged(t *testing.T) {
 
 	// A package whose master has no SUBTITLES group gets none: the WebVTT
 	// renditions on disk (hls/sN) are not added.
-	uhd := serveLadder(packagedMasterBody(t, pkgUHD), ParseCaps("avc,aac"), "")
+	uhd := serveLadder(packagedMasterBody(t, pkgUHD), ParseCaps("avc,aac"), "", nil)
 	if strings.Contains(uhd.body, "SUBTITLES") {
 		t.Errorf("a SUBTITLES group appeared:\n%s", uhd.body)
 	}
@@ -241,8 +248,8 @@ func TestLadderQualityPick(t *testing.T) {
 	}{
 		{"an HEVC client picks the 480p H.264 rung", pkgLadder, "avc,hvc,aac", "v2", []string{"v2/audio"}},
 		{"an H.264 client picks 720p", pkgLadder, "avc,aac", "v1", []string{"v1/audio"}},
-		{"the pick keeps the 5.1 group for E-AC-3", pkgLadder, "avc,aac,eac3", "v2",
-			[]string{"v2/audio", "v2/audio-surround"}},
+		{"the pick is served with the 5.1 companions for E-AC-3", pkgLadder, "avc,aac,eac3", "v2",
+			[]string{"v2/audio-surround"}},
 		{"a rung it can't decode: the ladder", pkgLadder, "avc,aac", "v0", []string{"v1/audio", "v2/audio"}},
 		{"a rung over its cap: the ladder", pkgUHD, "avc:720,aac", "v1", []string{"v2/audio"}},
 		{"a rung that isn't there: the ladder", pkgLadder, "avc,aac", "v7", []string{"v1/audio", "v2/audio"}},
@@ -255,7 +262,7 @@ func TestLadderQualityPick(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			caps := ParseCaps(tc.caps)
-			s := serveLadder(packagedMasterBody(t, tc.pkg), caps, tc.q)
+			s := serveLadder(packagedMasterBody(t, tc.pkg), caps, tc.q, nil)
 			if got := servedVariants(s.body); !reflect.DeepEqual(got, tc.variants) {
 				t.Errorf("variants %v, want %v", got, tc.variants)
 			}
@@ -291,65 +298,62 @@ func ladderMaster(audio []string, groups map[string]string, subs ...string) stri
 	return sb.String()
 }
 
-// Every audio group served has exactly one DEFAULT=YES: the packager's;
-// else, for a group without one (the packager marks a 5.1 group's English
-// default only when English is the stereo default), the rendition in the
-// stereo default's language, else the first AUTOSELECT one, else the
-// first. A group with several keeps the first. A SUBTITLES group keeps at
-// most one, and none stays none.
+// The stereo group a client is served has exactly one DEFAULT=YES: the
+// packager's; else, for a group without one, the first AUTOSELECT
+// rendition, else the first. A group with several keeps the first. A
+// SUBTITLES group keeps at most one, and none stays none. (A client that
+// decodes the 5.1 companions is served one group of both, whose default is
+// TestLadderServesAUnionOfTheAudioGroups'.)
 func TestLadderLeavesOneDefaultPerAudioGroup(t *testing.T) {
-	codecs := map[string]string{"audio": "mp4a.40.2", "audio-surround": "ec-3", "audio-ec3": "ec-3", "audio-ac3": "ac-3"}
-	stereo := []string{
-		`URI="a0/playlist.m3u8",GROUP-ID="audio",LANGUAGE="en",NAME="English",DEFAULT=NO,AUTOSELECT=YES,CHANNELS="2"`,
-		`URI="a1/playlist.m3u8",GROUP-ID="audio",LANGUAGE="de",NAME="German",DEFAULT=YES,AUTOSELECT=YES,CHANNELS="2"`,
-	}
+	codecs := map[string]string{"audio": "mp4a.40.2", "audio-surround": "ec-3"}
+	surround := `URI="a2/playlist.m3u8",GROUP-ID="audio-surround",LANGUAGE="en",NAME="English 5.1",DEFAULT=YES,AUTOSELECT=YES,CHANNELS="6"`
 	cases := []struct {
 		name  string
 		audio []string
 		subs  []string
 		want  []string
 	}{
-		{"no default in the 5.1 group: the stereo default's language",
-			append(stereo,
-				`URI="a2/playlist.m3u8",GROUP-ID="audio-surround",LANGUAGE="en",NAME="English 5.1",DEFAULT=NO,AUTOSELECT=YES,CHANNELS="6"`,
-				`URI="a3/playlist.m3u8",GROUP-ID="audio-surround",LANGUAGE="de",NAME="German 5.1",DEFAULT=NO,AUTOSELECT=YES,CHANNELS="6"`),
+		{"the packager's default",
+			[]string{
+				`URI="a0/playlist.m3u8",GROUP-ID="audio",LANGUAGE="en",NAME="English",DEFAULT=NO,AUTOSELECT=YES,CHANNELS="2"`,
+				`URI="a1/playlist.m3u8",GROUP-ID="audio",LANGUAGE="de",NAME="German",DEFAULT=YES,AUTOSELECT=YES,CHANNELS="2"`,
+				surround,
+			},
 			nil,
-			[]string{"AUDIO audio a0 NO", "AUDIO audio a1 YES", "AUDIO audio-surround a2 NO", "AUDIO audio-surround a3 YES"}},
-		{"no rendition in that language: the first AUTOSELECT one",
-			append(stereo,
-				`URI="a2/playlist.m3u8",GROUP-ID="audio-surround",LANGUAGE="en",NAME="Commentary 5.1",DEFAULT=NO,CHANNELS="6"`,
-				`URI="a3/playlist.m3u8",GROUP-ID="audio-surround",LANGUAGE="en",NAME="English 5.1",DEFAULT=NO,AUTOSELECT=YES,CHANNELS="6"`),
+			[]string{"AUDIO audio a0 NO", "AUDIO audio a1 YES"}},
+		{"none: the first AUTOSELECT one",
+			[]string{
+				`URI="a0/playlist.m3u8",GROUP-ID="audio",LANGUAGE="en",NAME="English",DEFAULT=NO`,
+				`URI="a1/playlist.m3u8",GROUP-ID="audio",LANGUAGE="de",NAME="German",DEFAULT=NO,AUTOSELECT=YES`,
+			},
 			nil,
-			[]string{"AUDIO audio a0 NO", "AUDIO audio a1 YES", "AUDIO audio-surround a2 NO", "AUDIO audio-surround a3 YES"}},
+			[]string{"AUDIO audio a0 NO", "AUDIO audio a1 YES"}},
 		{"none AUTOSELECT: the first",
-			append(stereo,
-				`URI="a2/playlist.m3u8",GROUP-ID="audio-surround",LANGUAGE="fr",NAME="French 5.1",DEFAULT=NO,CHANNELS="6"`,
-				`URI="a3/playlist.m3u8",GROUP-ID="audio-surround",LANGUAGE="it",NAME="Italian 5.1",DEFAULT=NO,CHANNELS="6"`),
+			[]string{
+				`URI="a0/playlist.m3u8",GROUP-ID="audio",LANGUAGE="en",NAME="English",DEFAULT=NO`,
+				`URI="a1/playlist.m3u8",GROUP-ID="audio",LANGUAGE="de",NAME="German",DEFAULT=NO`,
+				surround,
+			},
 			nil,
-			[]string{"AUDIO audio a0 NO", "AUDIO audio a1 YES", "AUDIO audio-surround a2 YES", "AUDIO audio-surround a3 NO"}},
+			[]string{"AUDIO audio a0 YES", "AUDIO audio a1 NO"}},
 		{"two defaults: the first stays",
 			[]string{
 				`URI="a0/playlist.m3u8",GROUP-ID="audio",LANGUAGE="en",NAME="English",DEFAULT=YES,AUTOSELECT=YES`,
 				`URI="a1/playlist.m3u8",GROUP-ID="audio",LANGUAGE="de",NAME="German",DEFAULT=YES,AUTOSELECT=YES`,
-				`URI="a2/playlist.m3u8",GROUP-ID="audio-surround",LANGUAGE="en",NAME="English 5.1",DEFAULT=YES,AUTOSELECT=YES,CHANNELS="6"`,
+				surround,
 			},
 			[]string{
 				`URI="s0/playlist.m3u8",GROUP-ID="subs",LANGUAGE="en",NAME="English",DEFAULT=YES,AUTOSELECT=YES`,
 				`URI="s1/playlist.m3u8",GROUP-ID="subs",LANGUAGE="de",NAME="German",DEFAULT=YES,AUTOSELECT=YES`,
 				`URI="s2/playlist.m3u8",GROUP-ID="subs",LANGUAGE="fr",NAME="French",DEFAULT=NO`,
 			},
-			[]string{"AUDIO audio a0 YES", "AUDIO audio a1 NO", "AUDIO audio-surround a2 YES",
+			[]string{"AUDIO audio a0 YES", "AUDIO audio a1 NO",
 				"SUBTITLES subs s0 YES", "SUBTITLES subs s1 NO", "SUBTITLES subs s2 NO"}},
-		{"three groups: the language of the first group's default, not the last one's",
-			append(stereo,
-				`URI="a2/playlist.m3u8",GROUP-ID="audio-ec3",LANGUAGE="en",NAME="English 5.1",DEFAULT=YES,AUTOSELECT=YES,CHANNELS="6"`,
-				`URI="a3/playlist.m3u8",GROUP-ID="audio-ac3",LANGUAGE="en",NAME="English 5.1",DEFAULT=NO,AUTOSELECT=YES,CHANNELS="6"`,
-				`URI="a4/playlist.m3u8",GROUP-ID="audio-ac3",LANGUAGE="de",NAME="German 5.1",DEFAULT=NO,AUTOSELECT=YES,CHANNELS="6"`),
-			nil,
-			[]string{"AUDIO audio a0 NO", "AUDIO audio a1 YES", "AUDIO audio-ec3 a2 YES",
-				"AUDIO audio-ac3 a3 NO", "AUDIO audio-ac3 a4 YES"}},
 		{"no subtitle default stays none",
-			stereo,
+			[]string{
+				`URI="a0/playlist.m3u8",GROUP-ID="audio",LANGUAGE="en",NAME="English",DEFAULT=NO,AUTOSELECT=YES,CHANNELS="2"`,
+				`URI="a1/playlist.m3u8",GROUP-ID="audio",LANGUAGE="de",NAME="German",DEFAULT=YES,AUTOSELECT=YES,CHANNELS="2"`,
+			},
 			[]string{
 				`URI="s0/playlist.m3u8",GROUP-ID="subs",LANGUAGE="en",NAME="English",DEFAULT=NO,AUTOSELECT=YES`,
 				`URI="s1/playlist.m3u8",GROUP-ID="subs",LANGUAGE="en",NAME="English (Forced)",DEFAULT=NO,AUTOSELECT=YES,FORCED=YES`,
@@ -362,8 +366,8 @@ func TestLadderLeavesOneDefaultPerAudioGroup(t *testing.T) {
 			if len(tc.subs) > 0 {
 				body = strings.ReplaceAll(body, `,AUDIO=`, `,SUBTITLES="subs",AUDIO=`)
 			}
-			caps := ParseCaps("avc,hvc,aac,eac3,ac3")
-			s := serveLadder(body, caps, "")
+			caps := ParseCaps("avc,hvc,aac,ac3")
+			s := serveLadder(body, caps, "", nil)
 			if got := servedMedia(s.body); !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("renditions\n got %v\nwant %v", got, tc.want)
 			}
@@ -388,9 +392,10 @@ func TestLadderLeavesOneDefaultPerAudioGroup(t *testing.T) {
 
 // A rendition without dialogue (zxx) or in no known language (no
 // LANGUAGE: und) is served like any other - the filter drops only what a
-// client cannot decode - and the 5.1 group's default is the one without
-// dialogue when that is the stereo default's. A subtitle file from next to
-// the source is a rendition past the source's own (s5), and stays.
+// client cannot decode - and for an E-AC-3 client paired with the stereo
+// rendition in the same no-language (a3 with a0, a2 with a1), the default
+// the one without dialogue's companion. A subtitle file from next to the
+// source is a rendition past the source's own (s5), and stays.
 func TestLadderKeepsTracksInNoLanguage(t *testing.T) {
 	codecs := map[string]string{"audio": "mp4a.40.2", "audio-surround": "ec-3"}
 	audio := []string{
@@ -405,21 +410,22 @@ func TestLadderKeepsTracksInNoLanguage(t *testing.T) {
 	}
 	body := strings.ReplaceAll(ladderMaster(audio, codecs, subs...), `,AUDIO=`, `,SUBTITLES="subs",AUDIO=`)
 	for _, tc := range []struct {
-		caps string
-		want []string
+		caps  string
+		want  []string
+		start string
 	}{
-		{"avc,hvc,aac,eac3", []string{"AUDIO audio a0 YES", "AUDIO audio a1 NO", "AUDIO audio-surround a2 NO",
-			"AUDIO audio-surround a3 YES", "SUBTITLES subs s0 NO", "SUBTITLES subs s5 NO"}},
-		{"avc,aac", []string{"AUDIO audio a0 YES", "AUDIO audio a1 NO", "SUBTITLES subs s0 NO", "SUBTITLES subs s5 NO"}},
+		{"avc,hvc,aac,eac3", []string{"AUDIO audio-surround a3 YES", "AUDIO audio-surround a0 NO", "AUDIO audio-surround a2 NO",
+			"AUDIO audio-surround a1 NO", "SUBTITLES subs s0 NO", "SUBTITLES subs s5 NO"}, "a3"},
+		{"avc,aac", []string{"AUDIO audio a0 YES", "AUDIO audio a1 NO", "SUBTITLES subs s0 NO", "SUBTITLES subs s5 NO"}, "a0"},
 	} {
 		caps := ParseCaps(tc.caps)
-		s := serveLadder(body, caps, "")
+		s := serveLadder(body, caps, "", nil)
 		if got := servedMedia(s.body); !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("%s: renditions\n got %v\nwant %v", tc.caps, got, tc.want)
 		}
 		checkServed(t, s.body, caps)
-		if s.audio != "a0" {
-			t.Errorf("%s: starts on %s, want the default a0", tc.caps, s.audio)
+		if s.audio != tc.start {
+			t.Errorf("%s: starts on %s, want %s", tc.caps, s.audio, tc.start)
 		}
 	}
 }
@@ -485,10 +491,10 @@ func TestLadderAudioCodecs(t *testing.T) {
 		`URI="a0/playlist.m3u8",GROUP-ID="audio",LANGUAGE="en",NAME="English",DEFAULT=YES,AUTOSELECT=YES,CHANNELS="2"`,
 		`URI="a1/playlist.m3u8",GROUP-ID="audio-mc",LANGUAGE="en",NAME="English 5.1",DEFAULT=YES,AUTOSELECT=YES,CHANNELS="6"`,
 	}, map[string]string{"audio": "mp4a.40.2", "audio-mc": "mp4a.40.2"})
-	if got := servedVariants(serveLadder(body, ParseCaps("hvc,aac"), "").body); !reflect.DeepEqual(got, []string{"v0/audio"}) {
+	if got := servedVariants(serveLadder(body, ParseCaps("hvc,aac"), "", nil).body); !reflect.DeepEqual(got, []string{"v0/audio"}) {
 		t.Errorf("without aacmc: %v", got)
 	}
-	if got := servedVariants(serveLadder(body, ParseCaps("hvc,aac,aacmc"), "").body); !reflect.DeepEqual(got, []string{"v0/audio", "v0/audio-mc"}) {
+	if got := servedVariants(serveLadder(body, ParseCaps("hvc,aac,aacmc"), "", nil).body); !reflect.DeepEqual(got, []string{"v0/audio-mc"}) {
 		t.Errorf("with aacmc: %v", got)
 	}
 }
@@ -500,13 +506,13 @@ func TestLadderServesAsPackagedWhatItCannotChooseFrom(t *testing.T) {
 	unknown := "#EXTM3U\n" +
 		"#EXT-X-STREAM-INF:BANDWIDTH=2000000,CODECS=\"mp4v.20.9,mp4a.40.2\",RESOLUTION=640x360\nv0/playlist.m3u8\n" +
 		"#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS=\"mp4v.20.9,mp4a.40.2\",RESOLUTION=320x180\nv1/playlist.m3u8\n"
-	if s := serveLadder(unknown, ParseCaps("avc,hvc,aac"), ""); s.body != unknown || s.video != "v0" {
+	if s := serveLadder(unknown, ParseCaps("avc,hvc,aac"), "", nil); s.body != unknown || s.video != "v0" {
 		t.Errorf("unknown codecs: %q (%s)", s.body, s.video)
 	}
 	onlySurround := ladderMaster([]string{
 		`URI="a0/playlist.m3u8",GROUP-ID="audio-surround",LANGUAGE="en",NAME="English 5.1",DEFAULT=YES,AUTOSELECT=YES,CHANNELS="6"`,
 	}, map[string]string{"audio-surround": "ec-3"})
-	if got := servedVariants(serveLadder(onlySurround, ParseCaps("avc,hvc,aac"), "").body); !reflect.DeepEqual(got, []string{"v0/audio-surround"}) {
+	if got := servedVariants(serveLadder(onlySurround, ParseCaps("avc,hvc,aac"), "", nil).body); !reflect.DeepEqual(got, []string{"v0/audio-surround"}) {
 		t.Errorf("an E-AC-3-only master for a client without E-AC-3: %v", got)
 	}
 }
@@ -520,7 +526,7 @@ func TestLadderLeavesASingleRenditionMasterAlone(t *testing.T) {
 		body := packagedMasterBody(t, id)
 		for _, c := range []string{"avc,hvc,aac", "avc,aac", "hvc:720,aac,eac3", ""} {
 			for _, q := range []string{"", "v0", "v1", "auto", "medium"} {
-				s := serveLadder(body, ParseCaps(c), q)
+				s := serveLadder(body, ParseCaps(c), q, nil)
 				if s.body != body {
 					t.Errorf("%s caps=%q q=%q changed:\n%s", id, c, q, s.body)
 				}
@@ -538,7 +544,7 @@ func TestLadderLeavesASingleRenditionMasterAlone(t *testing.T) {
 	}, map[string]string{"audio": "mp4a.40.2", "audio-surround": "ec-3"})
 	one = strings.ReplaceAll(one, "#EXT-X-STREAM-INF:BANDWIDTH=3000000,CODECS=\"avc1.64001f,mp4a.40.2\",RESOLUTION=1280x720,AUDIO=\"audio\"\nv1/playlist.m3u8\n", "")
 	one = strings.ReplaceAll(one, "#EXT-X-STREAM-INF:BANDWIDTH=3000000,CODECS=\"avc1.64001f,ec-3\",RESOLUTION=1280x720,AUDIO=\"audio-surround\"\nv1/playlist.m3u8\n", "")
-	if got := servedVariants(serveLadder(one, ParseCaps("hvc,aac"), "").body); !reflect.DeepEqual(got, []string{"v0/audio"}) {
+	if got := servedVariants(serveLadder(one, ParseCaps("hvc,aac"), "", nil).body); !reflect.DeepEqual(got, []string{"v0/audio"}) {
 		t.Errorf("one rendition with a 5.1 group: %v", got)
 	}
 }
@@ -551,12 +557,12 @@ func TestLadderListsOnlyTheGroupsItsVariantsName(t *testing.T) {
 		"#EXT-X-STREAM-INF:BANDWIDTH=6000000,CODECS=\"hvc1.1.6.L120.90\",RESOLUTION=1920x1080,SUBTITLES=\"subs\"\nv0/playlist.m3u8\n" +
 		"#EXT-X-STREAM-INF:BANDWIDTH=3000000,CODECS=\"avc1.64001f\",RESOLUTION=1280x720\nv1/playlist.m3u8\n"
 	caps := ParseCaps("avc")
-	s := serveLadder(body, caps, "")
+	s := serveLadder(body, caps, "", nil)
 	if strings.Contains(s.body, "TYPE=SUBTITLES") {
 		t.Errorf("a SUBTITLES group no served variant names:\n%s", s.body)
 	}
 	checkServed(t, s.body, caps)
-	if hevc := serveLadder(body, ParseCaps("hvc"), ""); !strings.Contains(hevc.body, "TYPE=SUBTITLES") {
+	if hevc := serveLadder(body, ParseCaps("hvc"), "", nil); !strings.Contains(hevc.body, "TYPE=SUBTITLES") {
 		t.Errorf("the HEVC rung's group went:\n%s", hevc.body)
 	}
 }
@@ -574,7 +580,7 @@ func TestLadderVideoCodecsWithoutAFamily(t *testing.T) {
 		t.Errorf("parsed %+v", v)
 	}
 	for _, c := range []string{"avc,hvc,aac", "avc,aac"} {
-		if got := servedVariants(serveLadder(body, ParseCaps(c), "").body); !reflect.DeepEqual(got, []string{"v1/audio"}) {
+		if got := servedVariants(serveLadder(body, ParseCaps(c), "", nil).body); !reflect.DeepEqual(got, []string{"v1/audio"}) {
 			t.Errorf("caps=%s: %v", c, got)
 		}
 	}
@@ -617,11 +623,11 @@ func TestLadderOtherCodecFamilies(t *testing.T) {
 		{"vp9:720,av1:720", []string{"v3/"}}, // the VP9 one is over it
 	}
 	for _, tc := range cases {
-		if got := servedVariants(serveLadder(body, ParseCaps(tc.caps), "").body); !reflect.DeepEqual(got, tc.want) {
+		if got := servedVariants(serveLadder(body, ParseCaps(tc.caps), "", nil).body); !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("caps=%s: %v, want %v", tc.caps, got, tc.want)
 		}
 	}
-	if s := serveLadder(body, ParseCaps("hvc"), ""); s.body != body {
+	if s := serveLadder(body, ParseCaps("hvc"), "", nil); s.body != body {
 		t.Errorf("a client decoding none of them: %s", s.body)
 	}
 }

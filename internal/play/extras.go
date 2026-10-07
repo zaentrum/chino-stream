@@ -145,7 +145,11 @@ func (h *HLSHandler) ExtraMaster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	caps := ParseCaps(r.URL.Query().Get("caps"))
-	if mf, err := readPkgManifest(p); err == nil && len(mf.Renditions.Video) > 0 && !packagedPlayableBy(mf, caps) {
+	mf, err := readPkgManifest(p)
+	if err != nil {
+		mf = nil
+	}
+	if mf != nil && len(mf.Renditions.Video) > 0 && !packagedPlayableBy(mf, caps) {
 		probe := packageProbe(mf)
 		src := &source{key: sourceKey("extra/"+chi.URLParam(r, "extraId"), p), pkg: p, mf: mf, probe: &probe}
 		h.serveOnTheFlyMaster(w, r, src, caps)
@@ -154,7 +158,7 @@ func (h *HLSHandler) ExtraMaster(w http.ResponseWriter, r *http.Request) {
 	path, retry := h.extraRetry(r, p, "hls", "master.m3u8")
 	q := r.URL.Query().Get("q")
 	servePlaylistCachedTransform(w, r, path, r.URL.RawQuery, retry, func(body string) string {
-		return serveLadder(body, caps, q).body
+		return serveLadder(body, caps, q, twinsOf(mf)).body
 	})
 }
 

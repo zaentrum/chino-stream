@@ -125,8 +125,10 @@ func TestMasterFetchWarmsTheStartingVariant(t *testing.T) {
 	}{
 		{"H.264 client: the top H.264 rung and the default audio", pkgLadder, "?caps=avc,aac",
 			[]string{"hls/master.m3u8", "hls/v1/playlist.m3u8", "hls/v1/init.mp4", "hls/a0/playlist.m3u8", "hls/a0/init.mp4"}},
-		{"HEVC client", pkgLadder, "?caps=avc,hvc,aac,eac3",
+		{"HEVC client", pkgLadder, "?caps=avc,hvc,aac",
 			[]string{"hls/master.m3u8", "hls/v0/playlist.m3u8", "hls/v0/init.mp4", "hls/a0/playlist.m3u8", "hls/a0/init.mp4"}},
+		{"HEVC and E-AC-3 client: the default English's 5.1 companion", pkgLadder, "?caps=avc,hvc,aac,eac3",
+			[]string{"hls/master.m3u8", "hls/v0/playlist.m3u8", "hls/v0/init.mp4", "hls/a2/playlist.m3u8", "hls/a2/init.mp4"}},
 		{"a quality pick", pkgLadder, "?caps=avc,hvc,aac&q=v2",
 			[]string{"hls/master.m3u8", "hls/v2/playlist.m3u8", "hls/v2/init.mp4", "hls/a0/playlist.m3u8", "hls/a0/init.mp4"}},
 		{"with t=0, from the first segment", pkgLadder, "?caps=avc,aac&t=0",
@@ -163,9 +165,10 @@ func TestPrewarmWarmsTheStartingVariant(t *testing.T) {
 	if w.Code != http.StatusAccepted || w.Body.String() != "packaged-warming" {
 		t.Fatalf("prewarm: %d %q", w.Code, w.Body)
 	}
+	// An E-AC-3 client starts on the default English's 5.1 companion, a2.
 	want := files(pkgLadder, "hls/master.m3u8",
 		"hls/v1/playlist.m3u8", "hls/v1/init.mp4", "hls/v1/seg-00003.m4s", "hls/v1/seg-00004.m4s",
-		"hls/a0/playlist.m3u8", "hls/a0/init.mp4", "hls/a0/seg-00003.m4s", "hls/a0/seg-00004.m4s")
+		"hls/a2/playlist.m3u8", "hls/a2/init.mp4", "hls/a2/seg-00003.m4s", "hls/a2/seg-00004.m4s")
 	if got := cached(t); !reflect.DeepEqual(got, want) {
 		t.Errorf("warmed\n %v\nwant\n %v", got, want)
 	}

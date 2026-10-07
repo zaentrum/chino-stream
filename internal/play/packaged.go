@@ -255,7 +255,7 @@ func (h *HLSHandler) servePackagedMaster(w http.ResponseWriter, r *http.Request,
 		if videoRange != nil {
 			body = videoRange(body)
 		}
-		return serveLadder(body, caps, q).body
+		return serveLadder(body, caps, q, twinsOf(mf)).body
 	})
 	if served == nil {
 		return
@@ -628,7 +628,7 @@ func (h *HLSHandler) warmPackaged(p *pkgDir, mf *pkgmanifest.Manifest, caps Caps
 	if err != nil {
 		return
 	}
-	warmStart(p, serveLadder(master, caps, q), tSec, true)
+	warmStart(p, serveLadder(master, caps, q, twinsOf(mf)), tSec, true)
 }
 
 // warmStart warms the variant a client starts on: s.video and s.audio,
@@ -1099,16 +1099,19 @@ func writePackagedInfo(w http.ResponseWriter, p *pkgDir, mf *pkgmanifest.Manifes
 		video = mf.Renditions.Video[0]
 	}
 	var qualities []map[string]any
+	audioTracks, audioCodec := packagedAudioTracks(mf.Renditions.Audio), "aac"
 	if master, err := readPackagedMaster(p); err == nil {
-		start := serveLadder(master, caps, q).video
+		served := serveLadder(master, caps, q, twinsOf(mf))
 		for _, v := range mf.Renditions.Video {
-			if v.ID == start {
+			if v.ID == served.video {
 				video = v
 			}
 		}
 		qualities = packagedQualities(master, caps)
+		if tracks := unionAudioTracks(served.body, master, mf); tracks != nil {
+			audioTracks, audioCodec = tracks, startCodec(tracks)
+		}
 	}
-	audioTracks := packagedAudioTracks(mf.Renditions.Audio)
 	// v2 manifests put the title at the top level; v1 manifests had
 	// only Source.Path. Prefer Title when present; fall back to the
 	// source-path basename for legacy packages. A library version's
@@ -1125,7 +1128,7 @@ func writePackagedInfo(w http.ResponseWriter, p *pkgDir, mf *pkgmanifest.Manifes
 		"filename":        filename,
 		"container":       "cmaf",
 		"video_codec":     video.Codec,
-		"audio_codec":     "aac",
+		"audio_codec":     audioCodec,
 		"width":           video.Width,
 		"height":          video.Height,
 		"duration_ms":     mf.EffectiveDurationMs(),
@@ -1166,6 +1169,109 @@ func packagedAudioTracks(renditions []pkgmanifest.AudioRendition) []map[string]a
 		})
 	}
 	return out
+}
+
+// unionAudioTracks are /play/info's audio_tracks of a package for a client
+// served the union of its audio groups (serveUnion: one that decodes its 5.1
+// companions): the renditions of the group its master names, in that
+// master's order — each 5.1 companion just before the stereo rendition of
+// its source track — so a client lists what its player lists, in the same
+// order. Each has its name as that master has it (NAME, unique in the group,
+// what a client picks it by; title the same), its codec, language and
+// channels from the manifest, default as the master marks it, and group and
+// rendition: the group's GROUP-ID and the rendition's id ("a2"), the folder
+// its URI names. nil for a client served the stereo group alone, whose
+// tracks are packagedAudioTracks, as they always were.
+func unionAudioTracks(served, packaged string, mf *pkgmanifest.Manifest) []map[string]any {
+	m := parseMaster(served)
+	group := firstAudioGroup(m)
+	if group == "" || group == firstAudioGroup(parseMaster(packaged)) {
+		return nil
+	}
+	byID := map[string]pkgmanifest.AudioRendition{}
+	for _, a := range mf.Renditions.AudioSurround {
+		byID[renditionID(a)] = a
+	}
+	for _, a := range mf.Renditions.Audio {
+		byID[renditionID(a)] = a
+	}
+	var out []map[string]any
+	for _, md := range m.media {
+		if md.typ != "AUDIO" || md.group != group {
+			continue
+		}
+		a, attrs := byID[md.rend], hlsAttributes(m.lines[md.line])
+		name := strings.TrimSpace(attrs["NAME"])
+		if name == "" {
+			name = strings.TrimSpace(a.Name)
+		}
+		if name == "" {
+			name = trackDisplayName(a.Language, a.Title)
+		}
+		channels := a.Channels
+		if channels == 0 {
+			channels = md.channels
+		}
+		language := a.Language
+		if language == "" {
+			language = md.language
+		}
+		out = append(out, map[string]any{
+			"index":     len(out),
+			"codec":     a.Codec,
+			"language":  language,
+			"name":      name,
+			"title":     name,
+			"default":   md.isDefault,
+			"channels":  channels,
+			"group":     group,
+			"rendition": md.rend,
+		})
+	}
+	return out
+}
+
+// firstAudioGroup is the audio group of a master's first variant, "" when it
+// names none.
+func firstAudioGroup(m *hlsMaster) string {
+	if len(m.variants) == 0 {
+		return ""
+	}
+	return m.variants[0].audio
+}
+
+// startCodec is /play/info's audio_codec for audio tracks listed as
+// unionAudioTracks and onTheFlyInfoTracks list them: the codec of the one a
+// player starts on (the default, else the first), named as ffprobe names it
+// ("eac3", "ac3", "aac").
+func startCodec(tracks []map[string]any) string {
+	start := ""
+	for _, t := range tracks {
+		c, _ := t["codec"].(string)
+		if start == "" {
+			start = c
+		}
+		if d, _ := t["default"].(bool); d {
+			start = c
+			break
+		}
+	}
+	return codecName(start)
+}
+
+// codecName is an audio CODECS entry as ffprobe names the codec: "eac3" for
+// ec-3, "ac3" for ac-3, "aac" for mp4a; anything else as it is.
+func codecName(codec string) string {
+	switch c := strings.ToLower(codec); {
+	case c == "ec-3" || c == "eac3":
+		return "eac3"
+	case c == "ac-3" || c == "ac3":
+		return "ac3"
+	case strings.HasPrefix(c, "mp4a") || c == "aac":
+		return "aac"
+	default:
+		return c
+	}
 }
 
 // packagedSubtitleTracks are /play/info's subtitle_tracks of a package, its

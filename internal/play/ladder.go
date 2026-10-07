@@ -1,9 +1,12 @@
 package play
 
 import (
+	"path"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/zaentrum/chino-stream/internal/pkgmanifest"
 )
 
 // Serving a packaged ladder.
@@ -260,9 +263,50 @@ type servedLadder struct {
 	audio string // "a0"; "" when the variant has no audio group
 }
 
+// audioTwins maps a rendition of a further audio group — a 5.1 companion,
+// "a2" — to the stereo rendition made from the same source track, "a0", as
+// a package's manifest pairs them (twinsOf). A rendition it has no entry
+// for, and every one when it is nil, is paired by language.
+type audioTwins map[string]string
+
+// twinsOf pairs each 5.1 companion of the package mf with the stereo
+// rendition of its source track (pkgmanifest.AudioRendition.SourceTrack).
+func twinsOf(mf *pkgmanifest.Manifest) audioTwins {
+	if mf == nil || len(mf.Renditions.AudioSurround) == 0 {
+		return nil
+	}
+	stereo := map[int]string{}
+	for _, a := range mf.Renditions.Audio {
+		if k, ok := a.SourceTrack(); ok {
+			if _, seen := stereo[k]; !seen {
+				stereo[k] = renditionID(a)
+			}
+		}
+	}
+	out := audioTwins{}
+	for _, a := range mf.Renditions.AudioSurround {
+		if k, ok := a.SourceTrack(); ok {
+			if twin, ok := stereo[k]; ok {
+				out[renditionID(a)] = twin
+			}
+		}
+	}
+	return out
+}
+
+// renditionID is an audio rendition's id in its master — the folder its
+// URI names, "a2" for hls/a2 — the manifest's id when it names no folder.
+func renditionID(a pkgmanifest.AudioRendition) string {
+	if a.Dir != "" {
+		return path.Base(a.Dir)
+	}
+	return a.ID
+}
+
 // serveLadder is the packaged master body as the client with caps, asking
-// for quality q, is served (see the top of this file).
-func serveLadder(body string, caps Caps, q string) servedLadder {
+// for quality q, is served (see the top of this file). twins pairs the 5.1
+// companions with their stereo renditions (twinsOf; nil: by language).
+func serveLadder(body string, caps Caps, q string, twins audioTwins) servedLadder {
 	m := parseMaster(body)
 	rungs := m.rungs()
 	if len(rungs) <= 1 && len(m.audioGroups()) <= 1 {
@@ -309,6 +353,12 @@ func serveLadder(body string, caps Caps, q string) servedLadder {
 		}
 		groups[g] = ok
 	}
+	// A client that decodes a further group besides the stereo one (the 5.1
+	// companions, with eac3) is served one variant per rung, its audio the
+	// two groups as one.
+	if s, ok := m.serveUnion(videos, groups, twins); ok {
+		return s
+	}
 	keep := func(v masterVariant) bool { return videos[v.rung] && (v.audio == "" || groups[v.audio]) }
 	kept := false
 	for _, v := range m.variants {
@@ -345,6 +395,225 @@ func serveLadder(body string, caps Caps, q string) servedLadder {
 	}
 	m.normalizeDefaults(drop)
 	return m.render(drop).served("")
+}
+
+// serveUnion serves the client that decodes a further audio group as well
+// as the stereo one — the packager's "audio-surround", the 5.1 companions,
+// to a client with eac3 — one variant per rung, not one per rung and audio
+// group: a player with two variants of a rung (one per group, their
+// BANDWIDTH and CODECS apart) lists them as two levels, starts on the stereo
+// ones and keeps to them (hls.js), and a pick of a 5.1 track had to move it
+// to another level. A variant names one audio group (RFC 8216), so the
+// client's group holds both: every stereo rendition, and each of the
+// further group's renditions just before the stereo rendition of its source
+// track (twins, else the first stereo one in its language) — "English 5.1",
+// "English", "German" — so no track goes (a stereo source track has no
+// companion, a commentary never has one) and a player that takes the first
+// rendition of a language takes the 5.1. Exactly one is DEFAULT: the
+// companion of the stereo group's default, else that default itself. It is
+// the further group (its GROUP-ID): the stereo renditions join it.
+//
+// The variant of each rung served is the further group's, its CODECS with
+// the stereo codecs added (RFC 8216: every format any rendition of the
+// group carries) and its BANDWIDTH the larger of the rung's two. The other
+// groups, their renditions and variants go; the subtitles and I-frame
+// playlists are served as for any client.
+//
+// ok false (serve as before) when the client decodes no further group that
+// every rung served carries, or no stereo group is served.
+func (m *hlsMaster) serveUnion(videos map[string]bool, decoded map[string]bool, twins audioTwins) (servedLadder, bool) {
+	stereo := ""
+	for _, v := range m.variants {
+		if videos[v.rung] && v.audio != "" {
+			stereo = v.audio
+			break
+		}
+	}
+	if stereo == "" || !decoded[stereo] {
+		return servedLadder{}, false
+	}
+	carried := func(group string) bool {
+		for rung := range videos {
+			found := false
+			for _, v := range m.variants {
+				found = found || (v.rung == rung && v.audio == group)
+			}
+			if !found {
+				return false
+			}
+		}
+		return true
+	}
+	further := ""
+	for _, v := range m.variants {
+		if videos[v.rung] && v.audio != "" && v.audio != stereo && decoded[v.audio] && carried(v.audio) {
+			further = v.audio
+			break
+		}
+	}
+	if further == "" {
+		return servedLadder{}, false
+	}
+
+	// The renditions of the two groups, paired.
+	var sMedia, fMedia []int // indexes into m.media
+	for i, md := range m.media {
+		switch {
+		case md.typ != "AUDIO":
+		case md.group == stereo:
+			sMedia = append(sMedia, i)
+		case md.group == further:
+			fMedia = append(fMedia, i)
+		}
+	}
+	if len(sMedia) == 0 {
+		return servedLadder{}, false
+	}
+	pairOf := map[int]int{} // stereo media index → its companion's
+	paired := map[int]bool{}
+	pair := func(fi int, match func(si int) bool) {
+		for _, si := range sMedia {
+			if _, taken := pairOf[si]; !taken && match(si) {
+				pairOf[si], paired[fi] = fi, true
+				return
+			}
+		}
+	}
+	for _, fi := range fMedia {
+		if twin, ok := twins[m.media[fi].rend]; ok {
+			pair(fi, func(si int) bool { return m.media[si].rend == twin })
+		}
+	}
+	for _, fi := range fMedia {
+		if _, ok := twins[m.media[fi].rend]; !ok && !paired[fi] {
+			lang := strings.ToLower(m.media[fi].language)
+			pair(fi, func(si int) bool { return strings.ToLower(m.media[si].language) == lang })
+		}
+	}
+	var order []int
+	for _, si := range sMedia {
+		if fi, ok := pairOf[si]; ok {
+			order = append(order, fi)
+		}
+		order = append(order, si)
+	}
+	for _, fi := range fMedia {
+		if !paired[fi] {
+			order = append(order, fi)
+		}
+	}
+	def := -1
+	for _, si := range sMedia {
+		if m.media[si].isDefault {
+			def = si
+			break
+		}
+	}
+	if def < 0 {
+		def = pickDefault(m.media, sMedia, "")
+	}
+	if fi, ok := pairOf[def]; ok {
+		def = fi
+	}
+	names := make([]string, len(order))
+	for i, mi := range order {
+		names[i] = hlsAttributes(m.lines[m.media[mi].line])["NAME"]
+	}
+	unique := uniqueNames(names)
+	union := make([]string, len(order))
+	for i, mi := range order {
+		line := setHLSAttribute(m.lines[m.media[mi].line], "GROUP-ID", further)
+		line = setHLSAttribute(line, "DEFAULT", yesNo(mi == def))
+		if unique[i] != names[i] {
+			line = setHLSAttribute(line, "NAME", unique[i])
+		}
+		union[i] = line
+	}
+
+	// The variants: each rung's of the further group, with the stereo
+	// codecs and the larger BANDWIDTH of the two.
+	stereoOf := map[string]masterVariant{}
+	for _, v := range m.variants {
+		if v.audio == stereo {
+			if _, ok := stereoOf[v.rung]; !ok {
+				stereoOf[v.rung] = v
+			}
+		}
+	}
+	keptInf := map[int]string{} // line → the variant line served
+	drop := make([]bool, len(m.lines))
+	subRefs := map[string]bool{}
+	for _, v := range m.variants {
+		if !videos[v.rung] || v.audio != further {
+			drop[v.inf] = true
+			if v.uri >= 0 {
+				drop[v.uri] = true
+			}
+			continue
+		}
+		line := m.lines[v.inf]
+		a := hlsAttributes(line)
+		if sv, ok := stereoOf[v.rung]; ok {
+			codecs := strings.Split(a["CODECS"], ",")
+			for _, c := range sv.audioCodecs {
+				if !containsFold(codecs, c) {
+					codecs = append(codecs, c)
+				}
+			}
+			line = setHLSAttribute(line, "CODECS", strings.Join(codecs, ","))
+			if sv.bandwidth > v.bandwidth {
+				line = setHLSAttribute(line, "BANDWIDTH", strconv.Itoa(sv.bandwidth))
+			}
+			if avg, err := strconv.Atoi(hlsAttributes(m.lines[sv.inf])["AVERAGE-BANDWIDTH"]); err == nil {
+				if own, err := strconv.Atoi(a["AVERAGE-BANDWIDTH"]); err == nil && avg > own {
+					line = setHLSAttribute(line, "AVERAGE-BANDWIDTH", strconv.Itoa(avg))
+				}
+			}
+		}
+		keptInf[v.inf] = line
+		subRefs[v.subtitles] = true
+	}
+	first := -1 // the line the union's renditions are served at
+	for _, md := range m.media {
+		switch md.typ {
+		case "AUDIO":
+			drop[md.line] = true
+			if first < 0 && (md.group == stereo || md.group == further) {
+				first = md.line
+			}
+		case "SUBTITLES":
+			drop[md.line] = !subRefs[md.group]
+		}
+	}
+	for line, rung := range m.iframes {
+		drop[line] = !videos[rung]
+	}
+	var out []string
+	for i, l := range m.lines {
+		switch {
+		case i == first:
+			out = append(out, union...)
+		case drop[i]:
+		case keptInf[i] != "":
+			out = append(out, keptInf[i])
+		default:
+			out = append(out, l)
+		}
+	}
+	served := parseMaster(strings.Join(out, "\n"))
+	none := make([]bool, len(served.lines))
+	served.normalizeDefaults(none)
+	return served.render(none).served(""), true
+}
+
+// containsFold reports whether list holds s, case aside.
+func containsFold(list []string, s string) bool {
+	for _, e := range list {
+		if strings.EqualFold(strings.TrimSpace(e), strings.TrimSpace(s)) {
+			return true
+		}
+	}
+	return false
 }
 
 // packagedQualities is the quality choice /play/info offers for a packaged
