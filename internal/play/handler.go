@@ -517,10 +517,21 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 			title, _ = libraryTitle(src.pkg.dir)
 		}
 		// A client that decodes the package's 5.1 companions is served
-		// them with the stereo tracks (onTheFlyUnion): listed so.
+		// them with the stereo tracks (onTheFlyUnion): listed so. A native
+		// player gets them as a second group of the same tracks
+		// (onTheFlyMirror): its tracks as ever, each a companion plays
+		// there marked "surround".
 		var audio []map[string]any
 		if union := onTheFlyUnion(src, infoCaps); union != nil {
 			audio = onTheFlyInfoTracks(union)
+		} else if mirror := onTheFlyMirror(src, infoCaps); mirror != nil {
+			audio = infoTracks(src.probe.AudioTracks, audioRenditionNames(src.probe.AudioTracks))
+			for i, c := range mirror {
+				if i < len(audio) && c.companion() {
+					audio[i]["surround"] = map[string]any{"group": onTheFlySurroundGroup, "rendition": c.rendition,
+						"codec": codecName(c.codec), "channels": c.channels}
+				}
+			}
 		}
 		h.writeSourceInfo(w, title, src.probe, mode, reason, audio)
 	}

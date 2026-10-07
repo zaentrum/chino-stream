@@ -322,6 +322,15 @@ func (h *HLSHandler) warmCopy(src *source) {
 	}
 }
 
+// warmMirrorStart warms, for a native player of a package's on-the-fly
+// master (onTheFlyMirror), the companion its 5.1 group starts on, as
+// packaged: the player picks the group itself, and may start on that one.
+func warmMirrorStart(src *source, mirror []audioChoice) {
+	if d := unionDefault(mirror); d != nil && d.companion() && src.fromPackage() {
+		warmRendition(src.pkg, d.rendition, 0, true)
+	}
+}
+
 // warmTranscode starts window 0 of the transcode ladder — its video and,
 // alongside it, its default audio rendition — so the client's first
 // /high/init.mp4 + seg-0 and audio requests find them under way or done.
@@ -488,8 +497,9 @@ func (h *HLSHandler) serveOnTheFlyMaster(w http.ResponseWriter, r *http.Request,
 	names := audioRenditionNames(probe.AudioTracks)
 	// A package's 5.1 companions for a client that decodes them: one group
 	// of them and the stereo transcodes (onTheFlyUnion), as a packaged
-	// master serves them.
-	union := onTheFlyUnion(src, caps)
+	// master serves them — for a native player a second group, the stereo
+	// group's members played by them where they have one (onTheFlyMirror).
+	union, mirror := onTheFlyUnion(src, caps), onTheFlyMirror(src, caps)
 	for _, c := range union {
 		sb.WriteString(fmt.Sprintf(
 			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=%q,NAME=%q,LANGUAGE=%q,DEFAULT=%s,AUTOSELECT=YES,CHANNELS=\"%d\",URI=\"%s%s\"\n",
@@ -516,9 +526,19 @@ func (h *HLSHandler) serveOnTheFlyMaster(w http.ResponseWriter, r *http.Request,
 		if useCopy {
 			continue
 		}
+		channels := "" // beside a 5.1 group each group's members say theirs
+		if mirror != nil {
+			channels = `CHANNELS="2",`
+		}
 		sb.WriteString(fmt.Sprintf(
-			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=%q,NAME=%q,LANGUAGE=%q,DEFAULT=%s,AUTOSELECT=YES,URI=\"audio/%d/index.m3u8%s\"\n",
-			audioGroup, name, lang, def, t.Index, q,
+			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=%q,NAME=%q,LANGUAGE=%q,DEFAULT=%s,AUTOSELECT=YES,%sURI=\"audio/%d/index.m3u8%s\"\n",
+			audioGroup, name, lang, def, channels, t.Index, q,
+		))
+	}
+	for _, c := range mirror {
+		sb.WriteString(fmt.Sprintf(
+			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=%q,NAME=%q,LANGUAGE=%q,DEFAULT=%s,AUTOSELECT=YES,CHANNELS=\"%d\",URI=\"%s%s\"\n",
+			onTheFlySurroundGroup, c.name, c.language, yesNo(c.isDefault), c.channels, c.uri, q,
 		))
 	}
 	// The single variant, advertised at what it really is: the copy at
@@ -533,12 +553,16 @@ func (h *HLSHandler) serveOnTheFlyMaster(w http.ResponseWriter, r *http.Request,
 		if len(probe.AudioTracks) > 0 {
 			group = audioGroup
 		}
+		uri := fmt.Sprintf("%s/index.m3u8%s\n", ql.Name, q)
 		if union != nil {
-			sb.WriteString(unionStreamInf(probe, ql, caps.MaxVideoHeight(), audioGroup, union) + "\n")
+			sb.WriteString(choicesStreamInf(probe, ql, caps.MaxVideoHeight(), audioGroup, union) + "\n" + uri)
 		} else {
-			sb.WriteString(fallbackStreamInf(probe, ql, caps.MaxVideoHeight(), false, group) + "\n")
+			sb.WriteString(fallbackStreamInf(probe, ql, caps.MaxVideoHeight(), false, group) + "\n" + uri)
 		}
-		sb.WriteString(fmt.Sprintf("%s/index.m3u8%s\n", ql.Name, q))
+		if mirror != nil {
+			// Apple's shape: the rung once more, with the 5.1 group.
+			sb.WriteString(choicesStreamInf(probe, ql, caps.MaxVideoHeight(), onTheFlySurroundGroup, mirror) + "\n" + uri)
+		}
 	}
 	// Pre-warm: kick off the first window's transcode / first-segment plan
 	// in the background so the playlist + init.mp4 + seg-0 fetches that
@@ -548,6 +572,9 @@ func (h *HLSHandler) serveOnTheFlyMaster(w http.ResponseWriter, r *http.Request,
 		goWarm(func() { h.warmCopy(src) })
 	} else {
 		goWarm(func() { h.warmTranscode(src, ql, caps.MaxVideoHeight(), unionDefault(union)) })
+		if mirror != nil {
+			goWarm(func() { warmMirrorStart(src, mirror) })
+		}
 	}
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Cache-Control", "no-store")
@@ -647,6 +674,9 @@ func (h *HLSHandler) Prewarm(w http.ResponseWriter, r *http.Request) {
 		goWarm(func() { h.warmCopy(src) })
 	} else {
 		goWarm(func() { h.warmTranscode(src, ql, caps.MaxVideoHeight(), unionDefault(onTheFlyUnion(src, caps))) })
+		if mirror := onTheFlyMirror(src, caps); mirror != nil {
+			goWarm(func() { warmMirrorStart(src, mirror) })
+		}
 	}
 	w.WriteHeader(http.StatusAccepted)
 	_, _ = w.Write([]byte("warming"))

@@ -336,33 +336,31 @@ func (c audioChoice) companion() bool { return !strings.HasPrefix(c.rendition, "
 // gives no bit rate: the packager's SURROUND_BITRATE default.
 const surroundBitrate = 448_000
 
-// onTheFlyUnion is the audio group of the on-the-fly master of the package
-// src for a client with caps that decodes its 5.1 companions, as
-// serveUnion makes a packaged master's: per stereo rendition, in order, its
-// companion (paired by source track, else by language) just before its
-// on-the-fly stereo transcode, the companions nobody's twin after them, the
-// default track's companion DEFAULT (else that track), names unique. nil —
-// the stereo group as before — when src is no package, it has no
-// companions, or the client decodes them not.
-func onTheFlyUnion(src *source, caps Caps) []audioChoice {
+// onTheFlyCompanions pairs the 5.1 companions of the package src with its
+// stereo tracks, for an on-the-fly master of it to a client with caps that
+// decodes them: companion[i] is the companion of the stereo track i (by
+// source track, else the first unpaired one in its language), unpaired the
+// companions nobody's twin, in order. ok false when src is no package, it
+// has no companions, or the client decodes them not.
+func onTheFlyCompanions(src *source, caps Caps) (companion []*pkgmanifest.AudioRendition, unpaired []pkgmanifest.AudioRendition, ok bool) {
 	if src == nil || !src.fromPackage() || src.mf == nil || src.probe == nil || len(src.mf.Renditions.AudioSurround) == 0 {
-		return nil
+		return nil, nil, false
 	}
 	surround := src.mf.Renditions.AudioSurround
 	for _, a := range surround {
 		if !audioCodecOK(a.Codec, a.Channels, caps) {
-			return nil
+			return nil, nil, false
 		}
 	}
 	stereo := src.mf.Renditions.Audio
 	twins := twinsOf(src.mf)
-	companion := make([]int, len(stereo)) // stereo index → surround index + 1 (0: none)
+	companion = make([]*pkgmanifest.AudioRendition, len(stereo))
 	used := make([]bool, len(surround))
 	for ci, c := range surround {
 		if twin, ok := twins[renditionID(c)]; ok {
 			for si, a := range stereo {
-				if renditionID(a) == twin && companion[si] == 0 {
-					companion[si], used[ci] = ci+1, true
+				if renditionID(a) == twin && companion[si] == nil {
+					companion[si], used[ci] = &surround[ci], true
 					break
 				}
 			}
@@ -373,56 +371,127 @@ func onTheFlyUnion(src *source, caps Caps) []audioChoice {
 			continue
 		}
 		for si, a := range stereo {
-			if companion[si] == 0 && normalizeLang(a.Language) == normalizeLang(c.Language) {
-				companion[si], used[ci] = ci+1, true
+			if companion[si] == nil && normalizeLang(a.Language) == normalizeLang(c.Language) {
+				companion[si], used[ci] = &surround[ci], true
 				break
 			}
 		}
 	}
-	tracks := src.probe.AudioTracks
-	names := audioRenditionNames(tracks)
-	def := defaultAudioIndex(tracks)
-	surroundChoice := func(c pkgmanifest.AudioRendition, isDefault bool) audioChoice {
-		name := strings.TrimSpace(c.Name)
-		if name == "" {
-			name = trackDisplayName(c.Language, c.Title) + " 5.1"
-		}
-		ch := audioChoice{uri: renditionID(c) + "/playlist.m3u8", rendition: renditionID(c), name: name,
-			language: normalizeLang(c.Language), codec: c.Codec, channels: c.Channels, bitrate: c.BitrateBps, isDefault: isDefault}
-		if ch.channels == 0 {
-			ch.channels = 6
-		}
-		if ch.bitrate == 0 {
-			ch.bitrate = surroundBitrate
-		}
-		return ch
-	}
-	var out []audioChoice
-	for i, t := range tracks {
-		hasCompanion := i < len(companion) && companion[i] > 0
-		if hasCompanion {
-			out = append(out, surroundChoice(surround[companion[i]-1], t.Index == def))
-		}
-		lang := t.Language
-		if lang == "" {
-			lang = "und"
-		}
-		out = append(out, audioChoice{uri: fmt.Sprintf("audio/%d/index.m3u8", t.Index), rendition: fmt.Sprintf("audio/%d", t.Index),
-			name: names[i], language: lang, codec: "mp4a.40.2", channels: 2, bitrate: windowAudioBitrateBps,
-			isDefault: t.Index == def && !hasCompanion})
-	}
 	for ci, c := range surround {
 		if !used[ci] {
-			out = append(out, surroundChoice(c, false))
+			unpaired = append(unpaired, c)
 		}
 	}
-	listed := make([]string, len(out))
-	for i, c := range out {
+	return companion, unpaired, true
+}
+
+// companionChoice is the 5.1 companion c as an on-the-fly master serves it:
+// as packaged, its own name (else its language's " 5.1"), its channels and
+// bit rate (else 6 and surroundBitrate).
+func companionChoice(c pkgmanifest.AudioRendition, isDefault bool) audioChoice {
+	name := strings.TrimSpace(c.Name)
+	if name == "" {
+		name = trackDisplayName(c.Language, c.Title) + " 5.1"
+	}
+	ch := audioChoice{uri: renditionID(c) + "/playlist.m3u8", rendition: renditionID(c), name: name,
+		language: normalizeLang(c.Language), codec: c.Codec, channels: c.Channels, bitrate: c.BitrateBps, isDefault: isDefault}
+	if ch.channels == 0 {
+		ch.channels = 6
+	}
+	if ch.bitrate == 0 {
+		ch.bitrate = surroundBitrate
+	}
+	return ch
+}
+
+// stereoChoice is the stereo track t transcoded on the fly, named name.
+func stereoChoice(t TrackInfo, name string, isDefault bool) audioChoice {
+	lang := t.Language
+	if lang == "" {
+		lang = "und"
+	}
+	return audioChoice{uri: fmt.Sprintf("audio/%d/index.m3u8", t.Index), rendition: fmt.Sprintf("audio/%d", t.Index),
+		name: name, language: lang, codec: "mp4a.40.2", channels: 2, bitrate: windowAudioBitrateBps, isDefault: isDefault}
+}
+
+// uniqueChoiceNames makes the names of choices unique (uniqueNames).
+func uniqueChoiceNames(choices []audioChoice) {
+	listed := make([]string, len(choices))
+	for i, c := range choices {
 		listed[i] = c.name
 	}
 	for i, name := range uniqueNames(listed) {
-		out[i].name = name
+		choices[i].name = name
 	}
+}
+
+// onTheFlyUnion is the audio group of the on-the-fly master of the package
+// src for a client with caps that decodes its 5.1 companions, as
+// serveUnion makes a packaged master's: per stereo rendition, in order, its
+// companion (onTheFlyCompanions) just before its on-the-fly stereo
+// transcode, the companions nobody's twin after them, the default track's
+// companion DEFAULT (else that track), names unique. nil — the stereo group
+// as before — when src is no package, it has no companions, the client
+// decodes them not, or it plays the master natively (onTheFlyMirror).
+func onTheFlyUnion(src *source, caps Caps) []audioChoice {
+	if caps.Native {
+		return nil
+	}
+	companion, unpaired, ok := onTheFlyCompanions(src, caps)
+	if !ok {
+		return nil
+	}
+	tracks := src.probe.AudioTracks
+	names := audioRenditionNames(tracks)
+	def := defaultAudioIndex(tracks)
+	var out []audioChoice
+	for i, t := range tracks {
+		hasCompanion := i < len(companion) && companion[i] != nil
+		if hasCompanion {
+			out = append(out, companionChoice(*companion[i], t.Index == def))
+		}
+		out = append(out, stereoChoice(t, names[i], t.Index == def && !hasCompanion))
+	}
+	for _, c := range unpaired {
+		out = append(out, companionChoice(c, false))
+	}
+	uniqueChoiceNames(out)
+	return out
+}
+
+// onTheFlyMirror is the 5.1 group of the on-the-fly master of the package
+// src for a player that plays it natively and decodes its companions
+// (caps.Native), as mirrorAudioGroups makes a packaged master's: the stereo
+// group's members, in order, as they are named and with its default, each
+// played by its companion (onTheFlyCompanions) when it has one, else by its
+// own stereo transcode; the companions nobody's twin after them, named
+// apart. nil when the client is no native player, or src has no
+// companions it decodes.
+func onTheFlyMirror(src *source, caps Caps) []audioChoice {
+	if !caps.Native {
+		return nil
+	}
+	companion, unpaired, ok := onTheFlyCompanions(src, caps)
+	if !ok {
+		return nil
+	}
+	tracks := src.probe.AudioTracks
+	names := audioRenditionNames(tracks)
+	def := defaultAudioIndex(tracks)
+	var out []audioChoice
+	for i, t := range tracks {
+		member := stereoChoice(t, names[i], t.Index == def)
+		if i < len(companion) && companion[i] != nil {
+			c := companionChoice(*companion[i], member.isDefault)
+			c.name, c.language = member.name, member.language
+			member = c
+		}
+		out = append(out, member)
+	}
+	for _, c := range unpaired {
+		out = append(out, companionChoice(c, false))
+	}
+	uniqueChoiceNames(out) // the members' are; a later one reading the same is numbered
 	return out
 }
 
@@ -456,5 +525,10 @@ func onTheFlyInfoTracks(choices []audioChoice) []map[string]any {
 	return out
 }
 
-// onTheFlyAudioGroup is the GROUP-ID of an on-the-fly master's audio.
-const onTheFlyAudioGroup = "aud"
+// onTheFlyAudioGroup is the GROUP-ID of an on-the-fly master's audio, and
+// onTheFlySurroundGroup that of the 5.1 group a native player is served
+// beside it (onTheFlyMirror).
+const (
+	onTheFlyAudioGroup    = "aud"
+	onTheFlySurroundGroup = "aud-surround"
+)
