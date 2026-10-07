@@ -34,6 +34,18 @@ func streamToken(t *testing.T, ttl time.Duration) string {
 	return payload + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
+// forged is tok with the first character of its signature changed, so it
+// is always another MAC. (Its last character would not do: it carries two
+// bits the decoder ignores, so a change there can decode to the same MAC.)
+func forged(tok string) string {
+	i := strings.IndexByte(tok, '.') + 1
+	c := "A"
+	if tok[i] == 'A' {
+		c = "B"
+	}
+	return tok[:i] + c + tok[i+1:]
+}
+
 // oidcIssuer answers OIDC discovery, so the router's verifier starts with
 // auth on. No bearer is ever verified against it.
 func oidcIssuer(t *testing.T) string {
@@ -117,7 +129,7 @@ func TestSubtitleRenditionsTakeTheStreamToken(t *testing.T) {
 	}{
 		{"stream token", "?stream=" + tok, http.StatusOK},
 		{"nothing", "", http.StatusUnauthorized},
-		{"a forged token", "?stream=" + tok[:len(tok)-2] + "xx", http.StatusUnauthorized},
+		{"a forged token", "?stream=" + forged(tok), http.StatusUnauthorized},
 		{"an expired token", "?stream=" + streamToken(t, -time.Minute), http.StatusUnauthorized},
 	}
 	for _, path := range []string{"/s0/playlist.m3u8", "/s0/seg-00001.vtt", "/v0/playlist.m3u8"} {
@@ -175,7 +187,7 @@ func TestExtrasTakeTheStreamToken(t *testing.T) {
 	}{
 		{"stream token", "?stream=" + tok, http.StatusOK},
 		{"nothing", "", http.StatusUnauthorized},
-		{"a forged token", "?stream=" + tok[:len(tok)-2] + "xx", http.StatusUnauthorized},
+		{"a forged token", "?stream=" + forged(tok), http.StatusUnauthorized},
 		{"an expired token", "?stream=" + streamToken(t, -time.Minute), http.StatusUnauthorized},
 	}
 	for _, path := range []string{"/master.m3u8", "/v0/playlist.m3u8", "/v0/init.mp4", "/v0/seg-00001.m4s"} {
