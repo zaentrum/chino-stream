@@ -47,6 +47,13 @@ type Caps struct {
 	// to the software decoder and play unplayably slowly — the SM-T500
 	// Zap bug) and onto the libx264 transcode ladder instead.
 	VideoMaxHeight map[string]int
+	// Native says the client plays the master with the platform's own HLS
+	// player (AVPlayer: the iOS and tvOS app, Safari without MSE), which
+	// picks between audio groups itself. It is served Apple's shape, one
+	// audio group per codec with every rung once per group, not the one
+	// group of all the audio it decodes an MSE player gets (ladder.go:
+	// mirrorAudioGroups, serveUnion). The ?caps= token "native".
+	Native bool
 }
 
 // MaxVideoHeight returns the tallest frame height the device can HW-
@@ -149,6 +156,8 @@ func ParseCaps(s string) Caps {
 			c.Audio["ec-3"] = true
 		case "aacmc":
 			c.AACMultichannel = true
+		case "native":
+			c.Native = true
 		}
 		// Record the HW height ceiling for video tokens that carried a
 		// valid ":<height>" suffix. Keep the larger value if the same

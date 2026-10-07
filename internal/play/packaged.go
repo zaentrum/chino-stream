@@ -631,8 +631,10 @@ func (h *HLSHandler) warmPackaged(p *pkgDir, mf *pkgmanifest.Manifest, caps Caps
 	warmStart(p, serveLadder(master, caps, q, twinsOf(mf)), tSec, true)
 }
 
-// warmStart warms the variant a client starts on: s.video and s.audio,
-// each its media playlist and init.mp4, and with segments the segments
+// warmStart warms the variant a client starts on: s.video and s.audio — and
+// s.more, the renditions a native player's other audio groups start on,
+// since it picks the group itself — each its media playlist and init.mp4,
+// and with segments the segments
 // at tSec (the first ones when tSec<=0). It returns the paths that are
 // in packagedCache afterwards and whether the video rendition is
 // playable from there: its playlist, its init and, with segments, at
@@ -647,9 +649,11 @@ func warmStart(p *pkgDir, s servedLadder, tSec float64, segments bool) (paths []
 	if !videoOK {
 		return nil, false
 	}
-	if s.audio != "" {
-		audio, _ := warmRendition(p, s.audio, tSec, segments)
-		paths = append(paths, audio...)
+	for _, a := range append([]string{s.audio}, s.more...) {
+		if a != "" {
+			audio, _ := warmRendition(p, a, tSec, segments)
+			paths = append(paths, audio...)
+		}
 	}
 	return paths, true
 }
@@ -1110,6 +1114,8 @@ func writePackagedInfo(w http.ResponseWriter, p *pkgDir, mf *pkgmanifest.Manifes
 		qualities = packagedQualities(master, caps)
 		if tracks := unionAudioTracks(served.body, master, mf); tracks != nil {
 			audioTracks, audioCodec = tracks, startCodec(tracks)
+		} else if caps.Native {
+			addSurroundHints(audioTracks, served.body, mf)
 		}
 	}
 	// v2 manifests put the title at the top level; v1 manifests had
@@ -1229,6 +1235,57 @@ func unionAudioTracks(served, packaged string, mf *pkgmanifest.Manifest) []map[s
 		})
 	}
 	return out
+}
+
+// addSurroundHints marks, for a native player served a package's audio
+// groups mirrored (mirrorAudioGroups), each of its tracks — the stereo
+// group's members, as packagedAudioTracks lists them — that a further group
+// plays by a 5.1 companion: "surround", that group, the companion's
+// rendition id, codec and channels. The player picks the group itself; the
+// track is the same one in either.
+func addSurroundHints(tracks []map[string]any, served string, mf *pkgmanifest.Manifest) {
+	m := parseMaster(served)
+	stereo := firstAudioGroup(m)
+	if stereo == "" {
+		return
+	}
+	companions := map[string]pkgmanifest.AudioRendition{}
+	for _, a := range mf.Renditions.AudioSurround {
+		companions[renditionID(a)] = a
+	}
+	nameOf := map[string]string{} // a stereo rendition → its NAME
+	type member struct {
+		group, rend string
+		channels    int
+	}
+	playedBy := map[string]member{} // a NAME → the further member playing a companion
+	for _, md := range m.media {
+		if md.typ != "AUDIO" {
+			continue
+		}
+		name := hlsAttributes(m.lines[md.line])["NAME"]
+		if md.group == stereo {
+			nameOf[md.rend] = name
+		} else if _, ok := companions[md.rend]; ok {
+			if _, seen := playedBy[name]; !seen {
+				playedBy[name] = member{md.group, md.rend, md.channels}
+			}
+		}
+	}
+	for i, a := range mf.Renditions.Audio {
+		name, ok := nameOf[renditionID(a)]
+		if i >= len(tracks) || !ok {
+			continue
+		}
+		if p, ok := playedBy[name]; ok {
+			c := companions[p.rend]
+			channels := c.Channels
+			if channels == 0 {
+				channels = p.channels
+			}
+			tracks[i]["surround"] = map[string]any{"group": p.group, "rendition": p.rend, "codec": c.Codec, "channels": channels}
+		}
+	}
 }
 
 // firstAudioGroup is the audio group of a master's first variant, "" when it

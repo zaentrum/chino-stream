@@ -2,6 +2,7 @@ package play
 
 import (
 	"path"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -261,6 +262,10 @@ type servedLadder struct {
 	body  string
 	video string // "v1"
 	audio string // "a0"; "" when the variant has no audio group
+	// more are the renditions the start rung's other audio groups start on
+	// ("a2"): a native player's per-codec groups, between which the player
+	// picks itself (mirrorAudioGroups). None for a master of one group.
+	more []string
 }
 
 // audioTwins maps a rendition of a further audio group — a 5.1 companion,
@@ -355,9 +360,12 @@ func serveLadder(body string, caps Caps, q string, twins audioTwins) servedLadde
 	}
 	// A client that decodes a further group besides the stereo one (the 5.1
 	// companions, with eac3) is served one variant per rung, its audio the
-	// two groups as one.
-	if s, ok := m.serveUnion(videos, groups, twins); ok {
-		return s
+	// two groups as one — but a player that plays the master natively, which
+	// picks between the groups itself (mirrorAudioGroups, below).
+	if !caps.Native {
+		if s, ok := m.serveUnion(videos, groups, twins); ok {
+			return s
+		}
 	}
 	keep := func(v masterVariant) bool { return videos[v.rung] && (v.audio == "" || groups[v.audio]) }
 	kept := false
@@ -394,7 +402,13 @@ func serveLadder(body string, caps Caps, q string, twins audioTwins) servedLadde
 		drop[line] = !videos[rung]
 	}
 	m.normalizeDefaults(drop)
-	return m.render(drop).served("")
+	served := m.render(drop)
+	if caps.Native {
+		if mirrored, ok := served.mirrorAudioGroups(twins); ok {
+			return mirrored.served("")
+		}
+	}
+	return served.served("")
 }
 
 // serveUnion serves the client that decodes a further audio group as well
@@ -469,27 +483,7 @@ func (m *hlsMaster) serveUnion(videos map[string]bool, decoded map[string]bool, 
 	if len(sMedia) == 0 {
 		return servedLadder{}, false
 	}
-	pairOf := map[int]int{} // stereo media index → its companion's
-	paired := map[int]bool{}
-	pair := func(fi int, match func(si int) bool) {
-		for _, si := range sMedia {
-			if _, taken := pairOf[si]; !taken && match(si) {
-				pairOf[si], paired[fi] = fi, true
-				return
-			}
-		}
-	}
-	for _, fi := range fMedia {
-		if twin, ok := twins[m.media[fi].rend]; ok {
-			pair(fi, func(si int) bool { return m.media[si].rend == twin })
-		}
-	}
-	for _, fi := range fMedia {
-		if _, ok := twins[m.media[fi].rend]; !ok && !paired[fi] {
-			lang := strings.ToLower(m.media[fi].language)
-			pair(fi, func(si int) bool { return strings.ToLower(m.media[si].language) == lang })
-		}
-	}
+	pairOf, paired := m.pairCompanions(sMedia, fMedia, twins)
 	var order []int
 	for _, si := range sMedia {
 		if fi, ok := pairOf[si]; ok {
@@ -552,23 +546,8 @@ func (m *hlsMaster) serveUnion(videos map[string]bool, decoded map[string]bool, 
 			continue
 		}
 		line := m.lines[v.inf]
-		a := hlsAttributes(line)
 		if sv, ok := stereoOf[v.rung]; ok {
-			codecs := strings.Split(a["CODECS"], ",")
-			for _, c := range sv.audioCodecs {
-				if !containsFold(codecs, c) {
-					codecs = append(codecs, c)
-				}
-			}
-			line = setHLSAttribute(line, "CODECS", strings.Join(codecs, ","))
-			if sv.bandwidth > v.bandwidth {
-				line = setHLSAttribute(line, "BANDWIDTH", strconv.Itoa(sv.bandwidth))
-			}
-			if avg, err := strconv.Atoi(hlsAttributes(m.lines[sv.inf])["AVERAGE-BANDWIDTH"]); err == nil {
-				if own, err := strconv.Atoi(a["AVERAGE-BANDWIDTH"]); err == nil && avg > own {
-					line = setHLSAttribute(line, "AVERAGE-BANDWIDTH", strconv.Itoa(avg))
-				}
-			}
+			line = m.withAudioOf(v, sv)
 		}
 		keptInf[v.inf] = line
 		subRefs[v.subtitles] = true
@@ -604,6 +583,193 @@ func (m *hlsMaster) serveUnion(videos map[string]bool, decoded map[string]bool, 
 	none := make([]bool, len(served.lines))
 	served.normalizeDefaults(none)
 	return served.render(none).served(""), true
+}
+
+// pairCompanions pairs the renditions of a further audio group (fMedia,
+// indexes into m.media) with the stereo ones (sMedia): each with the stereo
+// rendition of its source track (twins), else — when twins says nothing of
+// it — with the first stereo one in its language not paired yet. pairOf
+// maps a stereo rendition to its companion, paired the further renditions
+// that have a stereo one.
+func (m *hlsMaster) pairCompanions(sMedia, fMedia []int, twins audioTwins) (pairOf map[int]int, paired map[int]bool) {
+	pairOf, paired = map[int]int{}, map[int]bool{}
+	pair := func(fi int, match func(si int) bool) {
+		for _, si := range sMedia {
+			if _, taken := pairOf[si]; !taken && match(si) {
+				pairOf[si], paired[fi] = fi, true
+				return
+			}
+		}
+	}
+	for _, fi := range fMedia {
+		if twin, ok := twins[m.media[fi].rend]; ok {
+			pair(fi, func(si int) bool { return m.media[si].rend == twin })
+		}
+	}
+	for _, fi := range fMedia {
+		if _, ok := twins[m.media[fi].rend]; !ok && !paired[fi] {
+			lang := strings.ToLower(m.media[fi].language)
+			pair(fi, func(si int) bool { return strings.ToLower(m.media[si].language) == lang })
+		}
+	}
+	return pairOf, paired
+}
+
+// withAudioOf is the EXT-X-STREAM-INF line of v, whose audio group holds
+// renditions of the stereo variant sv's group as well: its CODECS with sv's
+// audio codecs added (RFC 8216: every format any rendition of the group
+// carries) and its BANDWIDTH and AVERAGE-BANDWIDTH the larger of the two.
+func (m *hlsMaster) withAudioOf(v, sv masterVariant) string {
+	line := m.lines[v.inf]
+	a := hlsAttributes(line)
+	codecs := strings.Split(a["CODECS"], ",")
+	for _, c := range sv.audioCodecs {
+		if !containsFold(codecs, c) {
+			codecs = append(codecs, c)
+		}
+	}
+	line = setHLSAttribute(line, "CODECS", strings.Join(codecs, ","))
+	if sv.bandwidth > v.bandwidth {
+		line = setHLSAttribute(line, "BANDWIDTH", strconv.Itoa(sv.bandwidth))
+	}
+	if avg, err := strconv.Atoi(hlsAttributes(m.lines[sv.inf])["AVERAGE-BANDWIDTH"]); err == nil {
+		if own, err := strconv.Atoi(a["AVERAGE-BANDWIDTH"]); err == nil && avg > own {
+			line = setHLSAttribute(line, "AVERAGE-BANDWIDTH", strconv.Itoa(avg))
+		}
+	}
+	return line
+}
+
+// mirrorAudioGroups is the master m — a client's share, the audio groups it
+// decodes, each rung once per group — as a player that plays it natively
+// (caps.Native: AVPlayer, Safari without MSE) is served it: Apple's shape,
+// one audio group per codec, each rung once per group, which RFC 8216
+// (4.3.4.1.1) allows only with every group holding the same members, alike
+// but for URI and CHANNELS. That is what lets the player match a track
+// across groups and pick the group it decodes itself. So each further group
+// (the 5.1 companions, "audio-surround") holds the stereo group's members, in
+// their order and as they are named, each with the URI and CHANNELS of its
+// companion there (pairCompanions) when it has one, else its own: a track
+// without a companion (a stereo source, a commentary) plays stereo in that
+// group too, as RFC 8216 lets a group's members differ in sample format. A
+// further rendition that is nobody's companion stays in its group after
+// them, named apart. The further group's variants list the stereo codecs too
+// when a member plays from the stereo group, with the larger BANDWIDTH of
+// their rung's two.
+//
+// ok false (m as it is) when m serves a single audio group.
+func (m *hlsMaster) mirrorAudioGroups(twins audioTwins) (*hlsMaster, bool) {
+	if len(m.variants) == 0 || m.variants[0].audio == "" {
+		return m, false
+	}
+	stereo := m.variants[0].audio
+	var further []string
+	for _, v := range m.variants {
+		if v.audio != "" && v.audio != stereo && !slices.Contains(further, v.audio) {
+			further = append(further, v.audio)
+		}
+	}
+	var sMedia []int
+	fMedia := map[string][]int{}
+	for i, md := range m.media {
+		switch {
+		case md.typ != "AUDIO":
+		case md.group == stereo:
+			sMedia = append(sMedia, i)
+		case slices.Contains(further, md.group):
+			fMedia[md.group] = append(fMedia[md.group], i)
+		}
+	}
+	if len(further) == 0 || len(sMedia) == 0 {
+		return m, false
+	}
+	block := map[string][]string{} // a further group → its lines, served
+	viaStereo := map[string]bool{} // a further group a member plays stereo in
+	for _, g := range further {
+		pairOf, paired := m.pairCompanions(sMedia, fMedia[g], twins)
+		var lines, names []string
+		for _, si := range sMedia {
+			line := setHLSAttribute(m.lines[m.media[si].line], "GROUP-ID", g)
+			if fi, ok := pairOf[si]; ok {
+				a := hlsAttributes(m.lines[m.media[fi].line])
+				line = setHLSAttribute(line, "URI", a["URI"])
+				if ch, ok := a["CHANNELS"]; ok {
+					line = setQuotedHLSAttribute(line, "CHANNELS", ch)
+				}
+			} else {
+				viaStereo[g] = true
+			}
+			lines = append(lines, line)
+			names = append(names, hlsAttributes(line)["NAME"])
+		}
+		var extra []int
+		for _, fi := range fMedia[g] {
+			if !paired[fi] {
+				extra = append(extra, len(lines))
+				lines = append(lines, m.lines[m.media[fi].line])
+				names = append(names, hlsAttributes(m.lines[m.media[fi].line])["NAME"])
+			}
+		}
+		unique := uniqueNames(names)
+		for _, i := range extra {
+			if unique[i] != names[i] {
+				lines[i] = setHLSAttribute(lines[i], "NAME", unique[i])
+			}
+		}
+		block[g] = lines
+	}
+	stereoOf := map[string]masterVariant{} // a rung → its stereo variant
+	for _, v := range m.variants {
+		if _, ok := stereoOf[v.rung]; !ok && v.audio == stereo {
+			stereoOf[v.rung] = v
+		}
+	}
+	inf := map[int]string{} // a further variant's line → the line served
+	for _, v := range m.variants {
+		if sv, ok := stereoOf[v.rung]; ok && viaStereo[v.audio] {
+			inf[v.inf] = m.withAudioOf(v, sv)
+		}
+	}
+	// Each further group's lines where its renditions were, else after the
+	// stereo group's.
+	at := map[int][]string{}
+	lastStereo := m.media[sMedia[len(sMedia)-1]].line
+	for _, g := range further {
+		if fm := fMedia[g]; len(fm) > 0 {
+			at[m.media[fm[0]].line] = append(at[m.media[fm[0]].line], block[g]...)
+		} else {
+			at[lastStereo] = append(at[lastStereo], block[g]...)
+		}
+	}
+	skip := map[int]bool{}
+	for _, g := range further {
+		for _, fi := range fMedia[g] {
+			skip[m.media[fi].line] = true
+		}
+	}
+	var out []string
+	for i, l := range m.lines {
+		switch {
+		case skip[i]:
+		case inf[i] != "":
+			out = append(out, inf[i])
+		default:
+			out = append(out, l)
+		}
+		out = append(out, at[i]...)
+	}
+	served := parseMaster(strings.Join(out, "\n"))
+	served.normalizeDefaults(make([]bool, len(served.lines)))
+	return served, true
+}
+
+// setQuotedHLSAttribute sets a quoted-string attribute of a tag line to
+// value, adding it, quoted, at the end when the line has none.
+func setQuotedHLSAttribute(line, key, value string) string {
+	if _, ok := hlsAttributes(line)[key]; ok {
+		return setHLSAttribute(line, key, value)
+	}
+	return setHLSAttribute(line, key, strconv.Quote(value))
 }
 
 // containsFold reports whether list holds s, case aside.
@@ -783,25 +949,38 @@ func (m *hlsMaster) served(body string) servedLadder {
 	}
 	start := m.variants[0]
 	s.video = start.rung
-	var group []masterMedia
-	for _, md := range m.media {
-		if md.typ == "AUDIO" && md.group == start.audio && start.audio != "" {
-			group = append(group, md)
+	s.audio = m.groupStart(start.audio)
+	for _, v := range m.variants {
+		if v.rung != start.rung || v.audio == "" || v.audio == start.audio {
+			continue
 		}
-	}
-	// The group's DEFAULT rendition, else its first: what hls.js starts
-	// on (it ignores AUTOSELECT when a group marks no default, as
-	// shaka's own masters do).
-	for _, md := range group {
-		if md.isDefault {
-			s.audio = md.rend
-			break
+		if r := m.groupStart(v.audio); r != "" && r != s.audio && !slices.Contains(s.more, r) {
+			s.more = append(s.more, r)
 		}
-	}
-	if s.audio == "" && len(group) > 0 {
-		s.audio = group[0].rend
 	}
 	return s
+}
+
+// groupStart is the rendition a player starts on in audio group group: its
+// DEFAULT one, else its first (hls.js ignores AUTOSELECT when a group marks
+// no default, as shaka's own masters do); "" for none.
+func (m *hlsMaster) groupStart(group string) string {
+	if group == "" {
+		return ""
+	}
+	first := ""
+	for _, md := range m.media {
+		if md.typ != "AUDIO" || md.group != group {
+			continue
+		}
+		if md.isDefault {
+			return md.rend
+		}
+		if first == "" {
+			first = md.rend
+		}
+	}
+	return first
 }
 
 // hlsAttributes parses the attribute list of a tag line (after its first
