@@ -51,7 +51,7 @@ func TestLadderManifestFields(t *testing.T) {
 		t.Errorf("stereo rendition: %+v", a)
 	}
 	want := AudioRendition{ID: "a2", Dir: "hls/a2", Codec: "ec-3", Language: "eng", Default: true,
-		Channels: 6, BitrateBps: 448982, Segments: 4, Group: "audio-surround", Name: "English 5.1"}
+		Channels: 6, BitrateBps: 448982, Segments: 4, Group: "audio-surround", Name: "English 5.1", Idx: intp(0)}
 	if len(m.Renditions.AudioSurround) != 1 || !reflect.DeepEqual(m.Renditions.AudioSurround[0], want) {
 		t.Errorf("surround renditions: %+v", m.Renditions.AudioSurround)
 	}
@@ -108,5 +108,28 @@ func TestManifestWithoutLadderFields(t *testing.T) {
 	}
 	if old.HLS != nil || old.Renditions.Video[0].PeakBitrateBps != 0 {
 		t.Errorf("%+v", old)
+	}
+}
+
+func intp(n int) *int { return &n }
+
+// A rendition names the source track it was made from: a manifest by the
+// packager's audio ordinal (idx), a record by the original's stream index
+// (sourceStreamIndex); a 5.1 companion names its stereo rendition's. A
+// rendition naming neither says nothing.
+func TestAudioRenditionSourceTrack(t *testing.T) {
+	var m Manifest
+	if err := json.Unmarshal([]byte(ladderManifest), &m); err != nil {
+		t.Fatal(err)
+	}
+	stereo, _ := m.Renditions.Audio[0].SourceTrack()
+	if n, ok := m.Renditions.AudioSurround[0].SourceTrack(); !ok || n != stereo || n != 0 {
+		t.Errorf("the companion's source track %d %v, its stereo rendition's %d", n, ok, stereo)
+	}
+	if n, ok := (AudioRendition{SourceStreamIndex: intp(3), Idx: intp(1)}).SourceTrack(); !ok || n != 3 {
+		t.Errorf("a record's stream index: %d %v", n, ok)
+	}
+	if _, ok := (AudioRendition{ID: "a0"}).SourceTrack(); ok {
+		t.Error("a rendition naming no source track says one")
 	}
 }

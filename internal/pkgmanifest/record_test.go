@@ -79,12 +79,14 @@ func TestFromPackageRecord(t *testing.T) {
 		t.Errorf("video\n got %+v\nwant %+v", m.Renditions.Video, wantVideo)
 	}
 	wantAudio := AudioRendition{ID: "a0", Dir: "hls/a0", Codec: "mp4a.40.2", Language: "eng", Default: true,
-		Channels: 2, BitrateBps: 192439, Segments: 4, Group: "audio", Name: "English"}
+		Channels: 2, BitrateBps: 192439, Segments: 4, Group: "audio", Name: "English", SourceStreamIndex: intp(1)}
 	if !reflect.DeepEqual(m.Renditions.Audio, []AudioRendition{wantAudio}) {
 		t.Errorf("audio\n got %+v\nwant %+v", m.Renditions.Audio, wantAudio)
 	}
 	if s := m.Renditions.AudioSurround; len(s) != 1 || s[0].ID != "a1" || s[0].Channels != 6 || s[0].Group != "audio-surround" || s[0].Name != "English 5.1" {
 		t.Errorf("surround %+v", s)
+	} else if n, ok := s[0].SourceTrack(); !ok || n != 1 {
+		t.Errorf("the companion's source track %d %v, want its stereo rendition's 1", n, ok)
 	}
 	wantSubs := []Subtitle{
 		{ID: "sub0", Path: "subs/0.vtt", Language: "eng", Title: "Forced", Name: "English · Forced", Forced: true, Format: "webvtt", HLS: "hls/s0"},

@@ -152,6 +152,24 @@ type AudioRendition struct {
 	// "No dialogue", "English · Commentary").
 	Group string `json:"group,omitempty"`
 	Name  string `json:"name,omitempty"`
+	// The source track it was made from: the packager's audio ordinal in a
+	// manifest (idx), the original's stream index in a library record
+	// (sourceStreamIndex). A 5.1 companion has its stereo rendition's.
+	Idx               *int `json:"idx,omitempty"`
+	SourceStreamIndex *int `json:"sourceStreamIndex,omitempty"`
+}
+
+// SourceTrack is the source track the rendition was made from (Idx or
+// SourceStreamIndex, whichever the manifest carries; one manifest carries
+// one kind), and whether the manifest says.
+func (a AudioRendition) SourceTrack() (int, bool) {
+	switch {
+	case a.SourceStreamIndex != nil:
+		return *a.SourceStreamIndex, true
+	case a.Idx != nil:
+		return *a.Idx, true
+	}
+	return 0, false
 }
 
 // Subtitle describes one extracted subtitle track. Format is always
