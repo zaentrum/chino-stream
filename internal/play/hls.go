@@ -328,7 +328,9 @@ func (h *HLSHandler) warmCopy(src *source) {
 // Window 0 covers segments 0-9 (~60 s), which is more buffer than the
 // player needs to start. It returns once their first segments are there;
 // their productions go on to the window's end (a warm's runs to its end,
-// window.go).
+// window.go). audio, when set, is the union rendition the client starts on
+// (onTheFlyUnion): a package's companion is warmed as packaged (its
+// playlist, init and first segments), a stereo track as before.
 //
 // 5-minute timeout: an HEVC → H.264 transcode of a 1080p source at
 // `-preset veryfast` runs at roughly 0.5-1× realtime on the cluster's
@@ -336,12 +338,18 @@ func (h *HLSHandler) warmCopy(src *source) {
 // shorter risks killing the goroutine mid-window and leaving the cache
 // half-populated — the request-context ffmpeg path then has to restart
 // from scratch instead of inheriting partial work.
-func (h *HLSHandler) warmTranscode(src *source, ql Quality, maxHeight int) {
+func (h *HLSHandler) warmTranscode(src *source, ql Quality, maxHeight int, start *audioChoice) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	ctx = withWarmContext(ctx)
 	var audio sync.WaitGroup
-	if probe := src.probe; probe != nil && len(probe.AudioTracks) > 0 {
+	if start != nil && start.companion() && src.fromPackage() {
+		audio.Add(1)
+		go func() {
+			defer audio.Done()
+			warmRendition(src.pkg, start.rendition, 0, true)
+		}()
+	} else if probe := src.probe; probe != nil && len(probe.AudioTracks) > 0 {
 		audioIdx := defaultAudioIndex(probe.AudioTracks)
 		audio.Add(1)
 		go func() {
@@ -475,10 +483,23 @@ func (h *HLSHandler) serveOnTheFlyMaster(w http.ResponseWriter, r *http.Request,
 	// (or the one with the default-disposition flag) gets DEFAULT=YES
 	// so hls.js picks it automatically; users switch via the audio
 	// menu, which maps onto hls.audioTrack.
-	audioGroup := "aud"
+	audioGroup := onTheFlyAudioGroup
 	defaultIdx := defaultAudioIndex(probe.AudioTracks)
 	names := audioRenditionNames(probe.AudioTracks)
+	// A package's 5.1 companions for a client that decodes them: one group
+	// of them and the stereo transcodes (onTheFlyUnion), as a packaged
+	// master serves them.
+	union := onTheFlyUnion(src, caps)
+	for _, c := range union {
+		sb.WriteString(fmt.Sprintf(
+			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=%q,NAME=%q,LANGUAGE=%q,DEFAULT=%s,AUTOSELECT=YES,CHANNELS=\"%d\",URI=\"%s%s\"\n",
+			audioGroup, c.name, c.language, yesNo(c.isDefault), c.channels, c.uri, q,
+		))
+	}
 	for i, t := range probe.AudioTracks {
+		if union != nil {
+			break
+		}
 		name := names[i]
 		def := "NO"
 		if t.Index == defaultIdx {
@@ -512,7 +533,11 @@ func (h *HLSHandler) serveOnTheFlyMaster(w http.ResponseWriter, r *http.Request,
 		if len(probe.AudioTracks) > 0 {
 			group = audioGroup
 		}
-		sb.WriteString(fallbackStreamInf(probe, ql, caps.MaxVideoHeight(), false, group) + "\n")
+		if union != nil {
+			sb.WriteString(unionStreamInf(probe, ql, caps.MaxVideoHeight(), audioGroup, union) + "\n")
+		} else {
+			sb.WriteString(fallbackStreamInf(probe, ql, caps.MaxVideoHeight(), false, group) + "\n")
+		}
 		sb.WriteString(fmt.Sprintf("%s/index.m3u8%s\n", ql.Name, q))
 	}
 	// Pre-warm: kick off the first window's transcode / first-segment plan
@@ -522,7 +547,7 @@ func (h *HLSHandler) serveOnTheFlyMaster(w http.ResponseWriter, r *http.Request,
 	if useCopy {
 		goWarm(func() { h.warmCopy(src) })
 	} else {
-		goWarm(func() { h.warmTranscode(src, ql, caps.MaxVideoHeight()) })
+		goWarm(func() { h.warmTranscode(src, ql, caps.MaxVideoHeight(), unionDefault(union)) })
 	}
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Cache-Control", "no-store")
@@ -621,7 +646,7 @@ func (h *HLSHandler) Prewarm(w http.ResponseWriter, r *http.Request) {
 	if useCopy {
 		goWarm(func() { h.warmCopy(src) })
 	} else {
-		goWarm(func() { h.warmTranscode(src, ql, caps.MaxVideoHeight()) })
+		goWarm(func() { h.warmTranscode(src, ql, caps.MaxVideoHeight(), unionDefault(onTheFlyUnion(src, caps))) })
 	}
 	w.WriteHeader(http.StatusAccepted)
 	_, _ = w.Write([]byte("warming"))

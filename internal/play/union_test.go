@@ -405,3 +405,139 @@ func TestPlayInfoListsTheCompanionsAClientIsServed(t *testing.T) {
 		check(t, &Handler{Catalog: noAsset(t), Packages: l.packages}, libItem)
 	})
 }
+
+// A title whose original is retired, on the fly from its package for an
+// E-AC-3 client that decodes none of its rungs: one variant (the rung of
+// q), its group every stereo track transcoded on the fly and each
+// companion just before its own track's, served as packaged from the
+// package (a2/playlist.m3u8, pinned to the version like the rest), the
+// default track's companion DEFAULT; CODECS the H.264 and both audio
+// codecs, BANDWIDTH the rung's video and the companion. /play/info lists
+// it so; the master warms the companion it starts on. A client without
+// E-AC-3 gets the stereo transcodes as before.
+func TestOnTheFlyFromAPackageServesItsCompanions(t *testing.T) {
+	for _, record := range []bool{false, true} {
+		t.Run(map[bool]string{false: "manifest.json", true: "package.json"}[record], func(t *testing.T) {
+			h, ph, dir := unionPackage(t, record, commentaryFirst.stereo, commentaryFirst.surround)
+			pin := "" // a version's package is pinned to it
+			if record {
+				pin = "&v=8c8c8c8c-0000-4000-8000-00000000008c"
+			}
+			w := get(h, "/api/play/"+unionItem+"/master.m3u8?caps=avc,aac,eac3")
+			want := "#EXTM3U\n#EXT-X-VERSION:7\n" +
+				`#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="English · Commentary",LANGUAGE="eng",DEFAULT=NO,AUTOSELECT=YES,CHANNELS="2",URI="audio/0/index.m3u8?caps=avc,aac,eac3` + pin + `"` + "\n" +
+				`#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="English 5.1",LANGUAGE="eng",DEFAULT=YES,AUTOSELECT=YES,CHANNELS="6",URI="a2/playlist.m3u8?caps=avc,aac,eac3` + pin + `"` + "\n" +
+				`#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="English",LANGUAGE="eng",DEFAULT=NO,AUTOSELECT=YES,CHANNELS="2",URI="audio/1/index.m3u8?caps=avc,aac,eac3` + pin + `"` + "\n" +
+				`#EXT-X-STREAM-INF:BANDWIDTH=6948000,RESOLUTION=1920x1080,CODECS="avc1.640028,ec-3,mp4a.40.2",VIDEO-RANGE=SDR,AUDIO="aud"` + "\n" +
+				"high/index.m3u8?caps=avc,aac,eac3" + pin + "\n"
+			if w.Code != 200 || w.Body.String() != want {
+				t.Errorf("master %d:\n%s\nwant\n%s", w.Code, w.Body, want)
+			}
+			// The companion's playlist and segments are the package's.
+			if w := get(h, "/api/play/"+unionItem+"/a2/playlist.m3u8?caps=avc,aac,eac3"+pin); w.Code != 200 ||
+				!strings.Contains(w.Body.String(), "\nseg-00001.m4s?caps=avc,aac,eac3"+pin+"\n") {
+				t.Errorf("companion playlist: %d %q", w.Code, w.Body)
+			}
+			if w := get(h, "/api/play/"+unionItem+"/a2/seg-00001.m4s?caps=avc,aac,eac3"+pin); w.Code != 200 || w.Body.String() != "a2 seg-00001.m4s" {
+				t.Errorf("companion segment: %d %q", w.Code, w.Body)
+			}
+			// The master warmed the companion it starts on, as packaged.
+			if _, ok := packagedCache.Load(filepath.Join(dir, "hls", "a2", "init.mp4")); !ok {
+				t.Error("the companion the client starts on was not warmed")
+			}
+			tracks, codec := infoAudio(t, ph, unionItem, "avc,aac,eac3")
+			wantTracks := []map[string]any{
+				{"index": 0.0, "codec": "aac", "language": "eng", "name": "English · Commentary", "title": "English · Commentary", "channels": 2.0,
+					"group": "aud", "rendition": "audio/0"},
+				{"index": 1.0, "codec": "eac3", "language": "eng", "name": "English 5.1", "title": "English 5.1", "channels": 6.0,
+					"group": "aud", "rendition": "a2", "default": true},
+				{"index": 2.0, "codec": "aac", "language": "eng", "name": "English", "title": "English", "channels": 2.0,
+					"group": "aud", "rendition": "audio/1"},
+			}
+			if !reflect.DeepEqual(tracks, wantTracks) || codec != "eac3" {
+				t.Errorf("/play/info\n got %v %s\nwant %v eac3", tracks, codec, wantTracks)
+			}
+
+			// Without E-AC-3: the stereo transcodes, as before.
+			w = get(h, "/api/play/"+unionItem+"/master.m3u8?caps=avc,aac")
+			body := w.Body.String()
+			if strings.Contains(body, "a2/") || strings.Contains(body, "CHANNELS=") || strings.Contains(body, "ec-3") ||
+				!strings.Contains(body, `#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="English",LANGUAGE="eng",DEFAULT=YES,AUTOSELECT=YES,URI="audio/1/index.m3u8?caps=avc,aac`+pin+`"`) ||
+				!strings.Contains(body, `CODECS="avc1.640028,mp4a.40.2"`) {
+				t.Errorf("a client without E-AC-3:\n%s", body)
+			}
+			tracks, codec = infoAudio(t, ph, unionItem, "avc,aac")
+			if len(tracks) != 2 || tracks[0]["rendition"] != nil || codec != "aac" {
+				t.Errorf("/play/info without E-AC-3: %v %s", tracks, codec)
+			}
+			waitProductions(t, h)
+		})
+	}
+}
+
+// A stereo title is served its stereo tracks on the fly whatever the
+// client decodes: an E-AC-3 client too.
+func TestOnTheFlyFromAStereoPackageIsAsBefore(t *testing.T) {
+	h, ph, _ := unionPackage(t, true, commentaryFirst.stereo, nil)
+	a := get(h, "/api/play/"+unionItem+"/master.m3u8?caps=avc,aac,eac3").Body.String()
+	b := get(h, "/api/play/"+unionItem+"/master.m3u8?caps=avc,aac").Body.String()
+	if strings.ReplaceAll(a, "caps=avc,aac,eac3", "caps=avc,aac") != b || strings.Contains(a, "CHANNELS=") {
+		t.Errorf("E-AC-3 client:\n%s\nwithout:\n%s", a, b)
+	}
+	tracks, codec := infoAudio(t, ph, unionItem, "avc,aac,eac3")
+	if len(tracks) != 2 || tracks[0]["group"] != nil || codec != "aac" {
+		t.Errorf("/play/info %v %s", tracks, codec)
+	}
+	waitProductions(t, h)
+}
+
+// An extra with companions is served them as a title is: the union for an
+// E-AC-3 client of its packaged ladder, the companion next to the stereo
+// transcodes for one served the live path from its package (it decodes no
+// HEVC), the companion's playlist and segments from the extra's package;
+// the stereo group for a client without E-AC-3.
+func TestAnExtraServesItsCompanions(t *testing.T) {
+	usePackages(t, t.TempDir())
+	const extra = "7a11e700-0000-4000-8000-00000000009b"
+	dir := filepath.Join(t.TempDir(), "movies", unionItem[:2], unionItem, "extras", extra)
+	writeUnionPackage(t, dir, true, commentaryFirst.stereo, commentaryFirst.surround)
+	f := newFakeLibrary(t)
+	f.setExtra(catalog.ExtraPlayback{ExtraID: extra, ItemID: unionItem, Dir: dir, Record: "package.json"})
+	h := &HLSHandler{Catalog: noAsset(t), Packages: f.resolver(), FFmpegBin: windowFFmpeg(t, t.TempDir(), 0, 4, ""),
+		CacheDir: t.TempDir(), TranscodePreset: "veryfast"}
+
+	for _, tc := range []struct {
+		caps     string
+		media    []string
+		variants []string
+	}{
+		{"avc,hvc,aac,eac3", []string{"AUDIO audio-surround a0 NO", "AUDIO audio-surround a2 YES", "AUDIO audio-surround a1 NO"},
+			[]string{"v0/audio-surround"}},
+		{"avc,hvc,aac", []string{"AUDIO audio a0 NO", "AUDIO audio a1 YES"}, []string{"v0/audio"}},
+		// On the fly: audio/0 and audio/1, the stereo transcodes (servedMedia
+		// names a rendition by its URI's first folder).
+		{"avc,aac,eac3", []string{"AUDIO aud audio NO", "AUDIO aud a2 YES", "AUDIO aud audio NO"}, []string{"high/aud"}},
+		{"avc,aac", []string{"AUDIO aud audio NO", "AUDIO aud audio YES"}, []string{"high/aud"}},
+	} {
+		w := get(h, extraURL(unionItem, extra, "master.m3u8?caps="+tc.caps))
+		body := w.Body.String()
+		if got := servedMedia(body); w.Code != 200 || !reflect.DeepEqual(got, tc.media) {
+			t.Errorf("caps=%s: %d media %v, want %v:\n%s", tc.caps, w.Code, got, tc.media, body)
+		}
+		if got := servedVariants(body); !reflect.DeepEqual(got, tc.variants) {
+			t.Errorf("caps=%s: variants %v, want %v", tc.caps, got, tc.variants)
+		}
+		if tc.variants[0] == "high/aud" && (!strings.Contains(body, `URI="audio/0/index.m3u8?caps=`+tc.caps+`"`) ||
+			!strings.Contains(body, `URI="audio/1/index.m3u8?caps=`+tc.caps+`"`)) {
+			t.Errorf("caps=%s: not the stereo transcodes:\n%s", tc.caps, body)
+		}
+	}
+	if w := get(h, extraURL(unionItem, extra, "a2/playlist.m3u8?caps=avc,aac,eac3")); w.Code != 200 ||
+		!strings.Contains(w.Body.String(), "\nseg-00001.m4s?caps=avc,aac,eac3\n") {
+		t.Errorf("companion playlist: %d %q", w.Code, w.Body)
+	}
+	if w := get(h, extraURL(unionItem, extra, "a2/seg-00001.m4s")); w.Code != 200 || w.Body.String() != "a2 seg-00001.m4s" {
+		t.Errorf("companion segment: %d %q", w.Code, w.Body)
+	}
+	waitProductions(t, h)
+}

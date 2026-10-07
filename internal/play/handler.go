@@ -516,7 +516,13 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 		if title == "" && src.pkg.library() {
 			title, _ = libraryTitle(src.pkg.dir)
 		}
-		h.writeSourceInfo(w, title, src.probe, mode, reason)
+		// A client that decodes the package's 5.1 companions is served
+		// them with the stereo tracks (onTheFlyUnion): listed so.
+		var audio []map[string]any
+		if union := onTheFlyUnion(src, infoCaps); union != nil {
+			audio = onTheFlyInfoTracks(union)
+		}
+		h.writeSourceInfo(w, title, src.probe, mode, reason, audio)
 	}
 	path, err := h.Catalog.PrimaryAssetPath(r.Context(), itemID, bearerFrom(r))
 	if err != nil {
@@ -560,12 +566,14 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 	// say "passthrough" for h264 sources even when the player is
 	// going to be routed to remux because of multichannel audio.
 	mode, reason := probe.DecideWith(infoCaps)
-	h.writeSourceInfo(w, filepath.Base(clean), &probe, mode, reason)
+	h.writeSourceInfo(w, filepath.Base(clean), &probe, mode, reason, nil)
 }
 
 // writeSourceInfo answers /play/info for an on-the-fly source: its file
-// name (a package's title), its probe, the mode and why.
-func (h *Handler) writeSourceInfo(w http.ResponseWriter, filename string, probe *Probe, mode, reason string) {
+// name (a package's title), its probe, the mode and why. audio, when set,
+// lists the audio tracks the client is served instead of the probe's
+// (onTheFlyInfoTracks), audio_codec the one it starts on.
+func (h *Handler) writeSourceInfo(w http.ResponseWriter, filename string, probe *Probe, mode, reason string, audio []map[string]any) {
 	// Surface the available quality rungs so the client can render a
 	// picker. Passthrough ignores the q parameter. Remux honours it on
 	// the HLS path (it runs the same ladder) but is not offered the
@@ -585,12 +593,18 @@ func (h *Handler) writeSourceInfo(w http.ResponseWriter, filename string, probe 
 	if h.UseNVENC {
 		encoder = "h264_nvenc"
 	}
+	audioCodec := probe.AudioCodec
+	if audio == nil {
+		audio = infoTracks(probe.AudioTracks, audioRenditionNames(probe.AudioTracks))
+	} else {
+		audioCodec = startCodec(audio)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"filename":        filename,
 		"container":       probe.Container,
 		"video_codec":     probe.VideoCodec,
-		"audio_codec":     probe.AudioCodec,
+		"audio_codec":     audioCodec,
 		"width":           probe.Width,
 		"height":          probe.Height,
 		"duration_ms":     probe.DurationMs,
@@ -598,7 +612,7 @@ func (h *Handler) writeSourceInfo(w http.ResponseWriter, filename string, probe 
 		"reason":          reason,
 		"qualities":       ladder,
 		"default_quality": "high",
-		"audio_tracks":    infoTracks(probe.AudioTracks, audioRenditionNames(probe.AudioTracks)),
+		"audio_tracks":    audio,
 		"subtitle_tracks": infoTracks(probe.SubtitleTracks, subtitleNames(probe.SubtitleTracks)),
 		"encoder":         encoder,
 	})

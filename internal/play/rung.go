@@ -3,6 +3,7 @@ package play
 import (
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // What a transcode rung produces from a given source, computed once and used
@@ -170,4 +171,28 @@ func fallbackStreamInf(p *Probe, ql Quality, maxHeight int, useCopy bool, audioG
 	}
 	return fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d%s,CODECS=\"avc1.640028,mp4a.40.2\",VIDEO-RANGE=SDR%s",
 		transcodeBandwidth(ql.Name, g.w, g.h, audioGroup != ""), resolutionAttr(g.w, g.h), audioAttr)
+}
+
+// unionStreamInf is the #EXT-X-STREAM-INF line of the on-the-fly master's
+// transcode variant whose audio group is choices (onTheFlyUnion): rung ql
+// at the size it encodes, CODECS the H.264 and every audio codec of the
+// group (RFC 8216), the companions' before the stereo transcodes' as a
+// packaged union variant lists them (serveUnion), BANDWIDTH the rung's
+// video plus the group's largest audio rendition.
+func unionStreamInf(p *Probe, ql Quality, maxHeight int, audioGroup string, choices []audioChoice) string {
+	g := transcodeGeometry(ql, p.Width, p.Height, maxHeight)
+	codecs := []string{"avc1.640028"}
+	for _, companions := range []bool{true, false} {
+		for _, c := range choices {
+			if c.companion() == companions && !containsFold(codecs, c.codec) {
+				codecs = append(codecs, c.codec)
+			}
+		}
+	}
+	audioBps := 0
+	for _, c := range choices {
+		audioBps = max(audioBps, c.bitrate)
+	}
+	return fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d%s,CODECS=%q,VIDEO-RANGE=SDR,AUDIO=%q",
+		transcodeBandwidth(ql.Name, g.w, g.h, false)+audioBps, resolutionAttr(g.w, g.h), strings.Join(codecs, ","), audioGroup)
 }

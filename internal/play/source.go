@@ -311,3 +311,150 @@ func decideSource(s *source, caps Caps) (mode, reason string) {
 	}
 	return "transcode", reason + "; the original is retired, so the package's video is transcoded on the fly"
 }
+
+// audioChoice is one rendition of the audio group an on-the-fly master of a
+// package serves a client that decodes its 5.1 companions (onTheFlyUnion).
+type audioChoice struct {
+	// uri is the rendition's media playlist, relative to the master, and
+	// rendition the folder it names: a companion is served as packaged
+	// ("a2/playlist.m3u8", the package's own rendition, which the on-the-fly
+	// video is on the timeline of), a stereo track transcoded on the fly
+	// ("audio/1/index.m3u8").
+	uri, rendition string
+	name, language string
+	codec          string // its CODECS entry: ec-3, mp4a.40.2
+	channels       int
+	bitrate        int // bit/s
+	isDefault      bool
+}
+
+// companion says whether c is a package's 5.1 companion, served as
+// packaged, rather than a stereo track transcoded on the fly.
+func (c audioChoice) companion() bool { return !strings.HasPrefix(c.rendition, "audio/") }
+
+// surroundBitrate is the BANDWIDTH counted for a companion whose manifest
+// gives no bit rate: the packager's SURROUND_BITRATE default.
+const surroundBitrate = 448_000
+
+// onTheFlyUnion is the audio group of the on-the-fly master of the package
+// src for a client with caps that decodes its 5.1 companions, as
+// serveUnion makes a packaged master's: per stereo rendition, in order, its
+// companion (paired by source track, else by language) just before its
+// on-the-fly stereo transcode, the companions nobody's twin after them, the
+// default track's companion DEFAULT (else that track), names unique. nil —
+// the stereo group as before — when src is no package, it has no
+// companions, or the client decodes them not.
+func onTheFlyUnion(src *source, caps Caps) []audioChoice {
+	if src == nil || !src.fromPackage() || src.mf == nil || src.probe == nil || len(src.mf.Renditions.AudioSurround) == 0 {
+		return nil
+	}
+	surround := src.mf.Renditions.AudioSurround
+	for _, a := range surround {
+		if !audioCodecOK(a.Codec, a.Channels, caps) {
+			return nil
+		}
+	}
+	stereo := src.mf.Renditions.Audio
+	twins := twinsOf(src.mf)
+	companion := make([]int, len(stereo)) // stereo index → surround index + 1 (0: none)
+	used := make([]bool, len(surround))
+	for ci, c := range surround {
+		if twin, ok := twins[renditionID(c)]; ok {
+			for si, a := range stereo {
+				if renditionID(a) == twin && companion[si] == 0 {
+					companion[si], used[ci] = ci+1, true
+					break
+				}
+			}
+		}
+	}
+	for ci, c := range surround {
+		if _, ok := twins[renditionID(c)]; ok || used[ci] {
+			continue
+		}
+		for si, a := range stereo {
+			if companion[si] == 0 && normalizeLang(a.Language) == normalizeLang(c.Language) {
+				companion[si], used[ci] = ci+1, true
+				break
+			}
+		}
+	}
+	tracks := src.probe.AudioTracks
+	names := audioRenditionNames(tracks)
+	def := defaultAudioIndex(tracks)
+	surroundChoice := func(c pkgmanifest.AudioRendition, isDefault bool) audioChoice {
+		name := strings.TrimSpace(c.Name)
+		if name == "" {
+			name = trackDisplayName(c.Language, c.Title) + " 5.1"
+		}
+		ch := audioChoice{uri: renditionID(c) + "/playlist.m3u8", rendition: renditionID(c), name: name,
+			language: normalizeLang(c.Language), codec: c.Codec, channels: c.Channels, bitrate: c.BitrateBps, isDefault: isDefault}
+		if ch.channels == 0 {
+			ch.channels = 6
+		}
+		if ch.bitrate == 0 {
+			ch.bitrate = surroundBitrate
+		}
+		return ch
+	}
+	var out []audioChoice
+	for i, t := range tracks {
+		hasCompanion := i < len(companion) && companion[i] > 0
+		if hasCompanion {
+			out = append(out, surroundChoice(surround[companion[i]-1], t.Index == def))
+		}
+		lang := t.Language
+		if lang == "" {
+			lang = "und"
+		}
+		out = append(out, audioChoice{uri: fmt.Sprintf("audio/%d/index.m3u8", t.Index), rendition: fmt.Sprintf("audio/%d", t.Index),
+			name: names[i], language: lang, codec: "mp4a.40.2", channels: 2, bitrate: windowAudioBitrateBps,
+			isDefault: t.Index == def && !hasCompanion})
+	}
+	for ci, c := range surround {
+		if !used[ci] {
+			out = append(out, surroundChoice(c, false))
+		}
+	}
+	listed := make([]string, len(out))
+	for i, c := range out {
+		listed[i] = c.name
+	}
+	for i, name := range uniqueNames(listed) {
+		out[i].name = name
+	}
+	return out
+}
+
+// unionDefault is the choice of an onTheFlyUnion list a player starts on.
+func unionDefault(choices []audioChoice) *audioChoice {
+	for i := range choices {
+		if choices[i].isDefault {
+			return &choices[i]
+		}
+	}
+	if len(choices) > 0 {
+		return &choices[0]
+	}
+	return nil
+}
+
+// onTheFlyInfoTracks are /play/info's audio_tracks for an onTheFlyUnion
+// list, in its order: index (its place), codec, language, name and title
+// (its NAME in the master), default (only when it is), channels, and group
+// and rendition, which a client may pick it by.
+func onTheFlyInfoTracks(choices []audioChoice) []map[string]any {
+	out := make([]map[string]any, 0, len(choices))
+	for i, c := range choices {
+		e := map[string]any{"index": i, "codec": codecName(c.codec), "language": c.language, "name": c.name, "title": c.name,
+			"channels": c.channels, "group": onTheFlyAudioGroup, "rendition": c.rendition}
+		if c.isDefault {
+			e["default"] = true
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// onTheFlyAudioGroup is the GROUP-ID of an on-the-fly master's audio.
+const onTheFlyAudioGroup = "aud"
