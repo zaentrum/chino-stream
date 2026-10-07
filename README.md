@@ -94,8 +94,14 @@ HEVC, or HEVC under the package's height) gets the on-the-fly transcode:
 from the original while there is one, as always, else from the package —
 its top video rendition and stereo AAC renditions, each window's segments
 read as one fragmented MP4 (`concat:init.mp4|seg-N.m4s|…` with
-`-seek_timestamp 1`; ffmpeg's HLS demuxer cannot seek in them). Nothing of
-a package is stream-copied (`/copy/` is 404); `/info` describes the
+`-seek_timestamp 1`; ffmpeg's HLS demuxer cannot seek in them). A client
+that decodes the package's 5.1 companions (`eac3`) gets them as well, in
+the master's one audio group, each just before the stereo transcode of its
+source track as rule 4 orders them. A companion is served as packaged
+(`aN/playlist.m3u8`, on the timeline the transcoded video keeps) and
+warmed so when the client starts on it; `/info` lists the group in that
+order (`group` `aud`, `rendition` `a2` or `audio/1`). Nothing of a package
+goes through ffmpeg's stream copy (`/copy/` is 404); `/info` describes the
 transcode; the progressive `/api/play/{id}` answers 404 "progressive
 playback needs the original"; an embedded subtitle is the package's
 WebVTT of that stream. A title whose package katalog-api names but the
@@ -136,9 +142,21 @@ rung once per audio group, and each client gets its share
    `:<height>` for its codec.
 3. **`q=<rung id>`** serves that rung alone when the client decodes it at
    its height, whichever family; any other `q` serves the ladder.
-4. **Audio groups it decodes.** Stereo AAC always; `ec-3` only with `eac3`,
-   `ac-3` only with `ac3`, AAC beyond two channels only with `aacmc`. A
-   dropped group's renditions and variants go with it.
+4. **Audio groups it decodes, one variant per rung.** Stereo AAC always;
+   `ec-3` only with `eac3`, `ac-3` only with `ac3`, AAC beyond two channels
+   only with `aacmc`. A dropped group's renditions and variants go with it.
+   A client that decodes a further group besides the stereo one (the 5.1
+   companions, `audio-surround`, with `eac3`) gets one variant per rung, not
+   two: the further group's, its `CODECS` with the stereo codecs added and
+   its `BANDWIDTH` the larger of the two. That group holds every stereo
+   rendition, each companion just before the stereo rendition of its source
+   track (`idx` in a manifest, `sourceStreamIndex` in a record; else the
+   first in its language): "English 5.1", "English", "German". A track
+   without a companion (a stereo source, a commentary) stays; the default is
+   the companion of the stereo default, else that default; names are unique
+   in the group. Two variants of a rung differ in `CODECS`, and hls.js keeps
+   to the codecs it started on (the stereo ones), so a 5.1 pick had no level
+   to go to.
 5. **Subtitles as packaged.** The `SUBTITLES` group is in the master when
    the packager wrote it; I-frame playlists only for the rungs served.
 6. **One default per audio group.** Each audio group served has exactly one
@@ -147,8 +165,10 @@ rung once per audio group, and each client gets its share
    group keeps at most one.
 
 The filter only drops lines (and sets `DEFAULT`); what is left is the
-packaged master's lines in their order. A client that decodes none of a
-package's rungs falls through to the on-the-fly pipeline, as before.
+packaged master's lines in their order — but for the one audio group of
+rule 4, its renditions in the order given there and its variants' `CODECS`
+and `BANDWIDTH` set so. A client that decodes none of a package's rungs
+falls through to the on-the-fly pipeline, as before.
 
 `GET /api/play/{itemId}/info` for a packaged title says what the client
 starts on and what it may pick:
@@ -178,10 +198,18 @@ starts on and what it may pick:
   rungs of one size the one in the client's family is listed. `null` when
   there are fewer than two to pick from — every package before the ladder.
 - `default_quality`: `auto`.
-- `audio_tracks` lists the stereo tracks only; `subtitle_tracks` the
-  sidecars, each WebVTT one with its HLS rendition dir (`hls`) when it has
-  one: the source's own tracks, then the subtitle files from next to it
+- `audio_tracks` lists the stereo tracks; `subtitle_tracks` the sidecars,
+  each WebVTT one with its HLS rendition dir (`hls`) when it has one: the
+  source's own tracks, then the subtitle files from next to it
   (`external`), whose `sN` count on past them.
+- For a client served the one group of rule 4, `audio_tracks` lists that
+  group's renditions instead, in the master's order, each with `codec`
+  (`ec-3`, `mp4a.40.2`), `channels`, `default` as the master has it,
+  `group` (its `GROUP-ID`) and `rendition` (`a2`, the folder its URI
+  names); `audio_codec` is the codec of the one it starts on (`eac3`). A
+  client picks a track by `name`, the master's `NAME` and unique in the
+  group (hls.js: `setAudioOption({lang, name})`), or by `index`, its place
+  there. Any other client's list is as it always was.
 - Each track has a `name`: the packager's ("English", "No dialogue",
   "English · Commentary"), else - a package from before names - its
   language's name, then what its title says besides, the rule the packager
