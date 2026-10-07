@@ -13,8 +13,9 @@ import (
 // gatedFFmpeg is a fake ffmpeg for a window: it writes a real init (the
 // media fixture's video init, whose timescale the installer reads) and
 // segment 0, then waits for <state>/go before it writes the other segs
-// segments and exits — or until it is killed. Each run is counted in
-// <state>/runs.
+// segments and exits — or until it is killed, or the test that ran it is
+// gone (a run that timed out would leave it waiting for good). Each run is
+// counted in <state>/runs.
 func gatedFFmpeg(t *testing.T, state string, segs int) string {
 	t.Helper()
 	initSrc := filepath.Join(mediaDir(t), "hls", "v0", "init.mp4")
@@ -25,7 +26,7 @@ for last; do :; done
 out=$(dirname "$last")
 cp '`+initSrc+`' "$out/init.mp4"
 printf 'seg0' > "$out/seg_0.m4s"
-while [ ! -e "$state/go" ]; do sleep 0.01; done
+while [ ! -e "$state/go" ] && kill -0 "$PPID" 2>/dev/null; do sleep 0.01; done
 i=1
 while [ "$i" -lt `+itoa(segs)+` ]; do printf "seg$i" > "$out/seg_$i.m4s"; i=$((i+1)); done
 `)
