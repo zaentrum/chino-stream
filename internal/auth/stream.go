@@ -43,7 +43,11 @@ func NewSigner(keyB64 string) (*Signer, error) {
 	return &Signer{key: key}, nil
 }
 
-// Verify mirrors chino-api/internal/auth.(*Signer).Verify exactly.
+// Verify mirrors chino-api/internal/auth.(*Signer).Verify, but for reading
+// the signature strictly: its last character carries two bits the MAC has
+// none of, which a lenient decoder ignores, so four spellings of one MAC
+// would verify. Only the one chino-api writes (RawURLEncoding, those bits
+// zero) does.
 func (s *Signer) Verify(token string) (userID string, err error) {
 	dot := strings.IndexByte(token, '.')
 	if dot < 1 || dot == len(token)-1 {
@@ -53,7 +57,7 @@ func (s *Signer) Verify(token string) (userID string, err error) {
 	mac := hmac.New(sha256.New, s.key)
 	mac.Write([]byte(payload))
 	expected := mac.Sum(nil)
-	got, decErr := base64.RawURLEncoding.DecodeString(sig)
+	got, decErr := base64.RawURLEncoding.Strict().DecodeString(sig)
 	if decErr != nil || !hmac.Equal(expected, got) {
 		return "", errors.New("invalid stream token signature")
 	}
