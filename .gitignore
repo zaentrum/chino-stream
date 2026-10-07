@@ -29,3 +29,7 @@ go.work.sum
 *.ts
 *.m4s
 hls-cache/
+# …but the real package the tests read: 124 KB of ffmpeg's test pattern
+# and tone, as the packager writes them.
+!internal/play/testdata/media/**/*.mp4
+!internal/play/testdata/media/**/*.m4s
