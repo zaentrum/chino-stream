@@ -100,7 +100,11 @@ the master's one audio group, each just before the stereo transcode of its
 source track as rule 4 orders them. A companion is served as packaged
 (`aN/playlist.m3u8`, on the timeline the transcoded video keeps) and
 warmed so when the client starts on it; `/info` lists the group in that
-order (`group` `aud`, `rendition` `a2` or `audio/1`). Nothing of a package
+order (`group` `aud`, `rendition` `a2` or `audio/1`). A `native` client
+gets the transcode rung twice instead, with the stereo transcodes (`aud`)
+and with a 5.1 group (`aud-surround`) of the same members, each played by
+its companion where it has one, as rule 4 has it; `/info` lists the stereo
+tracks, each with `surround` where a companion plays it. Nothing of a package
 goes through ffmpeg's stream copy (`/copy/` is 404); `/info` describes the
 transcode; the progressive `/api/play/{id}` answers 404 "progressive
 playback needs the original"; an embedded subtitle is the package's
@@ -122,6 +126,10 @@ A packaged title's master, `/info` and `/prewarm` read the same query:
   tallest frame, e.g. `hvc:1080`); audio `aac`, `mp3`, `opus`, `vorbis`,
   `ac3`, `eac3`; `aacmc` for AAC beyond two channels. Without `caps` the
   default set applies: H.264, VP9, AV1, AAC, MP3, Opus, Vorbis — no HEVC.
+  `native` says the client plays the master with the platform's own HLS
+  player — AVPlayer (the iOS and tvOS app), Safari's native HLS (chino-web
+  without MSE) — which picks between audio groups itself; it changes only
+  how audio groups are served (rule 4), never what the client decodes.
 - `q` — `auto` (the default) or a rung id from `/info`'s `qualities`. The
   on-the-fly pipeline's `high`, `medium` and `low` keep their meaning
   there; on a packaged title they mean `auto`.
@@ -157,6 +165,17 @@ rung once per audio group, and each client gets its share
    in the group. Two variants of a rung differ in `CODECS`, and hls.js keeps
    to the codecs it started on (the stereo ones), so a 5.1 pick had no level
    to go to.
+
+   A `native` client gets Apple's shape instead: each group it decodes, each
+   rung once per group, and every group with the same members, alike but for
+   `URI` and `CHANNELS` (RFC 8216, 4.3.4.1.1), so the player matches a track
+   across groups and picks the group it decodes. The 5.1 group holds the
+   stereo group's members, in their order, named and defaulted as there,
+   each played by its companion where it has one and by its own stereo
+   rendition where not (a stereo source, a commentary: RFC 8216 lets a
+   group's members differ in sample format). Its variants then list AAC in
+   `CODECS` too. A companion that is nobody's twin stays after the members,
+   named apart.
 5. **Subtitles as packaged.** The `SUBTITLES` group is in the master when
    the packager wrote it; I-frame playlists only for the rungs served.
 6. **One default per audio group.** Each audio group served has exactly one
@@ -165,10 +184,11 @@ rung once per audio group, and each client gets its share
    group keeps at most one.
 
 The filter only drops lines (and sets `DEFAULT`); what is left is the
-packaged master's lines in their order — but for the one audio group of
-rule 4, its renditions in the order given there and its variants' `CODECS`
-and `BANDWIDTH` set so. A client that decodes none of a package's rungs
-falls through to the on-the-fly pipeline, as before.
+packaged master's lines in their order — but for the audio of rule 4: the
+one group, its renditions in the order given there, or for a `native`
+client the further groups' members as given there; and their variants'
+`CODECS` and `BANDWIDTH` set so. A client that decodes none of a package's
+rungs falls through to the on-the-fly pipeline, as before.
 
 `GET /api/play/{itemId}/info` for a packaged title says what the client
 starts on and what it may pick:
@@ -210,6 +230,12 @@ starts on and what it may pick:
   client picks a track by `name`, the master's `NAME` and unique in the
   group (hls.js: `setAudioOption({lang, name})`), or by `index`, its place
   there. Any other client's list is as it always was.
+- A `native` client's list is the stereo tracks as always — the tracks its
+  player lists, one per member, which the player plays from whichever
+  group it picks. A track the 5.1 group plays by a companion carries
+  `surround`: that group, the companion's `rendition`, `codec` and
+  `channels`. Pick a track by `name` (AVPlayer's option `displayName`,
+  Safari's audio track `label`); the player picks stereo or 5.1.
 - Each track has a `name`: the packager's ("English", "No dialogue",
   "English · Commentary"), else - a package from before names - its
   language's name, then what its title says besides, the rule the packager
@@ -226,8 +252,9 @@ the ladder). Clients should send the same `caps` on the master, `/info` and
 
 **Warming.** Fetching a packaged master warms the variant the client starts
 on — the served master's first variant and the default (else first)
-rendition of its audio group: media playlists and init segments, and with
-`?t=` the segments from there. `/prewarm` warms the same plus segments
+rendition of its audio group, and for a `native` client the one each other
+group starts on, since its player picks the group: media playlists and
+init segments, and with `?t=` the segments from there. `/prewarm` warms the same plus segments
 (from `t`, else the first ones); a Zap pool entry warms the start of an
 HEVC client and of any other client at its seek point. hls.js starts on the
 best level under `min(first BANDWIDTH, 5 Mbit/s)`, which for an HEVC top
