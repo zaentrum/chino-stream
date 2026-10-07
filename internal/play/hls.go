@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -322,6 +323,108 @@ func (h *HLSHandler) warmCopy(src *source) {
 	}
 }
 
+// warmOnTheFly warms a transcode on the fly for a client with caps (its
+// master's, its /prewarm's), off the request path: window 0 of rung ql and
+// the audio it starts on (warmTranscode), a native player's 5.1 group's
+// start (warmMirrorStart), and a mixed group's other companions
+// (warmListedCompanions).
+func (h *HLSHandler) warmOnTheFly(src *source, ql Quality, caps Caps) {
+	union, mirror := onTheFlyUnion(src, caps), onTheFlyMirror(src, caps)
+	start := unionDefault(union)
+	goWarm(func() { h.warmTranscode(src, ql, caps.MaxVideoHeight(), start) })
+	if mirror != nil {
+		goWarm(func() { warmMirrorStart(src, mirror) })
+	}
+	if listed := onTheFlyListed(src, union, mirror); listed != nil {
+		started := onTheFlyStarted(src, start, mirror)
+		goWarm(func() { warmListedCompanions(src, listed, started) })
+	}
+}
+
+// onTheFlyListed is every audio rendition the on-the-fly master of the
+// package src lists — the union, or a native player's stereo transcodes and
+// 5.1 group — once each, in its order, when a group of it is mixed (its
+// renditions in more than one codec, which Media3 reads every rendition of
+// before it starts: servedLadder.listed); nil otherwise.
+func onTheFlyListed(src *source, union, mirror []audioChoice) []audioChoice {
+	var listed []audioChoice
+	switch {
+	case union != nil && mixedChoices(union):
+		listed = union
+	case mirror != nil && mixedChoices(mirror):
+		tracks := src.probe.AudioTracks
+		names := audioRenditionNames(tracks)
+		def := defaultAudioIndex(tracks)
+		for i, t := range tracks {
+			listed = append(listed, stereoChoice(t, names[i], t.Index == def))
+		}
+		listed = append(listed, mirror...)
+	default:
+		return nil
+	}
+	var out []audioChoice
+	seen := map[string]bool{}
+	for _, c := range listed {
+		if !seen[c.rendition] {
+			seen[c.rendition] = true
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// mixedChoices says whether choices are in more than one codec.
+func mixedChoices(choices []audioChoice) bool {
+	for _, c := range choices {
+		if !strings.EqualFold(c.codec, choices[0].codec) {
+			return true
+		}
+	}
+	return false
+}
+
+// onTheFlyStarted are the audio renditions warmOnTheFly's start warms
+// cover: warmTranscode's — the companion it starts on, else the default
+// stereo track — and warmMirrorStart's companion.
+func onTheFlyStarted(src *source, start *audioChoice, mirror []audioChoice) []string {
+	var out []string
+	if start != nil && start.companion() {
+		out = append(out, start.rendition)
+	} else if src.probe != nil && len(src.probe.AudioTracks) > 0 {
+		out = append(out, fmt.Sprintf("audio/%d", defaultAudioIndex(src.probe.AudioTracks)))
+	}
+	if d := unionDefault(mirror); d != nil && d.companion() {
+		out = append(out, d.rendition)
+	}
+	return out
+}
+
+// warmListedCompanions warms the companions of listed (onTheFlyListed) the
+// start warms left (started) — what is a file read: each one's playlist and
+// init from the package, all at once, at most maxWarmAudio audio renditions
+// in all. A stereo member gets no warm: its init is the first output of a
+// transcode window, a 60 s encode that a client which never plays it
+// (hls.js) would have paid for; a client that asks for it starts it then.
+func warmListedCompanions(src *source, listed []audioChoice, started []string) {
+	n := len(started)
+	var wg sync.WaitGroup
+	for _, c := range listed {
+		if !c.companion() || slices.Contains(started, c.rendition) {
+			continue
+		}
+		if n >= maxWarmAudio {
+			break
+		}
+		n++
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			warmRendition(src.pkg, c.rendition, 0, false)
+		}()
+	}
+	wg.Wait()
+}
+
 // warmMirrorStart warms, for a native player of a package's on-the-fly
 // master (onTheFlyMirror), the companion its 5.1 group starts on, as
 // packaged: the player picks the group itself, and may start on that one.
@@ -571,10 +674,7 @@ func (h *HLSHandler) serveOnTheFlyMaster(w http.ResponseWriter, r *http.Request,
 	if useCopy {
 		goWarm(func() { h.warmCopy(src) })
 	} else {
-		goWarm(func() { h.warmTranscode(src, ql, caps.MaxVideoHeight(), unionDefault(union)) })
-		if mirror != nil {
-			goWarm(func() { warmMirrorStart(src, mirror) })
-		}
+		h.warmOnTheFly(src, ql, caps)
 	}
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Cache-Control", "no-store")
@@ -673,10 +773,7 @@ func (h *HLSHandler) Prewarm(w http.ResponseWriter, r *http.Request) {
 	if useCopy {
 		goWarm(func() { h.warmCopy(src) })
 	} else {
-		goWarm(func() { h.warmTranscode(src, ql, caps.MaxVideoHeight(), unionDefault(onTheFlyUnion(src, caps))) })
-		if mirror := onTheFlyMirror(src, caps); mirror != nil {
-			goWarm(func() { warmMirrorStart(src, mirror) })
-		}
+		h.warmOnTheFly(src, ql, caps)
 	}
 	w.WriteHeader(http.StatusAccepted)
 	_, _ = w.Write([]byte("warming"))

@@ -634,11 +634,12 @@ func (h *HLSHandler) warmPackaged(p *pkgDir, mf *pkgmanifest.Manifest, caps Caps
 // warmStart warms the variant a client starts on: s.video and s.audio — and
 // s.more, the renditions a native player's other audio groups start on,
 // since it picks the group itself — each its media playlist and init.mp4,
-// and with segments the segments
-// at tSec (the first ones when tSec<=0). It returns the paths that are
-// in packagedCache afterwards and whether the video rendition is
-// playable from there: its playlist, its init and, with segments, at
-// least one segment landed.
+// and with segments the segments at tSec (the first ones when tSec<=0).
+// Of a mixed group (s.listed) it warms the other renditions' playlists and
+// inits too, at most maxWarmAudio audio renditions in all. It returns the
+// paths that are in packagedCache afterwards and whether the video
+// rendition is playable from there: its playlist, its init and, with
+// segments, at least one segment landed.
 func warmStart(p *pkgDir, s servedLadder, tSec float64, segments bool) (paths []string, videoOK bool) {
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -649,14 +650,43 @@ func warmStart(p *pkgDir, s servedLadder, tSec float64, segments bool) (paths []
 	if !videoOK {
 		return nil, false
 	}
+	warmed := map[string]bool{}
 	for _, a := range append([]string{s.audio}, s.more...) {
-		if a != "" {
+		if a != "" && !warmed[a] {
+			warmed[a] = true
 			audio, _ := warmRendition(p, a, tSec, segments)
 			paths = append(paths, audio...)
 		}
 	}
+	// A mixed group's other renditions (s.listed): the playlist and init of
+	// each, all at once, as a player that reads them all before it starts
+	// asks for them; at most maxWarmAudio renditions in all.
+	var rest []string
+	for _, a := range s.listed {
+		if !warmed[a] && len(warmed)+len(rest) < maxWarmAudio {
+			rest = append(rest, a)
+		}
+	}
+	landed := make([][]string, len(rest))
+	var wg sync.WaitGroup
+	for i, a := range rest {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			landed[i], _ = warmRendition(p, a, 0, false)
+		}()
+	}
+	wg.Wait()
+	for _, l := range landed {
+		paths = append(paths, l...)
+	}
 	return paths, true
 }
+
+// maxWarmAudio bounds the audio renditions a master's warm reads: those it
+// starts on and, of a mixed group, the others (servedLadder.listed,
+// warmListedAudio).
+const maxWarmAudio = 8
 
 // warmRendition warms one packaged rendition (see warmStart). ok: its
 // playlist and init landed, and with segments at least one segment.

@@ -266,6 +266,14 @@ type servedLadder struct {
 	// ("a2"): a native player's per-codec groups, between which the player
 	// picks itself (mirrorAudioGroups). None for a master of one group.
 	more []string
+	// listed is every audio rendition the master lists, in its order, when
+	// one of its groups is mixed — a variant whose CODECS name more than one
+	// audio codec: the union, a native player's 5.1 group that plays a
+	// member in stereo. Media3 reads the playlist and init of each of those
+	// before it starts (it prepares from the master alone only when a
+	// variant names one audio codec). nil for a master of single-codec
+	// groups, a stereo-only client's.
+	listed []string
 }
 
 // audioTwins maps a rendition of a further audio group — a 5.1 companion,
@@ -956,6 +964,15 @@ func (m *hlsMaster) served(body string) servedLadder {
 		}
 		if r := m.groupStart(v.audio); r != "" && r != s.audio && !slices.Contains(s.more, r) {
 			s.more = append(s.more, r)
+		}
+	}
+	mixed := false
+	for _, v := range m.variants {
+		mixed = mixed || len(v.audioCodecs) > 1
+	}
+	for _, md := range m.media {
+		if mixed && md.typ == "AUDIO" && md.rend != "" && !slices.Contains(s.listed, md.rend) {
+			s.listed = append(s.listed, md.rend)
 		}
 	}
 	return s

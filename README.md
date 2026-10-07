@@ -254,11 +254,20 @@ the ladder). Clients should send the same `caps` on the master, `/info` and
 on — the served master's first variant and the default (else first)
 rendition of its audio group, and for a `native` client the one each other
 group starts on, since its player picks the group: media playlists and
-init segments, and with `?t=` the segments from there. `/prewarm` warms the same plus segments
-(from `t`, else the first ones); a Zap pool entry warms the start of an
-HEVC client and of any other client at its seek point. hls.js starts on the
-best level under `min(first BANDWIDTH, 5 Mbit/s)`, which for an HEVC top
-rung above that is the rung below it.
+init segments, and with `?t=` the segments from there. A master with a
+mixed audio group — a variant naming more than one audio codec: the one
+group of rule 4, a `native` client's 5.1 group that plays a member in
+stereo — warms every other audio rendition's playlist and init too, since
+Media3 reads each of them before it starts (a TV limited to stereo then
+starts on the stereo twin); at most eight audio renditions in all. On the
+fly from a package only what is a file read: the other companions'
+playlists and inits. A stereo member's init is the first output of a
+transcode window, which starts when a client asks for it. `/prewarm` warms
+the same plus segments (from `t`, else the first ones); a Zap pool entry
+warms the start of an HEVC client and of any other client at its seek
+point. hls.js starts on the best level under
+`min(first BANDWIDTH, 5 Mbit/s)`, which for an HEVC top rung above that is
+the rung below it.
 
 ## Extras
 
