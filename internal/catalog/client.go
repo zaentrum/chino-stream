@@ -112,11 +112,16 @@ func (c *Client) PrimaryAsset(ctx context.Context, itemID, bearer string) (Asset
 // session started on one of them is served from it to its end. Original is
 // the file it was taken in from, nil once that is retired.
 type Playback struct {
-	ItemID   string       `json:"itemId"`
-	Type     string       `json:"type"`
-	Package  *PackageRef  `json:"package"`
-	Previous []PackageRef `json:"previous"`
-	Original *Original    `json:"original"`
+	ItemID string `json:"itemId"`
+	Type   string `json:"type"`
+	// CoveredBy is set on an episode held in another episode's file (one
+	// file, several episodes): the id of that episode, the holder, whose
+	// package, previous versions and original these are. "" for every
+	// other item.
+	CoveredBy string       `json:"coveredBy"`
+	Package   *PackageRef  `json:"package"`
+	Previous  []PackageRef `json:"previous"`
+	Original  *Original    `json:"original"`
 }
 
 // PackageRef is one package folder and the record it is read by. VersionID

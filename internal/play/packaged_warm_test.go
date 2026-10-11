@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/zaentrum/chino-stream/internal/catalog"
 )
 
 // stagePackages copies test packages into a fresh packages root with a
@@ -198,6 +200,25 @@ func TestPrewarmWarmsTheStartingVariant(t *testing.T) {
 		"hls/v2/playlist.m3u8", "hls/v2/init.mp4", "hls/v2/seg-00001.m4s", "hls/v2/seg-00002.m4s", "hls/v2/seg-00003.m4s", "hls/v2/seg-00004.m4s",
 		"hls/a0/playlist.m3u8", "hls/a0/init.mp4", "hls/a0/seg-00001.m4s", "hls/a0/seg-00002.m4s", "hls/a0/seg-00003.m4s", "hls/a0/seg-00004.m4s")) {
 		t.Errorf("q=v2 warmed %v", got)
+	}
+}
+
+// One file that holds several episodes is one Zap clip, its holder's: an
+// episode covered by another plays that one's package and is no entry of its
+// own.
+func TestZapPoolTakesAFileOfSeveralEpisodesOnce(t *testing.T) {
+	long := func(m map[string]any) { m["durationMs"] = 600_000 } // long enough for a midpoint
+	stagePackages(t, long, pkgLadder)
+	lib := legacyLibrary(t, testPackagesRoot)
+	const covered = "c0c0c0c0-0000-4000-8000-0000000000e2"
+	lib.setItem(catalog.Playback{ItemID: covered, Type: "episode", CoveredBy: pkgLadder,
+		Package: &catalog.PackageRef{Dir: legacyDir(t, pkgLadder), Record: "manifest.json"}})
+	h := &HLSHandler{Packages: lib.resolver()}
+	if e := warmOneZapItem(h, pkgLadder); e == nil {
+		t.Fatal("the holder's file is no entry")
+	}
+	if e := warmOneZapItem(h, covered); e != nil {
+		t.Errorf("an episode its holder's file covers is an entry of its own: %+v", e.ItemID)
 	}
 }
 

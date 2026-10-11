@@ -281,6 +281,12 @@ func warmOneZapItem(h *HLSHandler, itemID string) *zapPoolEntry {
 	if err != nil || p == nil || mf == nil {
 		return nil
 	}
+	// One file that holds several episodes is one clip, its holder's: an
+	// episode covered by another plays that one's package, and a card of
+	// its own would show the same file again.
+	if answer.CoveredBy != "" {
+		return nil
+	}
 	dur := mf.EffectiveDurationMs()
 	if dur <= 0 {
 		return nil

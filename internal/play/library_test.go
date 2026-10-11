@@ -94,6 +94,9 @@ func wirePlayback(a catalog.Playback) map[string]any {
 		return m
 	}
 	out := map[string]any{"itemId": a.ItemID, "type": a.Type, "package": nil, "previous": []any{}, "original": nil}
+	if a.CoveredBy != "" {
+		out["coveredBy"] = a.CoveredBy
+	}
 	if a.Package != nil {
 		out["package"] = ref(*a.Package)
 	}
