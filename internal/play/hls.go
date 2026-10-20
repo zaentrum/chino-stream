@@ -73,6 +73,10 @@ type HLSHandler struct {
 	// DetectAACEncoder found it ("" = the native aac encoder).
 	AACEncoder string
 
+	// Live is the live worker (liveworker.go); nil without LIVE_WORKER_URL:
+	// every on-the-fly session plays on ffmpeg, as before.
+	Live *LiveWorker
+
 	// segmentLocks dedupes concurrent ffmpeg runs for the same
 	// (item, quality, segment) — the first request transcodes and
 	// writes to disk, others wait on the same mutex and read the
@@ -309,9 +313,18 @@ func storeProbe(path string, mtime time.Time, probe Probe) {
 // even for 4 GB remuxes, and the init.mp4 ffmpeg run is ~200 ms, so 3
 // min is plenty of headroom. Set high enough that an NFS hiccup on
 // the first read of a cold file doesn't kill the warm prematurely.
-func (h *HLSHandler) warmCopy(src *source) {
+//
+// A live session's (live) is the Go remux's: the original indexed and its
+// init cached (passthrough.go).
+func (h *HLSHandler) warmCopy(src *source, live bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
+	if live {
+		if _, err := h.liveCopyInit(ctx, src); err != nil {
+			log.Printf("warmCopy live %s: %v", src.key, err)
+		}
+		return
+	}
 	ctx = withWarmContext(ctx)
 	if _, err := h.loadOrBuildPlan(ctx, src.key, src.file); err != nil {
 		log.Printf("warmCopy plan %s: %v", src.key, err)
@@ -327,11 +340,16 @@ func (h *HLSHandler) warmCopy(src *source) {
 // master's, its /prewarm's), off the request path: window 0 of rung ql and
 // the audio it starts on (warmTranscode), a native player's 5.1 group's
 // start (warmMirrorStart), and a mixed group's other companions
-// (warmListedCompanions).
-func (h *HLSHandler) warmOnTheFly(src *source, ql Quality, caps Caps) {
+// (warmListedCompanions). A live session's (live) warms the live pipeline
+// from tSec instead of window 0 (warmLive).
+func (h *HLSHandler) warmOnTheFly(src *source, ql Quality, caps Caps, live bool, tSec float64) {
 	union, mirror := onTheFlyUnion(src, caps), onTheFlyMirror(src, caps)
 	start := unionDefault(union)
-	goWarm(func() { h.warmTranscode(src, ql, caps.MaxVideoHeight(), start) })
+	if live {
+		h.warmLive(src, ql, caps.MaxVideoHeight(), start, tSec)
+	} else {
+		goWarm(func() { h.warmTranscode(src, ql, caps.MaxVideoHeight(), start) })
+	}
 	if mirror != nil {
 		goWarm(func() { warmMirrorStart(src, mirror) })
 	}
@@ -581,9 +599,19 @@ func (h *HLSHandler) serveOnTheFlyMaster(w http.ResponseWriter, r *http.Request,
 	// takes the transcode path (the quality switcher only makes sense
 	// when we're actually encoding). A package is never stream-copied.
 	useCopy := (qParam == "" || qParam == "high") && mode == "passthrough" && !src.fromPackage()
+	// With LIVE_WORKER_MODE on a new session goes to the live pipeline
+	// (liveSession), and its URIs carry lw=1, which pins every request of it
+	// there (liveworker.go); else to ffmpeg, as before, without lw.
+	useCopy, live := h.liveSession(r.Context(), src, useCopy)
 	q := r.URL.RawQuery
 	if src.fromPackage() {
 		q = pinnedQuery(q, src.pkg.versionID)
+	}
+	switch {
+	case live:
+		q = withLivePin(q)
+	case h.Live != nil:
+		q = withoutLivePin(q)
 	}
 	if q != "" {
 		q = "?" + q
@@ -672,9 +700,9 @@ func (h *HLSHandler) serveOnTheFlyMaster(w http.ResponseWriter, r *http.Request,
 	// follow this master.m3u8 race the work that's already in flight. Cuts
 	// ~400 ms off cold start on a libx264 transcode path.
 	if useCopy {
-		goWarm(func() { h.warmCopy(src) })
+		goWarm(func() { h.warmCopy(src, live) })
 	} else {
-		h.warmOnTheFly(src, ql, caps)
+		h.warmOnTheFly(src, ql, caps, live, tParam(r))
 	}
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Cache-Control", "no-store")
@@ -770,10 +798,12 @@ func (h *HLSHandler) Prewarm(w http.ResponseWriter, r *http.Request) {
 	ql := ResolveQuality(qParam)
 	mode, _ := decideSource(src, caps)
 	useCopy := (qParam == "" || qParam == "high") && mode == "passthrough" && !src.fromPackage()
+	// The pipeline the master will send the session to (liveSession).
+	useCopy, live := h.liveSession(r.Context(), src, useCopy)
 	if useCopy {
-		goWarm(func() { h.warmCopy(src) })
+		goWarm(func() { h.warmCopy(src, live) })
 	} else {
-		h.warmOnTheFly(src, ql, caps)
+		h.warmOnTheFly(src, ql, caps, live, tSec)
 	}
 	w.WriteHeader(http.StatusAccepted)
 	_, _ = w.Write([]byte("warming"))
@@ -860,6 +890,10 @@ func (h *HLSHandler) InitSegment(w http.ResponseWriter, r *http.Request) {
 	// every leg (init / segment) re-derives the identical cache namespace
 	// and serves the bytes ensureVideoWindow wrote under it.
 	maxHeight := ParseCaps(r.URL.Query().Get("caps")).MaxVideoHeight()
+	if h.pinned(r) {
+		h.serveLiveVideo(w, r, src, quality, ql, maxHeight, -1)
+		return
+	}
 	if err := h.ensureVideoWindow(r.Context(), src, quality, ql, 0, 0, maxHeight); err != nil {
 		log.Printf("hls init %s/%s: %v", src.key, quality, err)
 		windowError(w, err, "init segment")
@@ -890,6 +924,11 @@ func (h *HLSHandler) Segment(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
+	maxHeight := ParseCaps(r.URL.Query().Get("caps")).MaxVideoHeight()
+	if h.pinned(r) {
+		h.serveLiveVideo(w, r, src, quality, ql, maxHeight, seg)
+		return
+	}
 	if probe := src.probe; probe != nil && probe.DurationMs > 0 {
 		total := float64(probe.DurationMs) / 1000.0
 		if float64(seg*segmentSec) >= total {
@@ -897,7 +936,6 @@ func (h *HLSHandler) Segment(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	maxHeight := ParseCaps(r.URL.Query().Get("caps")).MaxVideoHeight()
 	windowIdx := seg / windowSize
 	if err := h.ensureVideoWindow(r.Context(), src, quality, ql, windowIdx, seg, maxHeight); err != nil {
 		log.Printf("hls seg %s/%s/%d (win %d): %v", src.key, quality, seg, windowIdx, err)
@@ -912,6 +950,9 @@ func (h *HLSHandler) Segment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.serveCached(w, r, cachePath, "video/iso.segment")
+	if h.Live.shadowing() {
+		h.shadowVideo(src, quality, ql, maxHeight, seg)
+	}
 }
 
 // ensureVideoWindow makes sure the requested segment (and init.mp4)
@@ -1584,6 +1625,10 @@ func (h *HLSHandler) AudioInitSegment(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
+	if h.pinned(r) {
+		h.serveLiveAudio(w, r, src, audioIdx, -1)
+		return
+	}
 	if err := h.ensureAudioWindow(r.Context(), src, audioIdx, 0, 0); err != nil {
 		log.Printf("hls audio init %s/%d: %v", src.key, audioIdx, err)
 		windowError(w, err, "audio init")
@@ -1613,6 +1658,10 @@ func (h *HLSHandler) AudioSegment(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
+	if h.pinned(r) {
+		h.serveLiveAudio(w, r, src, audioIdx, seg)
+		return
+	}
 	if probe := src.probe; probe != nil && probe.DurationMs > 0 {
 		total := float64(probe.DurationMs) / 1000.0
 		if float64(seg*segmentSec) >= total {
@@ -1632,6 +1681,13 @@ func (h *HLSHandler) AudioSegment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.serveCached(w, r, cachePath, "video/iso.segment")
+	if h.Live.shadowing() {
+		if src.fromPackage() {
+			h.shadowPackageAudio(src, audioIdx, seg)
+		} else {
+			h.shadowAudio(src, audioIdx, seg)
+		}
+	}
 }
 
 // scaleTargetHeight extracts the target height from a "scale=-2:<h>"

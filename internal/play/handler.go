@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/zaentrum/live-worker/api"
 
 	"github.com/zaentrum/chino-stream/internal/catalog"
 	"github.com/zaentrum/chino-stream/internal/metrics"
@@ -48,6 +49,12 @@ type Handler struct {
 	// covers subtitle output too. Empty disables the disk cache and
 	// reverts to the old streaming behaviour.
 	CacheDir string
+
+	// Live is the live worker (liveworker.go); nil without LIVE_WORKER_URL.
+	// With LIVE_WORKER_MODE on, nothing here encodes: the progressive
+	// transcode answers 404, an original's embedded subtitle is the worker's
+	// and a package's is shifted in Go.
+	Live *LiveWorker
 
 	// subLocks dedupes concurrent ffmpeg runs for the same
 	// (item, track, startSec) so the player's 26-track mount only
@@ -137,6 +144,14 @@ func (h *Handler) Play(w http.ResponseWriter, r *http.Request) {
 	}
 	if startSec > 0 || r.URL.Query().Get("force_transcode") == "1" {
 		mode = "transcode"
+	}
+	// With LIVE_WORKER_MODE on nothing is encoded here, and the progressive
+	// transcode — one long response at real time — cannot be cut into the
+	// worker's segment jobs; no client asks for it (they play the HLS
+	// master). The original's byte ranges stay.
+	if h.Live.On() && (mode == "transcode" || mode == "remux") {
+		http.Error(w, errProgressiveMoved.Error(), http.StatusNotFound)
+		return
 	}
 	w.Header().Set("X-Stream-Mode", mode)
 	metrics.PlayRequests.WithLabelValues(mode).Inc()
@@ -298,6 +313,11 @@ func (h *Handler) EmbeddedSubtitle(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "the package has no WebVTT subtitle "+idxStr, http.StatusNotFound)
 			return
 		}
+		if h.Live.On() {
+			// A WebVTT file already: its cues shifted in Go (webvtt.go).
+			h.serveShiftedSubtitle(w, r, src.pkg.path(sub.Path), itemID+"#sub:"+idxStr)
+			return
+		}
 		// Stream 0 of the subtitle's own file: cached under a key of its
 		// own, the package's sub<idx>.
 		h.serveSubtitleExtract(w, r, src.pkg.path(sub.Path), 0, src.key+"/sub"+idxStr, itemID+"#sub:"+idxStr)
@@ -331,7 +351,132 @@ func (h *Handler) EmbeddedSubtitle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "file missing on filesystem", http.StatusNotFound)
 		return
 	}
+	if h.Live.On() {
+		h.serveLiveSubtitle(w, r, clean, idx, itemID, itemID+"#sub:"+idxStr)
+		return
+	}
 	h.serveSubtitleExtract(w, r, clean, idx, itemID, itemID+"#sub:"+idxStr)
+}
+
+// errProgressiveMoved answers a progressive transcode with LIVE_WORKER_MODE on.
+var errProgressiveMoved = errors.New("progressive transcoding moved to HLS")
+
+// subtitleStart is a subtitle request's ?t=, whole seconds, as it always was.
+func subtitleStart(r *http.Request) int {
+	if v := r.URL.Query().Get("t"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return 0
+}
+
+// subtitleHeaders are a subtitle answer's headers: a document from ?t= on is
+// kept five minutes, from the start an hour.
+func subtitleHeaders(w http.ResponseWriter, startSec int) {
+	w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
+	if startSec > 0 {
+		w.Header().Set("Cache-Control", "public, max-age=300")
+	} else {
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+	}
+}
+
+// serveLiveSubtitle serves the subtitle stream idx of the original src as
+// WebVTT from ?t= on, made by the live worker (POST /v1/subtitle) and cached
+// under key in a folder of the live pipeline's. A stream the worker cannot
+// make (a bitmap one: 422) answers 502, as a failed extraction always did.
+func (h *Handler) serveLiveSubtitle(w http.ResponseWriter, r *http.Request, src string, idx int, key, label string) {
+	startSec := subtitleStart(r)
+	req := api.SubtitleRequest{Source: api.Source{Path: src}, Stream: idx, StartSec: float64(startSec)}
+	produce := func(ctx context.Context) ([]byte, error) { return h.Live.subtitleVTT(ctx, req) }
+	var body []byte
+	var err error
+	if h.CacheDir == "" {
+		body, err = produce(r.Context())
+	} else {
+		path := h.liveSubCachePath(key, idx, startSec)
+		err = h.ensureLiveSubtitle(r.Context(), path, produce)
+		if err == nil {
+			body, err = os.ReadFile(path)
+		}
+	}
+	if err != nil {
+		log.Printf("subtitle %s (live): %v", label, err)
+		status, retry := liveStatus(err)
+		switch status {
+		case http.StatusServiceUnavailable:
+			w.Header().Set("Retry-After", strconv.Itoa(max(1, int((retry+time.Second-1)/time.Second))))
+			http.Error(w, "subtitle extract busy", status)
+		case http.StatusGatewayTimeout:
+			http.Error(w, "subtitle extract timed out", status)
+		default:
+			http.Error(w, "subtitle extract failed", http.StatusBadGateway)
+		}
+		return
+	}
+	subtitleHeaders(w, startSec)
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+}
+
+// ensureLiveSubtitle writes produce's document to path unless it is there,
+// one at a time per path.
+func (h *Handler) ensureLiveSubtitle(ctx context.Context, path string, produce func(context.Context) ([]byte, error)) error {
+	if st, err := os.Stat(path); err == nil && st.Size() > 0 {
+		return nil
+	}
+	mu := h.subLockFor(path)
+	mu.Lock()
+	defer mu.Unlock()
+	if st, err := os.Stat(path); err == nil && st.Size() > 0 {
+		return nil
+	}
+	body, err := produce(ctx)
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(path, body)
+}
+
+// liveSubCachePath is subCachePath's folder of the live pipeline.
+func (h *Handler) liveSubCachePath(itemID string, idx, startSec int) string {
+	hash := sha1.Sum([]byte(itemID))
+	id := hex.EncodeToString(hash[:8])
+	return filepath.Join(h.CacheDir, id, "sub"+liveSuffix, fmt.Sprintf("%d_%d.vtt", idx, startSec))
+}
+
+// maxPackageSubtitle bounds a package's WebVTT file read whole to be shifted.
+const maxPackageSubtitle = 16 << 20
+
+// serveShiftedSubtitle serves a package's WebVTT file from ?t= on, its cues
+// shifted in Go (webvtt.go).
+func (h *Handler) serveShiftedSubtitle(w http.ResponseWriter, r *http.Request, path, label string) {
+	startSec := subtitleStart(r)
+	st, err := os.Stat(path)
+	if err != nil {
+		http.Error(w, "subtitle file missing", http.StatusNotFound)
+		return
+	}
+	if st.Size() > maxPackageSubtitle {
+		http.Error(w, "subtitle file too large", http.StatusBadGateway)
+		return
+	}
+	doc, err := os.ReadFile(path)
+	if err == nil {
+		doc, err = shiftWebVTT(doc, float64(startSec))
+	}
+	countRemux("subtitle", err)
+	if err != nil {
+		log.Printf("subtitle %s (live): %v", label, err)
+		http.Error(w, "subtitle extract failed", http.StatusBadGateway)
+		return
+	}
+	subtitleHeaders(w, startSec)
+	w.Header().Set("Content-Length", strconv.Itoa(len(doc)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(doc)
 }
 
 // serveSubtitleExtract serves the subtitle stream idx of the file src as
@@ -577,7 +722,19 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 	// say "passthrough" for h264 sources even when the player is
 	// going to be routed to remux because of multichannel audio.
 	mode, reason := probe.DecideWith(infoCaps)
+	mode, reason = liveDecision(h.Live, &probe, mode, reason)
 	h.writeSourceInfo(w, filepath.Base(clean), &probe, mode, reason, nil)
+}
+
+// liveDecision is the mode of an original whose sessions go to the live
+// pipeline (LIVE_WORKER_MODE on): one the stream copy would serve but whose
+// container mp4ff cannot read is remuxed instead (the transcode ladder, no
+// quality menu), as Matroska always was. Any other mode as decided.
+func liveDecision(lw *LiveWorker, p *Probe, mode, reason string) (string, string) {
+	if lw.On() && mode == "passthrough" && !isoBMFF(p.Container) {
+		return "remux", "container (" + p.Container + ") needs repackaging to fragmented MP4 — video and audio are re-encoded (on-the-fly streaming cannot stream-copy video yet)"
+	}
+	return mode, reason
 }
 
 // writeSourceInfo answers /play/info for an on-the-fly source: its file

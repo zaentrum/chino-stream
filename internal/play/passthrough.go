@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -102,19 +103,31 @@ func buildPassPlan(ctx context.Context, ffprobeBin, src string) (*passPlan, erro
 	if len(kf) == 0 {
 		return nil, fmt.Errorf("source has no detectable keyframes")
 	}
+	segs, _ := groupKeyframes(kf, durMs)
+	return &passPlan{DurationMs: durMs, Segments: segs}, nil
+}
+
+// groupKeyframes groups the keyframe times kf (seconds, ascending, at least
+// one) into the plan's segments: each from a keyframe to the first one at
+// least passTargetSec after it, the last to the end of a source of durMs.
+// starts holds each segment's keyframe, an index of kf. The Go remux of the
+// stream copy groups its keyframes alike (remuxcopy.go).
+func groupKeyframes(kf []float64, durMs int64) (segs []passSegment, starts []int) {
 	durSec := float64(durMs) / 1000.0
-	segs := make([]passSegment, 0, len(kf)/2+1)
-	lastStart := kf[0]
+	segs = make([]passSegment, 0, len(kf)/2+1)
+	lastStart, lastIdx := kf[0], 0
 	for i := 1; i < len(kf); i++ {
 		if kf[i]-lastStart >= passTargetSec {
 			segs = append(segs, passSegment{StartSec: lastStart, DurSec: kf[i] - lastStart})
-			lastStart = kf[i]
+			starts = append(starts, lastIdx)
+			lastStart, lastIdx = kf[i], i
 		}
 	}
 	if durSec > lastStart+0.001 {
 		segs = append(segs, passSegment{StartSec: lastStart, DurSec: durSec - lastStart})
+		starts = append(starts, lastIdx)
 	}
-	return &passPlan{DurationMs: durMs, Segments: segs}, nil
+	return segs, starts
 }
 
 // keyframesViaMp4ff reads keyframe timestamps from the MP4 sample
@@ -275,7 +288,17 @@ func (h *HLSHandler) PassthroughPlaylist(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	itemID := src.key
-	plan, err := h.loadOrBuildPlan(r.Context(), itemID, src.file)
+	var plan *passPlan
+	var err error
+	if h.pinned(r) {
+		// The Go remux's plan: the same keyframes, grouped alike.
+		var ix *copyIndex
+		if ix, err = loadCopyIndex(src.file, src.probe.DurationMs); err == nil {
+			plan = ix.plan
+		}
+	} else {
+		plan, err = h.loadOrBuildPlan(r.Context(), itemID, src.file)
+	}
 	if err != nil {
 		log.Printf("passthrough plan %s: %v", itemID, err)
 		http.Error(w, "plan failed", http.StatusBadGateway)
@@ -318,6 +341,16 @@ func (h *HLSHandler) PassthroughInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	itemID := src.key
+	if h.pinned(r) {
+		initPath, err := h.liveCopyInit(r.Context(), src)
+		if err != nil {
+			log.Printf("passthrough init %s (live): %v", itemID, err)
+			http.Error(w, "init failed", http.StatusBadGateway)
+			return
+		}
+		h.serveCached(w, r, initPath, "video/mp4")
+		return
+	}
 	initPath := h.cachePath(itemID, "copy-"+copyPipelineVersion, "init")
 	if err := h.ensurePassthroughInit(r.Context(), src.file, initPath); err != nil {
 		log.Printf("passthrough init %s: %v", itemID, err)
@@ -325,6 +358,38 @@ func (h *HLSHandler) PassthroughInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.serveCached(w, r, initPath, "video/mp4")
+}
+
+// liveCopyInit makes the init of the Go remux of the stream copy of src be in
+// the cache ("copy-lw1"), and returns its path.
+func (h *HLSHandler) liveCopyInit(ctx context.Context, src *source) (string, error) {
+	path := h.cachePath(src.key, "copy"+liveSuffix, "init")
+	err := h.ensureCached(ctx, path, func(w io.Writer) error {
+		ix, err := loadCopyIndex(src.file, src.probe.DurationMs)
+		if err != nil {
+			return err
+		}
+		_, err = w.Write(ix.init)
+		return err
+	})
+	countRemux("copy-init", err)
+	return path, err
+}
+
+// liveCopySegment makes plan segment seg of the Go remux of the stream copy of
+// src be in the cache, and returns its path.
+func (h *HLSHandler) liveCopySegment(ctx context.Context, src *source, ix *copyIndex, seg int) (string, error) {
+	path := h.cachePath(src.key, "copy"+liveSuffix, strconv.Itoa(seg))
+	err := h.ensureCached(ctx, path, func(w io.Writer) error {
+		b, err := ix.segment(seg)
+		if err != nil {
+			return err
+		}
+		_, err = w.Write(b)
+		return err
+	})
+	countRemux("copy-segment", err)
+	return path, err
 }
 
 func (h *HLSHandler) ensurePassthroughInit(ctx context.Context, src, initPath string) error {
@@ -393,6 +458,26 @@ func (h *HLSHandler) PassthroughSegment(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	itemID = src.key
+	if h.pinned(r) {
+		ix, err := loadCopyIndex(src.file, src.probe.DurationMs)
+		if err != nil {
+			log.Printf("passthrough plan %s (live): %v", itemID, err)
+			http.Error(w, "plan failed", http.StatusBadGateway)
+			return
+		}
+		if seg >= len(ix.plan.Segments) {
+			http.Error(w, "segment past end", http.StatusNotFound)
+			return
+		}
+		path, err := h.liveCopySegment(r.Context(), src, ix, seg)
+		if err != nil {
+			log.Printf("passthrough seg %s/%d (live): %v", itemID, seg, err)
+			http.Error(w, "segment failed", http.StatusBadGateway)
+			return
+		}
+		h.serveCached(w, r, path, "video/iso.segment")
+		return
+	}
 	plan, err := h.loadOrBuildPlan(r.Context(), itemID, src.file)
 	if err != nil {
 		log.Printf("passthrough plan %s: %v", itemID, err)
@@ -410,6 +495,9 @@ func (h *HLSHandler) PassthroughSegment(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	h.serveCached(w, r, cachePath, "video/iso.segment")
+	if h.Live.shadowing() {
+		h.shadowCopy(src, seg)
+	}
 }
 
 func (h *HLSHandler) ensurePassthroughSegment(ctx context.Context, itemID, src string, plan *passPlan, seg int, cachePath string) error {

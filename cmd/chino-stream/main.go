@@ -16,6 +16,7 @@ import (
 
 	"github.com/zaentrum/chino-stream/internal/catalog"
 	streamhttp "github.com/zaentrum/chino-stream/internal/http"
+	"github.com/zaentrum/chino-stream/internal/play"
 )
 
 func main() {
@@ -40,6 +41,9 @@ func main() {
 		UseNVENC:         cfg.UseNVENC,
 		NVENCPreset:      cfg.NVENCPreset,
 		NVENCCQ:          cfg.NVENCCQ,
+		LiveWorkerURL:    cfg.LiveWorkerURL,
+		LiveWorkerToken:  cfg.LiveWorkerToken,
+		LiveWorkerMode:   cfg.LiveWorkerMode,
 	})
 	if err != nil {
 		log.Fatalf("router: %v", err)
@@ -91,6 +95,12 @@ type Config struct {
 	UseNVENC    bool
 	NVENCPreset string
 	NVENCCQ     string
+	// The live worker (ADR-0013, phase 1): LIVE_WORKER_URL (empty: none),
+	// LIVE_WORKER_TOKEN (its bearer token, optional) and LIVE_WORKER_MODE —
+	// off (the default), shadow or on.
+	LiveWorkerURL   string
+	LiveWorkerToken string
+	LiveWorkerMode  play.LiveWorkerMode
 }
 
 func loadConfig() Config {
@@ -109,10 +119,18 @@ func loadConfig() Config {
 		UseNVENC:          envOr("USE_NVENC", "false") == "true",
 		NVENCPreset:       envOr("NVENC_PRESET", "p5"),
 		NVENCCQ:           envOr("NVENC_CQ", "23"),
+		LiveWorkerURL:     os.Getenv("LIVE_WORKER_URL"),
+		LiveWorkerToken:   os.Getenv("LIVE_WORKER_TOKEN"),
 	}
 	if c.KatalogAPIBaseURL == "" {
 		log.Fatal("KATALOG_API_BASE_URL is required")
 	}
+	mode, err := play.ParseLiveWorkerMode(os.Getenv("LIVE_WORKER_MODE"))
+	if err != nil {
+		// The safe default: every session on ffmpeg, as before the worker.
+		log.Printf("ERROR: %v — the live worker stays off", err)
+	}
+	c.LiveWorkerMode = mode
 	return c
 }
 

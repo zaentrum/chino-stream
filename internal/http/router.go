@@ -39,6 +39,12 @@ type Deps struct {
 	UseNVENC    bool
 	NVENCPreset string
 	NVENCCQ     string
+	// The live worker (ADR-0013, phase 1; play/liveworker.go): its URL
+	// (empty: none, every on-the-fly session plays on ffmpeg), its bearer
+	// token and LIVE_WORKER_MODE.
+	LiveWorkerURL   string
+	LiveWorkerToken string
+	LiveWorkerMode  play.LiveWorkerMode
 }
 
 func NewRouter(d Deps) (http.Handler, error) {
@@ -58,8 +64,26 @@ func NewRouter(d Deps) (http.Handler, error) {
 	// such an image never replaces a working pod. /healthz stays up — a
 	// restart would not add an encoder.
 	aacEncoder, aacErr := play.DetectAACEncoder(context.Background(), d.FFmpegBin)
+	// The live worker: with LIVE_WORKER_MODE on, new sessions encode nothing
+	// here, and an ffmpeg without an AAC encoder only fails the sessions an
+	// earlier mode left on it, so /readyz no longer waits for one.
+	var live *play.LiveWorker
+	if d.LiveWorkerURL != "" {
+		live = play.NewLiveWorker(d.LiveWorkerURL, d.LiveWorkerToken, d.LiveWorkerMode)
+		log.Printf("live worker %s, mode %s", d.LiveWorkerURL, live.Mode())
+	} else if d.LiveWorkerMode != "" && d.LiveWorkerMode != play.LiveWorkerOff {
+		log.Printf("LIVE_WORKER_MODE %s without LIVE_WORKER_URL: off", d.LiveWorkerMode)
+	}
+	notReady := aacErr
+	if live.On() {
+		notReady = nil
+	}
 	if aacErr != nil {
-		log.Printf("ERROR: %v — on-the-fly audio cannot be encoded, /readyz answers 503", aacErr)
+		if notReady != nil {
+			log.Printf("ERROR: %v — on-the-fly audio cannot be encoded, /readyz answers 503", aacErr)
+		} else {
+			log.Printf("WARNING: %v — sessions left on ffmpeg cannot encode audio", aacErr)
+		}
 	} else {
 		log.Printf("on-the-fly audio: AAC-LC via %s", aacEncoder)
 	}
@@ -79,6 +103,7 @@ func NewRouter(d Deps) (http.Handler, error) {
 		// Share the HLS cache root so subtitle .vtt extracts go
 		// through the same disk budget + sweeper as HLS segments.
 		CacheDir: d.HLSCacheDir,
+		Live:     live,
 	}
 	hlsH := &play.HLSHandler{
 		Catalog:         d.Catalog,
@@ -92,6 +117,7 @@ func NewRouter(d Deps) (http.Handler, error) {
 		NVENCPreset:     d.NVENCPreset,
 		NVENCCQ:         d.NVENCCQ,
 		AACEncoder:      aacEncoder,
+		Live:            live,
 	}
 	// Sweep cached segments older than 2 h every 10 min. Tunable later
 	// when usage scales past one user.
@@ -110,8 +136,8 @@ func NewRouter(d Deps) (http.Handler, error) {
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
 	r.Get("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if aacErr != nil {
-			http.Error(w, "not ready: "+aacErr.Error(), http.StatusServiceUnavailable)
+		if notReady != nil {
+			http.Error(w, "not ready: "+notReady.Error(), http.StatusServiceUnavailable)
 			return
 		}
 		_, _ = w.Write([]byte("ok\n"))
