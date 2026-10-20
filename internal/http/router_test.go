@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/zaentrum/chino-stream/internal/play"
 )
 
 // The router's request log (stdout) blanks out the stream token and the
@@ -67,5 +69,46 @@ func TestReadyzNeedsAnAACEncoder(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// With LIVE_WORKER_MODE on nothing of a new session is encoded here, so
+// /readyz no longer waits for an AAC encoder; with the worker off or shadowed
+// it does, as before — and the worker's own readiness never gates it (with
+// the worker down only live encodes may fail).
+func TestReadyzWithTheLiveWorker(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake ffmpeg is a shell script")
+	}
+	ffmpeg := filepath.Join(t.TempDir(), "ffmpeg")
+	if err := os.WriteFile(ffmpeg, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(down.Close)
+	for mode, want := range map[play.LiveWorkerMode]int{
+		play.LiveWorkerOn: http.StatusOK, play.LiveWorkerShadow: http.StatusServiceUnavailable, play.LiveWorkerOff: http.StatusServiceUnavailable,
+	} {
+		h, err := NewRouter(Deps{FFmpegBin: ffmpeg, FFprobeBin: "ffprobe", HLSCacheDir: t.TempDir(), LiveWorkerURL: down.URL, LiveWorkerMode: mode})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+		if w.Code != want {
+			t.Errorf("%s: /readyz %d %q, want %d", mode, w.Code, w.Body, want)
+		}
+	}
+	// A mode without a worker to send anything to is no mode at all.
+	h, err := NewRouter(Deps{FFmpegBin: ffmpeg, FFprobeBin: "ffprobe", HLSCacheDir: t.TempDir(), LiveWorkerMode: play.LiveWorkerOn})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("on without a URL: /readyz %d", w.Code)
 	}
 }
