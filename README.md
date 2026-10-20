@@ -26,6 +26,10 @@ internal/play/                  # playback core
   hls.go / transcode.go         #   on-demand HLS + ffmpeg/NVENC encoder args
   source.go                     #   what on-the-fly reads: the original, else the package
   window.go                     #   a window's segments served as ffmpeg finishes them
+  liveworker.go / live.go       #   the live worker: its calls, and the live pipeline of the on-the-fly routes
+  liveshadow.go                 #   LIVE_WORKER_MODE shadow's checks
+  remuxcopy.go / remuxaudio.go  #   the stream copy and a package's audio, remuxed in Go
+  webvtt.go                     #   a package's subtitle, shifted in Go
   ffprobe.go                    #   source probing
   zappool.go                    #   zap-feed warm-pool
 internal/pkgmanifest/           # a package's manifest.json, and a library package.json read as one
@@ -39,7 +43,7 @@ Dockerfile
 | Method | Path                                         | Purpose                             |
 |--------|----------------------------------------------|-------------------------------------|
 | GET    | `/healthz`                                   | liveness                            |
-| GET    | `/readyz`                                    | readiness: 503 while ffmpeg has no AAC encoder |
+| GET    | `/readyz`                                    | readiness: 503 while ffmpeg has no AAC encoder (not with `LIVE_WORKER_MODE` on) |
 | GET    | `/metrics`                                   | Prometheus metrics                  |
 | GET    | `/api/play/{itemId}`                         | playback (packaged or transcoded)   |
 | GET    | `/api/play/{itemId}/info`                    | playback info / capabilities        |
@@ -61,7 +65,8 @@ Dockerfile
 Every `/api/play` route takes a bearer or `?stream=<token>` (chino-api's
 stream token). The URIs inside a playlist carry the request's query, so the
 token, `caps` and `q` ride along on every fetch — and `v`, the version a
-session is pinned to.
+session is pinned to, and `lw=1` on a session of the live pipeline
+([below](#the-live-worker)).
 
 ## Where a title plays from
 
@@ -116,6 +121,67 @@ A window of the on-the-fly pipeline is ten 6 s segments encoded by one
 ffmpeg run; each segment is served as soon as it is finished, so the first
 segment of a window comes within about a second — not when the window is
 done. A window nobody asks for any more for 20 s is given up.
+
+## The live worker
+
+ADR-0013 (live rungs beside the package, as a supervised safety net), phase
+1: chino-stream starts no encoder; every live encode goes to the live-worker
+service, a supervised pool of warm worker processes, through its own `api`
+and `client` packages. `LIVE_WORKER_URL` names it and `LIVE_WORKER_MODE` turns
+it on, one instance at a time:
+
+- `off` (the default) — the ffmpeg pipelines above, byte for byte; the
+  worker is never asked for anything.
+- `shadow` — ffmpeg serves as with `off`; once it has served a segment, the
+  worker is asked for the same one at prefetch priority (only on a slot it
+  has to spare), and what comes back is checked and dropped: the grid's
+  boundary, a rung's codec configuration the same in every segment, ffmpeg's
+  frames. The Go remuxes below are checked against ffmpeg's segments alike.
+- `on` — new on-the-fly sessions go to the live pipeline.
+
+The live pipeline of a session:
+
+- **Video, and an original's audio**: one worker job per segment, on the grid
+  the playlists always had (`floor(d/6)` segments of 6 s and a tail over
+  0.5 s), with the frame and bitrate the master advertises; `init.mp4` is
+  `POST /v1/init`. Serving segment *k*, the next three are asked for at
+  prefetch priority; a master's or `/prewarm`'s warm asks for the init and
+  three segments from `t`. Deadlines: 12 s a playhead segment, 10 s an init,
+  30 s a prefetch, 120 s a subtitle; a playhead call the worker has no slot
+  for is made once more after `Retry-After`, a refused or reset connection
+  once more after 200 ms. The player gets 404 for a segment the source cannot
+  make (it falls back), 503 with `Retry-After`, 504, or 502. A fragment whose
+  codec hash is not the rung's cached init's is asked for once more, else 502.
+- **A package's audio**: the stereo rendition's own AAC frames presented in
+  each segment, remuxed in Go (mp4ff) with their own timestamps; the init is
+  the rendition's.
+- **The stream copy**: remuxed in Go — the init from the original's `moov`,
+  each segment its samples read by byte range — on the plan the ffmpeg path
+  makes; a fragmented original's keyframes come from its `trun` flags. An
+  original mp4ff cannot read (MPEG-TS, FLV) takes the transcode ladder
+  (remux), as Matroska does.
+- **Embedded subtitles**: an original's are the worker's (`POST
+  /v1/subtitle`; a bitmap stream is 502, as before); a package's WebVTT is
+  shifted in Go.
+- The progressive `/api/play/{id}` transcode answers 404 "progressive
+  transcoding moved to HLS"; its byte ranges of the original stay. ffprobe's
+  header probe stays.
+
+A session keeps its pipeline: the on-the-fly master of a session sent to the
+live pipeline writes `lw=1` into its URIs, as it writes `v=`, so a flip of
+the flag changes new sessions only and a session in flight ends on the
+pipeline it began on. The live pipeline's files are cached in folders of
+their own (`high-lw1`, `audio-0-lw1`, `copy-lw1`, `sub-lw1`). With the worker
+not ready (`/readyz`), a new session goes to ffmpeg. Without
+`LIVE_WORKER_URL` there is no live pipeline, and `lw` means nothing.
+
+Metrics: `katalog_stream_live_worker_requests_total` and
+`katalog_stream_live_worker_request_duration_seconds` (`kind`, `track`,
+`priority`, `result`), `katalog_stream_live_worker_retries_total` (`kind`,
+`reason`), `katalog_stream_live_worker_fallbacks_total` (`reason`: `unready`,
+`refused`), `katalog_stream_live_worker_inflight`,
+`katalog_stream_live_worker_shadow_checks_total` (`track`, `result`) and
+`katalog_stream_remux_total` (`kind`, `result`).
 
 ## Packaged playback: what a client is served
 
@@ -316,6 +382,9 @@ All config is environment-driven (defaults in parentheses):
 | `TRANSCODE_PRESET`     | `veryfast`                                            |
 | `USE_NVENC`            | `false`                                              |
 | `NVENC_PRESET` / `NVENC_CQ` | `p5` / `23`                                     |
+| `LIVE_WORKER_URL`      | (none) — the live worker, e.g. `http://live-worker`  |
+| `LIVE_WORKER_MODE`     | `off` — `off`, `shadow` or `on` ([above](#the-live-worker)) |
+| `LIVE_WORKER_TOKEN`    | (none) — the worker's bearer token                   |
 
 ## Local development
 
