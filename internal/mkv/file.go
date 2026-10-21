@@ -1,6 +1,7 @@
 package mkv
 
 import (
+	"errors"
 	"fmt"
 	"io"
 )
@@ -237,10 +238,13 @@ func (o *opener) walk() error {
 		}
 		h, err := o.header(at)
 		if err != nil {
-			continue // a SeekHead pointing at nothing: an index lost, not a broken file
+			if errors.Is(err, ErrFormat) {
+				continue // a SeekHead pointing at nothing: an index lost, not a broken file
+			}
+			return err // the file could not be read: not its format
 		}
 		if err := o.element(at, h); err != nil {
-			if h.id == idCues {
+			if h.id == idCues && errors.Is(err, ErrFormat) {
 				// A damaged index: the file has none to go by.
 				f.Cues, f.CuesPos = nil, -1
 				continue
@@ -258,10 +262,10 @@ func (o *opener) header(pos int64) (header, error) {
 			return h, err
 		}
 	}
-	b := make([]byte, min(16, o.f.Size-pos))
-	if len(b) <= 0 {
+	if pos < 0 || pos >= o.f.Size {
 		return header{}, formatErr("element at %d past the end", pos)
 	}
+	b := make([]byte, min(16, o.f.Size-pos))
 	if _, err := o.r.ReadAt(b, pos); err != nil && err != io.EOF {
 		return header{}, err
 	}
@@ -277,6 +281,9 @@ func (o *opener) header(pos int64) (header, error) {
 
 // payload is the payload of the known-size element at pos.
 func (o *opener) payload(pos int64, h header, limit int64) ([]byte, error) {
+	if h.size < 0 {
+		return nil, formatErr("element 0x%x at %d of unknown size", h.id, pos)
+	}
 	if h.size > limit {
 		return nil, formatErr("element 0x%x at %d of %d bytes", h.id, pos, h.size)
 	}

@@ -54,6 +54,10 @@ type Reader struct {
 // DefaultChunk is a Reader's read size unless set.
 const DefaultChunk = 1 << 20
 
+// MaxBlock bounds one block (a SimpleBlock's or a Block's payload): a block
+// said to be larger is damage, not a frame, and nothing is read for it.
+const MaxBlock = 256 << 20
+
 // Blocks is a Reader of r (the file f) from the Cluster at the absolute
 // position from to the end of the Segment.
 func (f *File) Blocks(r io.ReaderAt, from int64) *Reader {
@@ -70,15 +74,18 @@ func (rd *Reader) BytesRead() int64 { return rd.read }
 // at when it does not (less at the end of the file); ok false when the file
 // ends before at+n.
 func (rd *Reader) ensure(at int64, n int64) (bool, error) {
+	if at < 0 || n < 0 || at > rd.f.Size || n > rd.f.Size-at {
+		return false, nil // past the end of the file
+	}
+	if n > MaxBlock+blockHead {
+		return false, formatErr("a read of %d bytes at %d", n, at)
+	}
 	if at >= rd.bufAt && at+n <= rd.bufAt+int64(len(rd.buf)) {
 		return true, nil
 	}
 	size := max(n, int64(rd.Chunk))
 	if at+size > rd.f.Size {
 		size = rd.f.Size - at
-	}
-	if size < n {
-		return false, nil
 	}
 	b := make([]byte, size)
 	got, err := rd.r.ReadAt(b, at)
@@ -102,21 +109,19 @@ func (rd *Reader) bytesAt(at, n int64) ([]byte, bool, error) {
 	return rd.buf[at-rd.bufAt:], true, nil
 }
 
-// headerAt reads the element header at the absolute position at.
+// headerAt reads the element header at the absolute position at; ok false
+// at the end of the file, or for a header it cuts short.
 func (rd *Reader) headerAt(at int64) (header, bool, error) {
+	if at < 0 || at >= rd.f.Size {
+		return header{}, false, nil
+	}
+	// An ID and a size take 12 bytes at most: the buffer holds them, or all
+	// the file has left.
 	b, ok, err := rd.bytesAt(at, min(12, rd.f.Size-at))
 	if !ok || err != nil {
 		return header{}, false, err
 	}
-	h, ok, err := readHeader(b)
-	if err != nil || ok {
-		return h, ok, err
-	}
-	// The header straddles the buffer's end.
-	if ok, err := rd.ensure(at, min(12, rd.f.Size-at)); !ok || err != nil {
-		return header{}, false, err
-	}
-	return readHeader(rd.buf[at-rd.bufAt:])
+	return readHeader(b)
 }
 
 // Next returns the next block; io.EOF past the last one.
@@ -154,8 +159,14 @@ func (rd *Reader) Next() (*Block, error) {
 		if rd.clusterEnd >= 0 && next > rd.clusterEnd {
 			return nil, formatErr("element 0x%x at %d overruns its cluster", h.id, at)
 		}
+		if next > rd.f.Size {
+			return nil, io.EOF // a file cut short ends with its last whole element
+		}
 		switch h.id {
 		case idTimestamp:
+			if h.size > 8 {
+				return nil, formatErr("cluster timestamp of %d bytes at %d", h.size, at)
+			}
 			b, ok, err := rd.bytesAt(at+int64(h.hlen), h.size)
 			if err != nil {
 				return nil, err
@@ -201,6 +212,9 @@ const blockHead = 11
 // block reads the SimpleBlock or Block whose payload of size bytes starts at
 // at (its element at elem); nil, nil for a file cut short inside it.
 func (rd *Reader) block(elem, at, size int64, simple bool) (*Block, error) {
+	if size > MaxBlock {
+		return nil, formatErr("block at %d of %d bytes", elem, size)
+	}
 	b, ok, err := rd.bytesAt(at, min(size, blockHead))
 	if err != nil {
 		return nil, err
@@ -253,6 +267,9 @@ func (rd *Reader) block(elem, at, size int64, simple bool) (*Block, error) {
 // keyframe).
 func (rd *Reader) group(elem, at, size int64) (*Block, error) {
 	end := at + size
+	if end > rd.f.Size {
+		return nil, io.EOF // cut short inside it
+	}
 	var blk *Block
 	keyframe, duration := true, int64(-1)
 	for pos := at; pos < end; {
@@ -275,6 +292,9 @@ func (rd *Reader) group(elem, at, size int64) (*Block, error) {
 		case idReferenceBlock:
 			keyframe = false
 		case idBlockDuration:
+			if h.size > 8 {
+				return nil, formatErr("BlockDuration of %d bytes at %d", h.size, pos)
+			}
 			b, ok, err := rd.bytesAt(data, h.size)
 			if err != nil {
 				return nil, err
@@ -309,6 +329,8 @@ func unlace(data []byte, lacing byte) ([][]byte, error) {
 	n := int(data[0]) + 1
 	data = data[1:]
 	sizes := make([]int, n)
+	// Every size is checked against the bytes there are as it is read, so no
+	// sum of them overflows: a frame is never larger than its block.
 	switch lacing {
 	case 1: // Xiph: each size but the last as a run of 255s and a final byte
 		for i := 0; i < n-1; i++ {
@@ -320,6 +342,9 @@ func unlace(data []byte, lacing byte) ([][]byte, error) {
 				c := data[0]
 				data = data[1:]
 				s += int(c)
+				if s > len(data) {
+					return nil, formatErr("Xiph lacing: a frame of %d bytes in %d", s, len(data))
+				}
 				if c != 255 {
 					break
 				}
@@ -339,6 +364,9 @@ func unlace(data []byte, lacing byte) ([][]byte, error) {
 			return nil, formatErr("EBML lacing: bad first size")
 		}
 		data = data[m:]
+		if v > uint64(len(data)) {
+			return nil, formatErr("EBML lacing: a frame of %d bytes in %d", v, len(data))
+		}
 		sizes[0] = int(v)
 		for i := 1; i < n-1; i++ {
 			d, m, _, err := readVint(data)
@@ -346,19 +374,20 @@ func unlace(data []byte, lacing byte) ([][]byte, error) {
 				return nil, formatErr("EBML lacing: bad size %d", i)
 			}
 			data = data[m:]
-			sizes[i] = sizes[i-1] + int(int64(d)-(int64(1)<<(7*m-1)-1))
+			s := int64(sizes[i-1]) + int64(d) - (int64(1)<<(7*m-1) - 1)
+			if s < 0 || s > int64(len(data)) {
+				return nil, formatErr("EBML lacing: a frame of %d bytes in %d", s, len(data))
+			}
+			sizes[i] = int(s)
 		}
 	}
 	if lacing != 2 {
 		used := 0
 		for _, s := range sizes[:n-1] {
-			if s < 0 {
-				return nil, formatErr("negative laced frame size")
-			}
 			used += s
-		}
-		if used > len(data) {
-			return nil, formatErr("laced frames of %d bytes in %d", used, len(data))
+			if used > len(data) {
+				return nil, formatErr("laced frames of %d bytes in %d", used, len(data))
+			}
 		}
 		sizes[n-1] = len(data) - used
 	}
