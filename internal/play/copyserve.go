@@ -152,7 +152,7 @@ func (h *HLSHandler) queuePassPlan(src *source) {
 	h.streamIndexes.enqueue(copyScanJob{path: file, size: st.Size(), mtime: st.ModTime(), passPlan: func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 		defer cancel()
-		if _, err := h.loadOrBuildPlan(ctx, key, file); err != nil {
+		if _, err := h.loadOrBuildPlanAt(ctx, key, file, copyScanRate); err != nil {
 			log.Printf("stream copy plan of %s: %v", src.label(), err)
 		}
 	}}, h)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -25,7 +26,7 @@ func TestCopyPlanKeyframesFromTheFFprobeOnPath(t *testing.T) {
 	if _, err := keyframesViaMp4ff(src); err == nil {
 		t.Fatal("mp4ff read an MKV: the test would not reach the ffprobe fallback")
 	}
-	kf, err := probeKeyframes(context.Background(), ffprobe, src)
+	kf, err := probeKeyframes(context.Background(), ffprobe, src, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,12 +40,37 @@ func TestCopyPlanKeyframesFromTheFFprobeOnPath(t *testing.T) {
 		}
 	}
 
-	plan, err := buildPassPlan(context.Background(), ffprobe, src)
+	plan, err := buildPassPlan(context.Background(), ffprobe, src, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(plan.Segments) != 2 || math.Abs(plan.Segments[0].DurSec-6) > 0.002 ||
 		math.Abs(plan.Segments[1].StartSec-6) > 0.002 || math.Abs(plan.Segments[1].DurSec-4) > 0.05 {
 		t.Errorf("plan %+v, want [0,6) and [6,10)", plan.Segments)
+	}
+}
+
+// The background build of an MPEG-TS original's plan reads it through its
+// standard input at a set rate, its ffprobe at the lowest CPU priority: the
+// keyframes it finds are the ones read from the file.
+func TestCopyPlanKeyframesReadAtARate(t *testing.T) {
+	ffmpeg, ffprobe := realFFmpeg(t)
+	if !allEncoders(t, ffmpeg)["libx264"] {
+		t.Skip("this ffmpeg has no libx264")
+	}
+	src := filepath.Join(t.TempDir(), "gop2s.ts")
+	run(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+		"-i", "testsrc2=size=320x180:rate=24:duration=10",
+		"-c:v", "libx264", "-preset", "ultrafast", "-g", "48", "-keyint_min", "48", "-sc_threshold", "0", "-f", "mpegts", src)
+	want, err := probeKeyframes(context.Background(), ffprobe, src, 0)
+	if err != nil || len(want) != 5 {
+		t.Fatalf("keyframes %v: %v", want, err)
+	}
+	got, err := probeKeyframes(context.Background(), ffprobe, src, 64<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("read at a rate: keyframes %v, from the file %v", got, want)
 	}
 }

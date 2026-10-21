@@ -147,7 +147,7 @@ func TestLiveStreamCopyIsRemuxedInGo(t *testing.T) {
 func TestCopyRemuxPlanIsTheFFmpegPaths(t *testing.T) {
 	ffmpeg, ffprobe := realFFmpeg(t)
 	_, file := copyOriginal(t, ffmpeg, false)
-	want, err := buildPassPlan(context.Background(), ffprobe, file)
+	want, err := buildPassPlan(context.Background(), ffprobe, file, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

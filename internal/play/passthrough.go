@@ -1,6 +1,7 @@
 package play
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -52,6 +53,13 @@ type passPlan struct {
 // one via ffprobe on a miss. The plan is small (~few KB per movie) so
 // we just JSON-encode it next to the segment cache.
 func (h *HLSHandler) loadOrBuildPlan(ctx context.Context, itemID, src string) (*passPlan, error) {
+	return h.loadOrBuildPlanAt(ctx, itemID, src, 0)
+}
+
+// loadOrBuildPlanAt is loadOrBuildPlan reading an original without sample
+// tables through at rate bytes/s for its keyframes, its ffprobe at the
+// lowest CPU priority (0: as fast as it goes).
+func (h *HLSHandler) loadOrBuildPlanAt(ctx context.Context, itemID, src string, rate int64) (*passPlan, error) {
 	planPath := h.cachePath(itemID, "copy-"+copyPipelineVersion, "plan")
 	if b, err := os.ReadFile(planPath); err == nil {
 		var p passPlan
@@ -68,7 +76,7 @@ func (h *HLSHandler) loadOrBuildPlan(ctx context.Context, itemID, src string) (*
 			return &p, nil
 		}
 	}
-	plan, err := buildPassPlan(ctx, h.FFprobeBin, src)
+	plan, err := buildPassPlan(ctx, h.FFprobeBin, src, rate)
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +98,7 @@ func (h *HLSHandler) loadOrBuildPlan(ctx context.Context, itemID, src string) (*
 // fallback exists for non-MP4 containers but the on-demand /copy/ path
 // is only viable when ffmpeg can stream-copy from the source, so in
 // practice nearly everything that lands here is .mp4 / .m4v / .mov.
-func buildPassPlan(ctx context.Context, ffprobeBin, src string) (*passPlan, error) {
+func buildPassPlan(ctx context.Context, ffprobeBin, src string, rate int64) (*passPlan, error) {
 	durMs, err := probeDurationMs(ctx, ffprobeBin, src)
 	if err != nil {
 		return nil, fmt.Errorf("probe duration: %w", err)
@@ -98,7 +106,7 @@ func buildPassPlan(ctx context.Context, ffprobeBin, src string) (*passPlan, erro
 	kf, err := keyframesViaMp4ff(src)
 	if err != nil {
 		log.Printf("mp4ff keyframes %s: %v — falling back to ffprobe", filepath.Base(src), err)
-		kf, err = probeKeyframes(ctx, ffprobeBin, src)
+		kf, err = probeKeyframes(ctx, ffprobeBin, src, rate)
 		if err != nil {
 			return nil, fmt.Errorf("probe keyframes: %w", err)
 		}
@@ -235,19 +243,46 @@ func probeDurationMs(ctx context.Context, ffprobeBin, src string) (int64, error)
 // output may include a trailing comma on the first row when ffprobe
 // attaches side-data fields, so we split on comma and parse the first
 // token rather than the raw line.
-func probeKeyframes(ctx context.Context, ffprobeBin, src string) ([]float64, error) {
+//
+// With a rate (bytes/s), ffprobe reads the file from its standard input at
+// that rate, at the lowest CPU priority: a background build that leaves the
+// storage and the CPU to playback.
+func probeKeyframes(ctx context.Context, ffprobeBin, src string, rate int64) ([]float64, error) {
+	input := src
+	var stdin io.Reader
+	if rate > 0 {
+		f, err := os.Open(src)
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+		st, err := f.Stat()
+		if err != nil {
+			return nil, err
+		}
+		stdin, input = io.NewSectionReader(&rateReader{r: f, rate: rate, start: time.Now()}, 0, st.Size()), "pipe:0"
+	}
 	cmd := exec.CommandContext(ctx, ffprobeBin,
 		"-v", "error",
 		"-select_streams", "v:0",
 		"-skip_frame", "nokey",
 		"-show_entries", "frame=pts_time",
 		"-of", "csv=p=0",
-		src,
+		input,
 	)
-	out, err := cmd.Output()
-	if err != nil {
+	cmd.Stdin = stdin
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
+	if rate > 0 {
+		lowestPriority(cmd.Process.Pid)
+	}
+	if err := cmd.Wait(); err != nil {
+		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	out := stdout.Bytes()
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 	kf := make([]float64, 0, len(lines))
 	for _, l := range lines {

@@ -151,8 +151,9 @@ an encode, and the video is never encoded for the audio's sake:
   stereo one). An original with no track converted encodes nothing.
 - An MP4 original the client takes whole (its video and first audio track)
   stays the muxed stream copy (`copy/`) it always was; so does an MPEG-TS
-  one, its keyframes probed in the background (its first session takes the
-  ladder meanwhile).
+  one, its keyframes probed in the background (read at 32 MiB/s, ffprobe
+  at the lowest CPU priority; its first session takes the ladder
+  meanwhile).
 
 The stream copy (`internal/streamcopy`, `internal/mkv`):
 
