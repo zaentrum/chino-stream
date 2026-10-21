@@ -60,6 +60,9 @@ type Caps struct {
 	// copied to it, and one with such a base layer (8.1, 8.4) is copied as
 	// that base layer. The ?caps= token "dvh".
 	DolbyVision bool
+	// Given says the client sent caps; DefaultCaps, for one that did not, has
+	// no video taller than 1080p copied to it (copyplan.go).
+	Given bool
 }
 
 // MaxVideoHeight returns the tallest frame height the device can HW-
@@ -115,7 +118,7 @@ func ParseCaps(s string) Caps {
 	if s == "" {
 		return DefaultCaps
 	}
-	c := Caps{Video: map[string]bool{}, Audio: map[string]bool{}, VideoMaxHeight: map[string]int{}}
+	c := Caps{Video: map[string]bool{}, Audio: map[string]bool{}, VideoMaxHeight: map[string]int{}, Given: true}
 	for _, raw := range strings.Split(s, ",") {
 		tok := strings.ToLower(strings.TrimSpace(raw))
 		// Split off an optional ":<maxHeight>" suffix. The base parses

@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -290,7 +291,18 @@ func pinnedQuery(raw, versionID string) string {
 }
 
 // goWarm runs a cache warm off the request path. Tests run it in place.
-var goWarm = func(f func()) { go f() }
+var goWarm = func(f func()) {
+	go func() {
+		// A warm is off every request's path: a panic in one is logged with
+		// its stack, not the end of the process.
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("a warm panicked: %v\n%s", r, debug.Stack())
+			}
+		}()
+		f()
+	}()
+}
 
 // manifestHasHDR reports whether any packaged video rendition is HDR.
 func manifestHasHDR(mf *pkgmanifest.Manifest) bool {

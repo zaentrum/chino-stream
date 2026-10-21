@@ -97,11 +97,17 @@ type HLSHandler struct {
 	windows productions
 
 	// streamIndexes are the stream copy's indexes of the originals
-	// (copyindex.go), copyCache the copy segments made, in memory, and
-	// copyWork those made off the request path (copyserve.go).
+	// (copyindex.go), copyCache the copy segments made, in memory, copyMakes
+	// those being made, copyTries their passing failures, copyWork those
+	// made off the request path, and passPlanFails the muxed stream copy
+	// plans that could not be made, until when (copyserve.go).
 	streamIndexes streamIndexStore
 	copyCache     copyCache
+	copyMu        sync.Mutex
+	copyMakes     map[string]*copyMake
+	copyTries     copyTries
 	copyWork      sync.WaitGroup
+	passPlanFails sync.Map // path → time.Time
 }
 
 // segmentSec is the target HLS segment length. 6s is the canonical HLS

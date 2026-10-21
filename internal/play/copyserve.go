@@ -3,11 +3,13 @@ package play
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -78,14 +80,18 @@ func (h *HLSHandler) planOnTheFly(ctx context.Context, src *source, caps Caps, q
 		return onTheFlyPlan{mode: "transcode", reason: encodeReason(sp.videoWhy, audio)}
 	}
 	if sp.muxed {
-		switch {
-		case isoBMFF(p.Container):
+		if isoBMFF(p.Container) {
 			return onTheFlyPlan{mode: "passthrough", reason: "The video and the audio play as they are in the file."}
-		case h.Live.On():
+		}
+		if h.Live.On() {
 			// The live pipeline stream-copies what mp4ff reads only.
 			return onTheFlyPlan{mode: "transcode", reason: encodeReason(formatWhy(p.Container), audio)}
-		case h.passPlanCached(src):
+		}
+		switch h.passPlanState(src) {
+		case planReady:
 			return onTheFlyPlan{mode: "passthrough", reason: "The video and the audio play as they are in the file."}
+		case planFailed:
+			return onTheFlyPlan{mode: "transcode", reason: encodeReason("the file could not be played as it is", audio), fallback: "plan"}
 		}
 		h.queuePassPlan(src)
 		return onTheFlyPlan{mode: "transcode", reason: encodeReason(readThroughWhy, audio), fallback: "index"}
@@ -94,11 +100,15 @@ func (h *HLSHandler) planOnTheFly(ctx context.Context, src *source, caps Caps, q
 		return onTheFlyPlan{mode: "transcode", reason: encodeReason(formatWhy(p.Container), audio)}
 	}
 	ix, state, _ := h.streamIndex(ctx, src)
-	switch state {
-	case indexPending:
+	switch {
+	case state == indexPending:
 		return onTheFlyPlan{mode: "transcode", reason: encodeReason(readThroughWhy, audio), fallback: "index"}
-	case indexFailed:
+	case state == indexFailed || len(ix.Audio) != len(p.AudioTracks):
 		return onTheFlyPlan{mode: "transcode", reason: encodeReason("the file could not be played as it is", audio), fallback: "plan"}
+	}
+	// The file's own Dolby Vision record, whatever the probe said of it.
+	if why := indexDolbyVisionWhy(ix, caps); why != "" {
+		return onTheFlyPlan{mode: "transcode", reason: encodeReason(why, audio)}
 	}
 	for i := range sp.audio {
 		if a := &sp.audio[i]; a.copy && !ix.Audio[i].Copyable() {
@@ -134,28 +144,98 @@ func packageWhy(src *source, caps Caps) string {
 	return "this device does not play " + codecDisplay(p.VideoCodec)
 }
 
-// passPlanCached says whether the muxed stream copy of src (ffmpeg's, for a
-// container mp4ff does not read) has its plan in the cache: its keyframes are
-// probed by reading the file through, which happens in the background.
-func (h *HLSHandler) passPlanCached(src *source) bool {
-	return statOK(h.cachePath(src.key, "copy-"+copyPipelineVersion, "plan"))
+// indexDolbyVisionWhy is why a client with caps is not served the video of
+// the index ix as it is, from the file's own Dolby Vision record (a probe may
+// not say it is there): one with an enhancement layer (profile 7), or one
+// without a base layer other decoders play (profile 5) to a client that does
+// not declare Dolby Vision; "" when it is served.
+func indexDolbyVisionWhy(ix *streamcopy.Index, caps Caps) string {
+	v := ix.Video
+	switch {
+	case v.DVProfile == 7:
+		return "this device does not play Dolby Vision with an enhancement layer"
+	case (v.DVProfile == 5 || v.DVProfile > 0 && v.DVCompatibility == 0) && !caps.DolbyVision:
+		return "this device does not play Dolby Vision"
+	}
+	return ""
 }
 
+// The states of a muxed stream copy's plan of a container mp4ff does not
+// read (MPEG-TS): its keyframes are probed by reading the file through, in
+// the background.
+const (
+	planNone   = iota // not made: queued now
+	planReady         // in the cache, or kept with the persisted indexes
+	planFailed        // the file could not be read for one
+)
+
+// passPlanState is the state of the muxed stream copy's plan of src: in the
+// item's cache, else kept with the persisted indexes (copy-index/, which the
+// cache's sweep leaves alone: put back in the item's cache then), else
+// failed, for a while or until the file changes.
+func (h *HLSHandler) passPlanState(src *source) int {
+	planPath := h.cachePath(src.key, "copy-"+copyPipelineVersion, "plan")
+	if statOK(planPath) {
+		return planReady
+	}
+	st, err := os.Stat(src.file)
+	if err != nil {
+		return planNone
+	}
+	if until, ok := h.passPlanFails.Load(src.file); ok && time.Now().Before(until.(time.Time)) {
+		return planFailed
+	}
+	dir := h.indexDir()
+	if dir == "" {
+		return planNone
+	}
+	p, ok := readPersistedPlan(dir, src.file, st)
+	switch {
+	case !ok:
+		return planNone
+	case p.Failed != "":
+		return planFailed
+	}
+	if b, err := json.Marshal(p.Plan); err != nil || writeFileAtomic(planPath, b) != nil {
+		return planNone
+	}
+	return planReady
+}
+
+// passPlanRetry is how long a muxed stream copy's plan that could not be made
+// (ffprobe could not read the file through) is not tried again.
+const passPlanRetry = time.Hour
+
 // queuePassPlan has the muxed stream copy's plan of src made in the
-// background.
+// background, and kept with the persisted indexes.
 func (h *HLSHandler) queuePassPlan(src *source) {
 	st, err := os.Stat(src.file)
 	if err != nil {
 		return
 	}
 	key, file := src.key, src.file
-	h.streamIndexes.enqueue(copyScanJob{path: file, size: st.Size(), mtime: st.ModTime(), passPlan: func() {
+	j := copyScanJob{path: file, size: st.Size(), mtime: st.ModTime(), dir: h.indexDir()}
+	j.passPlan = func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 		defer cancel()
-		if _, err := h.loadOrBuildPlanAt(ctx, key, file, copyScanRate); err != nil {
-			log.Printf("stream copy plan of %s: %v", src.label(), err)
+		plan, err := h.loadOrBuildPlanAt(ctx, key, file, copyScanRate)
+		if err != nil {
+			log.Printf("stream copy plan of %s: %v — the encode path for %v", src.label(), err, passPlanRetry)
+			h.passPlanFails.Store(file, time.Now().Add(passPlanRetry))
+			return
 		}
-	}}, h)
+		writePersistedPlan(j.dir, file, st, plan, "")
+	}
+	h.streamIndexes.enqueue(j, h)
+}
+
+// passPlanFailed notes that the muxed stream copy's plan of the job's file
+// could not be made (the build panicked): kept until the file changes.
+func (h *HLSHandler) passPlanFailed(j copyScanJob, err error) {
+	h.passPlanFails.Store(j.path, time.Now().Add(passPlanRetry))
+	if st, serr := os.Stat(j.path); serr == nil && st.Size() == j.size && st.ModTime().Equal(j.mtime) {
+		writePersistedPlan(j.dir, j.path, st, nil, err.Error())
+	}
 }
 
 // copyLive says whether a stream copy session converts its audio on the live
@@ -331,8 +411,12 @@ func copyStreamInf(ix *streamcopy.Index, p *Probe, caps Caps, groupID string, ch
 			extra = max(extra, c.bitrate)
 		}
 	}
-	return fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,AVERAGE-BANDWIDTH=%d%s,CODECS=%q,VIDEO-RANGE=%s,AUDIO=%q",
-		peak+extra, avg+extra, resolutionAttr(ix.Video.Width, ix.Video.Height), strings.Join(codecs, ","), videoRange(p), groupID)
+	group := ""
+	if len(choices) > 0 {
+		group = fmt.Sprintf(",AUDIO=%q", groupID) // a file without audio has no group
+	}
+	return fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,AVERAGE-BANDWIDTH=%d%s,CODECS=%q,VIDEO-RANGE=%s%s",
+		peak+extra, avg+extra, resolutionAttr(ix.Video.Width, ix.Video.Height), strings.Join(codecs, ","), videoRange(p), group)
 }
 
 // copyFingerprintOf is the fingerprint of the file the index ix of src is of.
@@ -353,12 +437,15 @@ func (h *HLSHandler) copyRequest(w http.ResponseWriter, r *http.Request) (*sourc
 		http.Error(w, "stream copy needs the original", http.StatusNotFound)
 		return nil, nil, false
 	}
+	// A session begun before its title failed goes on as long as its
+	// segments can be made: the failure sends new sessions to the ladder.
 	ix, state, why := h.streamIndex(r.Context(), src)
-	if state != indexReady {
+	c := r.URL.Query().Get(copyParam)
+	switch {
+	case ix == nil || state != indexReady && c == "":
 		http.Error(w, "no stream copy of this file: "+why, http.StatusNotFound)
 		return nil, nil, false
-	}
-	if c := r.URL.Query().Get(copyParam); c != "" && c != h.copyFingerprintOf(src, ix) {
+	case c != "" && c != h.copyFingerprintOf(src, ix):
 		http.Error(w, "the file changed since the session began", http.StatusNotFound)
 		return nil, nil, false
 	}
@@ -579,21 +666,38 @@ func (h *HLSHandler) copyKey(src *source, ix *streamcopy.Index, n int) string {
 // the file, the title's new sessions take the encode path; one the file
 // could not be read for is 503, to be asked for again.
 func (h *HLSHandler) serveCopySegment(w http.ResponseWriter, r *http.Request, src *source, ix *streamcopy.Index, track, n int) bool {
+	key := h.copyKey(src, ix, n)
+	if h.copyTries.refused(key) {
+		http.Error(w, "segment unavailable", http.StatusNotFound)
+		return false
+	}
 	seg, err := h.ensureCopySegment(r.Context(), src, ix, n, false)
 	if err != nil {
 		if r.Context().Err() != nil {
 			return false
 		}
 		log.Printf("stream copy %s segment %d: %v", src.label(), n, err)
-		if permanentCopyError(err) {
+		switch {
+		case errors.Is(err, errOriginalChanged):
+			http.Error(w, "the file changed since the session began", http.StatusNotFound)
+		case permanentCopyError(err):
+			// The file's: the player steps down, and the title's new sessions
+			// take the encode path; the segment is not made again.
+			h.copyTries.refuse(key, permanentRefusal)
 			h.copyFailed(src, "segment", err)
 			http.Error(w, "segment unavailable", http.StatusNotFound)
-		} else {
+		case h.copyTries.failed(key) >= copySegmentTries:
+			// The storage's, too often: so for a while.
+			h.copyTries.refuse(key, time.Now().Add(copyIndexRetry))
+			h.copyFailed(src, "segment", err)
+			http.Error(w, "segment unavailable", http.StatusNotFound)
+		default:
 			w.Header().Set("Retry-After", "1")
 			http.Error(w, "segment could not be read", http.StatusServiceUnavailable)
 		}
 		return false
 	}
+	h.copyTries.clear(key)
 	b := seg.track(track)
 	if b == nil {
 		http.Error(w, "segment unavailable", http.StatusNotFound)
@@ -617,26 +721,104 @@ var (
 	copyPrefetchSlots = make(chan struct{}, 2)
 )
 
-// retryable says whether a copy segment's error is worth one more try: a
-// read that failed, not the file.
+// copySegmentTries is how many passing failures in a row (the storage failing
+// a read) a copy segment is answered 503 for before the title's new sessions
+// take the encode path and the player is answered 404.
+const copySegmentTries = 3
+
+// copyTries counts the passing failures of copy segments, by key, and
+// keeps the segments that cannot be made, answered 404 at once until when
+// (a player asks for a segment it was answered 404 for again).
+type copyTries struct {
+	mu   sync.Mutex
+	n    map[string]int
+	none map[string]time.Time
+}
+
+// permanentRefusal is the until of a segment the file is the cause of: its
+// key names the file, so it holds until the file changes.
+var permanentRefusal = time.Unix(1<<40, 0)
+
+// failed counts one more passing failure of key, and says how many in a row.
+func (c *copyTries) failed(key string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.n == nil || len(c.n) > 4096 {
+		c.n = map[string]int{}
+	}
+	c.n[key]++
+	return c.n[key]
+}
+
+func (c *copyTries) clear(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.n, key)
+}
+
+// refuse has the segment key answered 404 at once until until.
+func (c *copyTries) refuse(key string, until time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.none == nil || len(c.none) > 4096 {
+		c.none = map[string]time.Time{}
+	}
+	c.none[key] = until
+	delete(c.n, key)
+}
+
+// refused says whether the segment key is answered 404 at once.
+func (c *copyTries) refused(key string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	until, ok := c.none[key]
+	if ok && !time.Now().Before(until) {
+		delete(c.none, key)
+		return false
+	}
+	return ok
+}
+
+// copyMake is a copy segment being made: its result once done is closed.
+type copyMake struct {
+	done chan struct{}
+	seg  *copySegment
+	err  error
+}
+
+// wait is the make's result, or ctx's error when ctx ends first.
+func (m *copyMake) wait(ctx context.Context) (*copySegment, error) {
+	select {
+	case <-m.done:
+		return m.seg, m.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// retryable says whether a copy segment's error is worth one more try at
+// once: a read the storage failed.
 func retryable(err error) bool {
-	return err != nil && !permanentCopyError(err) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+	return err != nil && transientCopyError(err) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
 }
 
 // ensureCopySegment is segment n of the copy of src: the copy cache's, else
 // made — its video and every audio track the copy carries, from one read of
-// the original. One make per segment at a time; background (a prefetch, a
-// warm) takes a slot of its own.
-func (h *HLSHandler) ensureCopySegment(ctx context.Context, src *source, ix *streamcopy.Index, n int, background bool) (*copySegment, error) {
+// the original. One make per segment at a time, which a request for it joins
+// for as long as its context lasts; a make takes its slot before it is
+// registered, so a prefetch waiting for a slot of its own (background) holds
+// up no request for the same segment.
+func (h *HLSHandler) ensureCopySegment(ctx context.Context, src *source, ix *streamcopy.Index, n int, background bool) (seg *copySegment,
+	err error) {
 	key := h.copyKey(src, ix, n)
 	if s := h.copyCache.get(key); s != nil {
 		return s, nil
 	}
-	mu := h.lockFor("copyseg/" + key)
-	mu.Lock()
-	defer mu.Unlock()
-	if s := h.copyCache.get(key); s != nil {
-		return s, nil
+	h.copyMu.Lock()
+	m := h.copyMakes[key]
+	h.copyMu.Unlock()
+	if m != nil {
+		return m.wait(ctx)
 	}
 	slots := copySlots
 	if background {
@@ -647,7 +829,44 @@ func (h *HLSHandler) ensureCopySegment(ctx context.Context, src *source, ix *str
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-	defer func() { <-slots }()
+	h.copyMu.Lock()
+	if m := h.copyMakes[key]; m != nil { // made meanwhile, or being made
+		h.copyMu.Unlock()
+		<-slots
+		return m.wait(ctx)
+	}
+	if s := h.copyCache.get(key); s != nil {
+		h.copyMu.Unlock()
+		<-slots
+		return s, nil
+	}
+	if h.copyMakes == nil {
+		h.copyMakes = map[string]*copyMake{}
+	}
+	m = &copyMake{done: make(chan struct{})}
+	h.copyMakes[key] = m
+	h.copyMu.Unlock()
+
+	// Whatever happens, the slot goes back and the requests that joined get
+	// the make's result.
+	defer func() {
+		if r := recover(); r != nil {
+			m.seg, m.err = nil, recoveredCopy(fmt.Sprintf("segment %d of %s", n, src.label()), r)
+		}
+		<-slots
+		h.copyMu.Lock()
+		delete(h.copyMakes, key)
+		h.copyMu.Unlock()
+		close(m.done)
+		seg, err = m.seg, m.err
+	}()
+	m.seg, m.err = h.makeCopySegment(src, ix, n, key)
+	return m.seg, m.err
+}
+
+// makeCopySegment makes segment n of the copy of src (key) and keeps it in
+// the copy cache: one more try at once when the storage failed a read.
+func (h *HLSHandler) makeCopySegment(src *source, ix *streamcopy.Index, n int, key string) (*copySegment, error) {
 	var tracks []int
 	for i, a := range ix.Audio {
 		if a.Copyable() {
@@ -675,8 +894,20 @@ func (h *HLSHandler) ensureCopySegment(ctx context.Context, src *source, ix *str
 	return seg, nil
 }
 
-// produceCopy makes segment n of the copy of the original at path.
-func produceCopy(path string, ix *streamcopy.Index, n int, tracks []int) (*streamcopy.Output, error) {
+// produceHook, when set (tests), runs before each copy segment is made.
+var produceHook func(n int)
+
+// produceCopy makes segment n of the copy of the original at path: a panic
+// of it an error of the file's.
+func produceCopy(path string, ix *streamcopy.Index, n int, tracks []int) (out *streamcopy.Output, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			out, err = nil, recoveredCopy(fmt.Sprintf("segment %d of %s", n, filepath.Base(path)), r)
+		}
+	}()
+	if produceHook != nil {
+		produceHook(n)
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -687,13 +918,14 @@ func produceCopy(path string, ix *streamcopy.Index, n int, tracks []int) (*strea
 		return nil, err
 	}
 	if st.Size() != ix.Size || st.ModTime().UnixNano() != ix.ModTime {
-		return nil, errors.New("the original changed since it was indexed")
+		return nil, errOriginalChanged
 	}
 	return ix.Produce(f, n, tracks)
 }
 
 // prefetchCopy has segment n of the copy of src made in the background,
-// unless it is there or no prefetch slot is free.
+// unless it is there or no prefetch slot is free. A segment the copy cannot
+// make there fails the title as one asked for would.
 func (h *HLSHandler) prefetchCopy(src *source, ix *streamcopy.Index, n int) {
 	if h.copyCache.get(h.copyKey(src, ix, n)) != nil {
 		return
@@ -701,9 +933,20 @@ func (h *HLSHandler) prefetchCopy(src *source, ix *streamcopy.Index, n int) {
 	h.copyWork.Add(1)
 	goWarm(func() {
 		defer h.copyWork.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				h.copyFailed(src, "segment", recoveredCopy(fmt.Sprintf("the prefetch of segment %d of %s", n, src.label()), r))
+			}
+		}()
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
-		if _, err := h.ensureCopySegment(ctx, src, ix, n, true); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		_, err := h.ensureCopySegment(ctx, src, ix, n, true)
+		switch {
+		case err == nil, errors.Is(err, context.DeadlineExceeded), errors.Is(err, errOriginalChanged):
+		case permanentCopyError(err):
+			h.copyTries.refuse(h.copyKey(src, ix, n), permanentRefusal)
+			h.copyFailed(src, "segment", err)
+		default:
 			log.Printf("stream copy %s prefetch %d: %v", src.label(), n, err)
 		}
 	})

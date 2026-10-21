@@ -59,7 +59,16 @@ func TestCopyDecisionTable(t *testing.T) {
 		// Dolby Vision.
 		{"DV 5, TV", with(ep, func(p *Probe) { p.DVProfile, p.DVCompat = 5, 0 }), tvCaps, false, "does not play Dolby Vision", []bool{true}, false},
 		{"DV 5, a client that declares it", with(ep, func(p *Probe) { p.DVProfile, p.DVCompat = 5, 0 }), ParseCaps("hvc,eac3,aac,dvh"), true, "", []bool{true}, false},
-		{"DV 5 in a dvh1 entry without a record", with(ep, func(p *Probe) { p.Container, p.CodecTag = mp4Format, "dvh1" }), tvCaps, false, "Dolby Vision", []bool{true}, false},
+		// An MP4 of Dolby Vision 5 or 7 plays as it always did: the muxed copy
+		// where the client takes it whole, else the ladder.
+		{"MP4 DV 5 in a dvh1 entry, TV: the muxed copy as before", with(ep, func(p *Probe) { p.Container, p.CodecTag = mp4Format, "dvh1" }), tvCaps,
+			true, "", []bool{true}, true},
+		{"MP4 DV 7, TV: the muxed copy as before", with(ep, func(p *Probe) { p.Container, p.DVProfile, p.DVCompat = mp4Format, 7, 6 }), tvCaps,
+			true, "", []bool{true}, true},
+		{"MP4 DV 5, web (E-AC-3 not played): the ladder as before", with(ep, func(p *Probe) { p.Container, p.DVProfile, p.DVCompat = mp4Format, 5, 0 }),
+			webCaps, false, "Dolby Vision", []bool{false}, false},
+		{"MP4 DV 5 over the height cap: the ladder", with(ep, func(p *Probe) { p.Container, p.DVProfile, p.DVCompat = mp4Format, 5, 0 }),
+			ParseCaps("hvc:1080,eac3"), false, "up to 1080p", []bool{true}, false},
 		{"DV 8.1, TV: its HDR10 base layer", with(ep, func(p *Probe) { p.DVProfile, p.DVCompat, p.ColorTransfer = 8, 1, "smpte2084" }), tvCaps, true, "", []bool{true}, false},
 		{"DV 7, even declared", with(ep, func(p *Probe) { p.DVProfile, p.DVCompat = 7, 6 }), ParseCaps("hvc,eac3,dvh"), false, "enhancement layer", []bool{true}, false},
 		{"HDR10 HEVC, web", with(ep, func(p *Probe) { p.ColorTransfer = "smpte2084" }), webCaps, true, "", []bool{false}, false},
@@ -92,6 +101,16 @@ func TestCopyDecisionTable(t *testing.T) {
 			Width: 1920, Height: 1080, AudioCodec: "aac", AudioTracks: audioTrack("aac", 2)}, webCaps, true, "", []bool{true}, true},
 		{"MP4 H.264 + AAC, H.264-only", Probe{Container: mp4Format, VideoCodec: "h264", VideoProfile: "Main", PixFmt: "yuv420p", Width: 1280, Height: 720,
 			AudioCodec: "aac", AudioTracks: audioTrack("aac", 2)}, h264Caps, true, "", []bool{true}, true},
+		// A client that sends no caps: video copied up to 1080p.
+		{"no caps, MKV H.264 1080p", Probe{Container: mkvFormat, VideoCodec: "h264", VideoProfile: "High", PixFmt: "yuv420p", Width: 1920,
+			Height: 1080, AudioCodec: "aac", AudioTracks: audioTrack("aac", 2)}, ParseCaps(""), true, "", []bool{true}, false},
+		{"no caps, MKV H.264 2160p", Probe{Container: mkvFormat, VideoCodec: "h264", VideoProfile: "High", PixFmt: "yuv420p", Width: 3840,
+			Height: 2160, AudioCodec: "aac", AudioTracks: audioTrack("aac", 2)}, ParseCaps(""), false, "taller than 1080p", []bool{true}, false},
+		{"no caps, MP4 H.264 2160p: not the muxed copy either", Probe{Container: mp4Format, VideoCodec: "h264", VideoProfile: "High",
+			PixFmt: "yuv420p", Width: 3840, Height: 2160, AudioCodec: "aac", AudioTracks: audioTrack("aac", 2)}, ParseCaps(""), false,
+			"taller than 1080p", []bool{true}, false},
+		{"caps given, MKV H.264 2160p", Probe{Container: mkvFormat, VideoCodec: "h264", VideoProfile: "High", PixFmt: "yuv420p", Width: 3840,
+			Height: 2160, AudioCodec: "aac", AudioTracks: audioTrack("aac", 2)}, h264Caps, true, "", []bool{true}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sp := planStreams(&tc.probe, tc.caps)

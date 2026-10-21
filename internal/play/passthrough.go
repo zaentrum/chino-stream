@@ -76,6 +76,18 @@ func (h *HLSHandler) loadOrBuildPlanAt(ctx context.Context, itemID, src string, 
 			return &p, nil
 		}
 	}
+	// A plan kept with the persisted indexes (an MPEG-TS original's, whose
+	// item folder the cache's sweep dropped) is not made again.
+	if dir := h.indexDir(); dir != "" {
+		if st, err := os.Stat(src); err == nil {
+			if p, ok := readPersistedPlan(dir, src, st); ok && p.Failed == "" {
+				if b, err := json.MarshalIndent(p.Plan, "", "  "); err == nil {
+					_ = writeFileAtomic(planPath, b)
+				}
+				return p.Plan, nil
+			}
+		}
+	}
 	plan, err := buildPassPlan(ctx, h.FFprobeBin, src, rate)
 	if err != nil {
 		return nil, err

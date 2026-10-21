@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -505,17 +506,36 @@ func TestStreamCopyFallsBackWhenASegmentFails(t *testing.T) {
 	}
 	m = get(h, "/api/play/i1/master.m3u8"+caps)
 	_, variants = copyMaster(m.Body.String())
+	// Segment 0 is served; the damaged one fails the title once, whether its
+	// prefetch or its request finds it.
+	failed := testutil.ToFloat64(metrics.CopyFallbacks.WithLabelValues("segment"))
 	uri := strings.Replace(variants[0]["uri"], "index.m3u8", "0.m4s", 1)
 	if w := get(h, "/api/play/i1/"+uri); w.Code != 200 {
 		t.Fatalf("segment 0: %d", w.Code)
 	}
-	failed := testutil.ToFloat64(metrics.CopyFallbacks.WithLabelValues("segment"))
 	lastURI := strings.Replace(variants[0]["uri"], "index.m3u8", strconv.Itoa(len(spans)-1)+".m4s", 1)
 	if w := get(h, "/api/play/i1/"+lastURI); w.Code != 404 {
 		t.Errorf("the damaged segment: %d", w.Code)
 	}
+	h.copyWork.Wait()
 	if got := testutil.ToFloat64(metrics.CopyFallbacks.WithLabelValues("segment")); got != failed+1 {
 		t.Errorf("segment fallbacks %v more, want 1", got-failed)
+	}
+	// The session goes on: its other segments are made (none of them in the
+	// memory now), and the damaged one is not made again.
+	h.copyCache.mu.Lock()
+	h.copyCache.m, h.copyCache.bytes = nil, 0
+	h.copyCache.mu.Unlock()
+	var made atomic.Int32
+	produceHook = func(int) { made.Add(1) }
+	t.Cleanup(func() { produceHook = nil })
+	if w := get(h, "/api/play/i1/"+uri); w.Code != 200 {
+		t.Errorf("segment 0 of the session after the failure: %d", w.Code)
+	}
+	h.copyWork.Wait()
+	before := made.Load()
+	if w := get(h, "/api/play/i1/"+lastURI); w.Code != 404 || made.Load() != before {
+		t.Errorf("the damaged segment asked again: %d, made %d more times", w.Code, made.Load()-before)
 	}
 	if m := get(h, "/api/play/i1/master.m3u8"+caps); strings.Contains(m.Body.String(), "video/index.m3u8") || !strings.Contains(m.Body.String(), "high/index.m3u8") {
 		t.Errorf("the master after the failure:\n%s", m.Body)

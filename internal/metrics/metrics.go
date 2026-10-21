@@ -144,8 +144,9 @@ var (
 	// copies that failed: reason index (a file without a usable index, read
 	// through in the background meanwhile), plan (the copy does not take the
 	// file: a stream feature, a damaged index, a container it does not
-	// read) or segment (a copy segment could not be made; the title's new
-	// sessions take the encode path).
+	// read), segment (a copy segment could not be made; the title's new
+	// sessions take the encode path) or panic (the copy panicked on a file,
+	// which is then not copied: a bug, its stack in the log).
 	CopyFallbacks = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "katalog_stream_copy_fallbacks_total",
 		Help: "Stream copies that fell back to the encode path, by reason.",

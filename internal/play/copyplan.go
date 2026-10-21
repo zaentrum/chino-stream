@@ -74,27 +74,38 @@ func planStreams(p *Probe, caps Caps) streamPlan {
 			sp.muxed = true
 		}
 	}
+	// An MP4 of Dolby Vision without a base layer other decoders play (5, or
+	// 7 with its enhancement layer) plays as it always did: the muxed copy
+	// where the client takes the file whole — which a device that plays
+	// Dolby Vision shows as it is — else the ladder. It is not put on the
+	// ladder for every client: no client declares Dolby Vision yet, and the
+	// ladder does not reshape it (its tone mapping shows profile 5 in green
+	// and purple).
+	//
+	// TODO: the clients declare dvh from their decoders (Safari by canPlayType
+	// or MediaSource.isTypeSupported of a dvh1 codec, Android by
+	// MediaCodecList's video/dolby-vision), and the ladder reshapes Dolby
+	// Vision 5; then such an MP4 takes the rules every other original does.
+	if dv := dolbyVision(p); isoBMFF(p.Container) && (dv == dvEnhancement || dv == dvOnly && !caps.DolbyVision) {
+		if ok, _ := videoPlayable(p, caps); ok {
+			if mode, _ := p.DecideWith(caps); mode == "passthrough" {
+				sp.videoCopy, sp.videoWhy, sp.muxed = true, "", true
+			}
+		}
+	}
 	return sp
 }
+
+// noCapsHeight is the tallest video copied to a client that does not say
+// what it plays (no caps): taller video is converted, as the ladder's top
+// rung always served it.
+const noCapsHeight = 1080
 
 // videoCopyable says whether a client with caps decodes the video of p as it
 // is, and why not.
 func videoCopyable(p *Probe, caps Caps) (bool, string) {
-	fam := videoFamily(p.VideoCodec)
-	name := codecDisplay(p.VideoCodec)
-	if fam == "" || !caps.Video[p.VideoCodec] {
-		return false, "this device does not play " + name
-	}
-	if maxH := caps.VideoMaxHeight[fam]; maxH > 0 && p.Height > maxH {
-		return false, fmt.Sprintf("this device plays %s up to %dp", name, maxH)
-	}
-	if why := videoFormatWhy(p, fam, name); why != "" {
-		return false, "this device does not play " + why
-	}
-	if fam == "vp9" && isMatroska(p.Container) {
-		// The copy takes a VP9 stream's configuration from an MP4's sample
-		// entry; a Matroska file has none to give.
-		return false, "VP9 video in Matroska files is always converted"
+	if ok, why := videoPlayable(p, caps); !ok {
+		return false, why
 	}
 	if dv := dolbyVision(p); dv != dvNone {
 		switch {
@@ -103,6 +114,31 @@ func videoCopyable(p *Probe, caps Caps) (bool, string) {
 		case dv == dvOnly && !caps.DolbyVision:
 			return false, "this device does not play Dolby Vision"
 		}
+	}
+	return true, ""
+}
+
+// videoPlayable says whether a client with caps decodes the video of p as
+// it is, Dolby Vision aside, and why not.
+func videoPlayable(p *Probe, caps Caps) (bool, string) {
+	fam := videoFamily(p.VideoCodec)
+	name := codecDisplay(p.VideoCodec)
+	if fam == "" || !caps.Video[p.VideoCodec] {
+		return false, "this device does not play " + name
+	}
+	if maxH := caps.VideoMaxHeight[fam]; maxH > 0 && p.Height > maxH {
+		return false, fmt.Sprintf("this device plays %s up to %dp", name, maxH)
+	}
+	if !caps.Given && p.Height > noCapsHeight {
+		return false, fmt.Sprintf("this device does not say it plays video taller than %dp", noCapsHeight)
+	}
+	if why := videoFormatWhy(p, fam, name); why != "" {
+		return false, "this device does not play " + why
+	}
+	if fam == "vp9" && isMatroska(p.Container) {
+		// The copy takes a VP9 stream's configuration from an MP4's sample
+		// entry; a Matroska file has none to give.
+		return false, "VP9 video in Matroska files is always converted"
 	}
 	return true, ""
 }
