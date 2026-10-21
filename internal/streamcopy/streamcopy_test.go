@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,8 @@ import (
 	"testing"
 
 	"github.com/Eyevinn/mp4ff/mp4"
+
+	"github.com/zaentrum/chino-stream/internal/mkv"
 )
 
 // tool is ffmpeg or ffprobe from $PATH; the test is skipped without it.
@@ -334,5 +337,140 @@ func TestIndexRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(back.Spans(), ix.Spans()) || !bytes.Equal(back.Video.Init, ix.Video.Init) || back.Audio[0].Codec != "ac-3" {
 		t.Errorf("round trip: %+v", back.Audio)
+	}
+}
+
+// moveCue moves the k-th cue point of the Matroska file by delta timestamp
+// units, its time written in as many bytes as before: an index that is
+// wrong. It returns the cue's time before.
+func moveCue(t *testing.T, file string, k int, delta uint64) uint64 {
+	t.Helper()
+	b, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := mkv.Open(bytes.NewReader(b), int64(len(b)))
+	if err != nil || len(f.Cues) <= k || f.CuesPos <= 0 {
+		t.Fatalf("open: %v, %d cues", err, len(f.Cues))
+	}
+	from := f.Cues[k].Time
+	to := from + delta
+	be := func(v uint64, n int) []byte {
+		out := make([]byte, n)
+		for i := n - 1; i >= 0; i-- {
+			out[i], v = byte(v), v>>8
+		}
+		return out
+	}
+	for n := 1; n <= 8; n++ {
+		if n < 8 && from>>(8*n) != 0 {
+			continue
+		}
+		// CueTime (0xB3), its size, its value.
+		pat := append([]byte{0xB3, 0x80 | byte(n)}, be(from, n)...)
+		i := bytes.Index(b[f.CuesPos:], pat)
+		if i < 0 {
+			continue
+		}
+		if n < 8 && to>>(8*n) != 0 {
+			t.Fatalf("%d does not fit the %d bytes of %d", to, n, from)
+		}
+		copy(b[f.CuesPos+int64(i)+2:], be(to, n))
+		if err := os.WriteFile(file, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return from
+	}
+	t.Fatalf("cue %d's time %d not found", k, from)
+	return 0
+}
+
+// countingReader counts what is read.
+type countingReader struct {
+	r io.ReaderAt
+	n int64
+}
+
+func (c *countingReader) ReadAt(b []byte, off int64) (int, error) {
+	n, err := c.r.ReadAt(b, off)
+	c.n += int64(n)
+	return n, err
+}
+
+// A file whose Cues the head shows wrong — the first cue on a frame that is
+// no keyframe (as Cues of every frame are) — is not gone by: its index says
+// ErrNoIndex, the file is read through for its keyframes, and its copy is
+// the original's packets.
+func TestCuesOnAFrameThatIsNoKeyframe(t *testing.T) {
+	file := makeFile(t, "film.mkv", append(lavfi(10), "-map", "0", "-map", "1", "-c:v", "libx264", "-preset", "ultrafast",
+		"-g", "24", "-bf", "0", "-c:a", "aac")...)
+	want := hashes(t, file, "v:0", true)
+	from := moveCue(t, file, 0, 42) // to the frame after the keyframe
+	f, err := os.Open(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	st, _ := f.Stat()
+	start, dur := probeStart(t, file)
+	ix, err := IndexMatroska(f, st.Size(), Options{OriginNs: start, DurationNs: dur, Path: file, ModTime: st.ModTime().UnixNano()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ix.Check(); !errors.Is(err, ErrNoIndex) {
+		t.Fatalf("check of Cues on a frame that is no keyframe: %v", err)
+	}
+	if err := ix.ScanMatroska(f); err != nil {
+		t.Fatal(err)
+	}
+	if err := ix.Check(); err != nil || ix.Source != FromScan || ix.Keyframes[0].TS != int64(from) {
+		t.Fatalf("after the scan: %v, %s, first keyframe at %d", err, ix.Source, ix.Keyframes[0].TS)
+	}
+	video, _, _ := produceAll(t, ix, nil)
+	if got := hashes(t, write(t, "video.mp4", video), "v:0", true); !reflect.DeepEqual(got, want) {
+		t.Errorf("%d packets copied, the original has %d", len(got), len(want))
+	}
+}
+
+// A cue past the head on a frame that is no keyframe: the segment it starts
+// and the one before it fail as the file's (mkv.ErrFormat), at once — not
+// reading on to the end of the file, nor making a segment of the rest of it
+// — and every other segment is made.
+func TestAWrongCueFailsItsSegmentsAtOnce(t *testing.T) {
+	file := makeFile(t, "film.mkv", append(lavfi(40), "-map", "0", "-map", "1", "-c:v", "libx264", "-preset", "ultrafast",
+		"-g", "24", "-bf", "0", "-c:a", "aac")...)
+	from := moveCue(t, file, 12, 42)
+	ix := index(t, file)
+	bad := -1
+	for n, s := range ix.Spans() {
+		if ix.Keyframes[s.First].TS == int64(from+42) {
+			bad = n
+		}
+	}
+	if bad < 1 {
+		t.Fatalf("no segment starts at the wrong cue (%d)", bad)
+	}
+	defer func(c int) { segmentChunk = c }(segmentChunk)
+	segmentChunk = 32 << 10
+	f, err := os.Open(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	st, _ := f.Stat()
+	for n := range ix.Spans() {
+		r := &countingReader{r: f}
+		out, err := ix.Produce(r, n, []int{0})
+		switch {
+		case n == bad-1 || n == bad:
+			if !errors.Is(err, mkv.ErrFormat) || out != nil {
+				t.Errorf("segment %d: %v, want the file's error", n, err)
+			}
+			if r.n > st.Size()/4 {
+				t.Errorf("segment %d read %d bytes of %d before it failed", n, r.n, st.Size())
+			}
+		case err != nil:
+			t.Errorf("segment %d: %v", n, err)
+		}
 	}
 }

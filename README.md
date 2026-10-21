@@ -167,8 +167,9 @@ The stream copy (`internal/streamcopy`, `internal/mkv`):
   goes) — across restarts for as long as the cache volume lasts. `/info`,
   the master and `/prewarm` make it, so it is there before the first
   segment.
-- **No usable index.** A Matroska file without Cues for its video, or with
-  keyframes more than 20 s apart in them, is read through in the
+- **No usable index.** A Matroska file without Cues for its video, with
+  keyframes more than 20 s apart in them, or with Cues its first Clusters
+  show wrong (a cue on a frame that is no keyframe), is read through in the
   background, one file at a time at 32 MiB/s, for its keyframes; its
   sessions take the ladder until then.
 - **Segments.** The keyframes grouped into segments of at least 6 s.
@@ -190,10 +191,12 @@ The stream copy (`internal/streamcopy`, `internal/mkv`):
   the title's path answers 404.
 - **Fail safe.** A file the copy does not take (a stream feature it does not
   carry, a damaged index, a track list its probe does not match) plays the
-  ladder; a segment it cannot make answers 404 — players step down onto the
-  ladder on it — and the title's new sessions take the ladder until the
-  file changes (a read that failed only, for a minute). Each is logged and
-  counted (`katalog_stream_copy_fallbacks_total`).
+  ladder; a segment it cannot make (its keyframe not where the index says:
+  found out within a keyframe's distance, not at the end of the file)
+  answers 404 — players step down onto the ladder on it — and the title's
+  new sessions take the ladder until the file changes (a read that failed
+  only, for a minute). Each is logged and counted
+  (`katalog_stream_copy_fallbacks_total`).
 
 `/play/info`'s `mode` is `passthrough` for the muxed copy, `remux` for the
 stream copy (no quality menu, as before), `transcode` for the ladder (high,
