@@ -190,11 +190,13 @@ func TestCopyRemuxPlanIsTheFFmpegPaths(t *testing.T) {
 	if isoBMFF(tsProbe.Container) || copyRemuxable(&source{key: "ts", file: ts, probe: &tsProbe}) {
 		t.Errorf("an MPEG-TS original (%s) is stream-copied", tsProbe.Container)
 	}
-	if mode, _ := liveDecision(&LiveWorker{mode: LiveWorkerOn}, &tsProbe, "passthrough", ""); mode != "remux" {
-		t.Errorf("an MPEG-TS original on the live pipeline: %s", mode)
+	on := &HLSHandler{CacheDir: t.TempDir(), Live: &LiveWorker{mode: LiveWorkerOn}}
+	caps := ParseCaps("avc,aac")
+	if p := on.planOnTheFly(context.Background(), &source{key: "ts", file: ts, probe: &tsProbe}, caps, ""); p.mode != "transcode" {
+		t.Errorf("an MPEG-TS original on the live pipeline: %s", p.mode)
 	}
-	if mode, _ := liveDecision(&LiveWorker{mode: LiveWorkerOn}, &probe, "passthrough", ""); mode != "passthrough" {
-		t.Errorf("an MP4 original on the live pipeline: %s", mode)
+	if p := on.planOnTheFly(context.Background(), &source{key: "mp4", file: file, probe: &probe}, caps, ""); p.mode != "passthrough" {
+		t.Errorf("an MP4 original on the live pipeline: %s", p.mode)
 	}
 }
 

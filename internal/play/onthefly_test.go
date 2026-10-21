@@ -143,7 +143,7 @@ func TestATitleWithoutItsOriginalPlaysOnTheFlyFromItsPackage(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &info); err != nil {
 		t.Fatalf("info: %d %q", w.Code, w.Body)
 	}
-	if info["mode"] != "transcode" || !strings.Contains(info["reason"].(string), "the original is retired") ||
+	if info["mode"] != "transcode" || info["reason"] != "The video is converted to H.264 and the audio to stereo AAC, because this device does not play HEVC." ||
 		info["video_codec"] != "hevc" || info["filename"] != "Clip (Remastered)" || info["default_quality"] != "high" ||
 		len(info["qualities"].([]any)) != 3 || len(info["audio_tracks"].([]any)) != 2 {
 		t.Errorf("info %v", info)
@@ -200,7 +200,7 @@ func TestAPackageOverTheClientsHeightIsTranscodedNotCopied(t *testing.T) {
 	}
 	var info map[string]any
 	_ = json.Unmarshal(getPlay(ph, "/api/play/"+libItem+"/info"+query).Body.Bytes(), &info)
-	if info["mode"] != "transcode" || !strings.Contains(info["reason"].(string), "over the client's height") {
+	if info["mode"] != "transcode" || info["reason"] != "The video is converted to H.264 and the audio to stereo AAC, because this device plays HEVC up to 720p." {
 		t.Errorf("info %v", info)
 	}
 }

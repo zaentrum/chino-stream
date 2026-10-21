@@ -61,6 +61,8 @@ func quiesce(t *testing.T, h *HLSHandler) {
 		if h.Live != nil {
 			settle(t, h.Live)
 		}
+		h.copyWork.Wait()
+		h.streamIndexes.jobs.Wait()
 	})
 }
 

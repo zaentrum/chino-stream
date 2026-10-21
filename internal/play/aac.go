@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -88,6 +89,12 @@ func pickAACEncoder(have map[string]bool) (string, error) {
 // 5.1 / 7.1 sources are downmixed to 2.0 — so every output matches the
 // mp4a.40.2 the master playlists advertise, whatever the source layout.
 func aacArgs(encoder, bitrate string) []string {
+	return aacArgsChannels(encoder, bitrate, 2)
+}
+
+// aacArgsChannels is aacArgs for channels channels: 2, or 6 for the 5.1
+// conversion a client that decodes AAC beyond two channels is given.
+func aacArgsChannels(encoder, bitrate string, channels int) []string {
 	if encoder == "" {
 		encoder = aacNative
 	}
@@ -95,7 +102,7 @@ func aacArgs(encoder, bitrate string) []string {
 		"-c:a", encoder,
 		"-profile:a", "aac_low",
 		"-ar", "48000",
-		"-ac", "2",
+		"-ac", strconv.Itoa(channels),
 		"-b:a", bitrate,
 	}
 }

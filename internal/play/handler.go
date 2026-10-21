@@ -56,6 +56,10 @@ type Handler struct {
 	// and a package's is shifted in Go.
 	Live *LiveWorker
 
+	// HLS is the on-the-fly pipeline /play/info describes (its plan, its
+	// stream copy indexes); nil: one of its own, without them kept.
+	HLS *HLSHandler
+
 	// subLocks dedupes concurrent ffmpeg runs for the same
 	// (item, track, startSec) so the player's 26-track mount only
 	// fires one extraction even if every <track> requests its url at
@@ -654,9 +658,14 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 		log.Printf("resolve %s: %v", itemID, err)
 	}
 
+	planner := h.HLS
+	if planner == nil {
+		planner = &HLSHandler{CacheDir: h.CacheDir, FFprobeBin: h.FFprobeBin, Live: h.Live}
+	}
 	// No original to read: the package, transcoded on the fly.
 	fromPackage := func(src *source) {
-		mode, reason := decideSource(src, infoCaps)
+		plan := planner.planOnTheFly(r.Context(), src, infoCaps, r.URL.Query().Get("q"))
+		mode, reason := plan.mode, plan.reason
 		title := src.mf.Title
 		if title == "" && src.pkg.library() {
 			title, _ = libraryTitle(src.pkg.dir)
@@ -718,23 +727,12 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 	// /play/info is the first call the client makes — use its caps
 	// hint (same format as master.m3u8's ?caps=) so the mode + reason
 	// returned match what the player will actually get when it asks
-	// for master.m3u8 a moment later. Without this, Info would always
-	// say "passthrough" for h264 sources even when the player is
-	// going to be routed to remux because of multichannel audio.
-	mode, reason := probe.DecideWith(infoCaps)
-	mode, reason = liveDecision(h.Live, &probe, mode, reason)
-	h.writeSourceInfo(w, filepath.Base(clean), &probe, mode, reason, nil)
-}
-
-// liveDecision is the mode of an original whose sessions go to the live
-// pipeline (LIVE_WORKER_MODE on): one the stream copy would serve but whose
-// container mp4ff cannot read is remuxed instead (the transcode ladder, no
-// quality menu), as Matroska always was. Any other mode as decided.
-func liveDecision(lw *LiveWorker, p *Probe, mode, reason string) (string, string) {
-	if lw.On() && mode == "passthrough" && !isoBMFF(p.Container) {
-		return "remux", "container (" + p.Container + ") needs repackaging to fragmented MP4 — video and audio are re-encoded (on-the-fly streaming cannot stream-copy video yet)"
-	}
-	return mode, reason
+	// for master.m3u8 a moment later. The plan is the master's
+	// (planOnTheFly): reading it warms the original's stream copy index,
+	// so the master and the first segment find it made.
+	src := &source{key: itemID, file: clean, probe: &probe}
+	plan := planner.planOnTheFly(r.Context(), src, infoCaps, r.URL.Query().Get("q"))
+	h.writeSourceInfo(w, filepath.Base(clean), &probe, plan.mode, plan.reason, nil)
 }
 
 // writeSourceInfo answers /play/info for an on-the-fly source: its file

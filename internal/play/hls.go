@@ -21,6 +21,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/zaentrum/chino-stream/internal/catalog"
+	"github.com/zaentrum/chino-stream/internal/metrics"
 	"github.com/zaentrum/chino-stream/internal/pkgmanifest"
 )
 
@@ -94,6 +95,13 @@ type HLSHandler struct {
 	// for its segments, which are served as ffmpeg finishes them
 	// (window.go).
 	windows productions
+
+	// streamIndexes are the stream copy's indexes of the originals
+	// (copyindex.go), copyCache the copy segments made, in memory, and
+	// copyWork those made off the request path (copyserve.go).
+	streamIndexes streamIndexStore
+	copyCache     copyCache
+	copyWork      sync.WaitGroup
 }
 
 // segmentSec is the target HLS segment length. 6s is the canonical HLS
@@ -162,6 +170,20 @@ func (h *HLSHandler) Routes(r chi.Router) {
 	r.Get("/copy/index.m3u8", h.PassthroughPlaylist)
 	r.Get("/copy/init.mp4", h.PassthroughInit)
 	r.Get("/copy/{seg:[0-9]+}.m4s", h.PassthroughSegment)
+	// The stream copy of an original (copyserve.go): its video, and each
+	// audio track the client decodes apart, on the original's keyframes;
+	// an audio track converted to 5.1 AAC for a client that decodes AAC
+	// beyond two channels. One path segment each, as a proxy in front
+	// forwards an on-the-fly rung's routes.
+	r.Get("/video/index.m3u8", h.CopyVideoPlaylist)
+	r.Get("/video/init.mp4", h.CopyVideoInit)
+	r.Get("/video/{seg:[0-9]+}.m4s", h.CopyVideoSegment)
+	r.Get("/{track:audiocopy[0-9]+}/index.m3u8", h.CopyAudioPlaylist)
+	r.Get("/{track:audiocopy[0-9]+}/init.mp4", h.CopyAudioInit)
+	r.Get("/{track:audiocopy[0-9]+}/{seg:[0-9]+}.m4s", h.CopyAudioSegment)
+	r.Get("/{track:surround[0-9]+}/index.m3u8", h.SurroundAudioPlaylist)
+	r.Get("/{track:surround[0-9]+}/init.mp4", h.SurroundAudioInit)
+	r.Get("/{track:surround[0-9]+}/{seg:[0-9]+}.m4s", h.SurroundAudioSegment)
 	// Audio tracks (legacy): separate rendition group in HLS so the
 	// player can switch language without restarting video.
 	r.Get("/audio/{audioIdx:[0-9]+}/index.m3u8", h.AudioPlaylist)
@@ -593,12 +615,20 @@ func (h *HLSHandler) serveOnTheFlyMaster(w http.ResponseWriter, r *http.Request,
 	// every modern browser handles).
 	qParam := r.URL.Query().Get("q")
 	ql := ResolveQuality(qParam)
-	mode, _ := decideSource(src, caps)
-	// useCopy is reserved for TRUE stream-copy of both tracks. Remux
-	// takes the transcode ladder (see above). Forcing q != high also
-	// takes the transcode path (the quality switcher only makes sense
-	// when we're actually encoding). A package is never stream-copied.
-	useCopy := (qParam == "" || qParam == "high") && mode == "passthrough" && !src.fromPackage()
+	// The plan (copyserve.go): the stream copy where the client decodes the
+	// video as it is (its audio copied or converted track by track), the
+	// muxed copy of an MP4 it takes whole, else the transcode ladder — also
+	// for a q below high (the quality switcher only makes sense when we're
+	// actually encoding). A package is never stream-copied.
+	plan := h.planOnTheFly(r.Context(), src, caps, qParam)
+	if plan.fallback != "" {
+		metrics.CopyFallbacks.WithLabelValues(plan.fallback).Inc()
+	}
+	if plan.mode == "remux" {
+		h.serveCopyMaster(w, r, src, caps, plan)
+		return
+	}
+	useCopy := plan.mode == "passthrough"
 	// With LIVE_WORKER_MODE on a new session goes to the live pipeline
 	// (liveSession), and its URIs carry lw=1, which pins every request of it
 	// there (liveworker.go); else to ffmpeg, as before, without lw.
@@ -796,8 +826,17 @@ func (h *HLSHandler) Prewarm(w http.ResponseWriter, r *http.Request) {
 	}
 	qParam := r.URL.Query().Get("q")
 	ql := ResolveQuality(qParam)
-	mode, _ := decideSource(src, caps)
-	useCopy := (qParam == "" || qParam == "high") && mode == "passthrough" && !src.fromPackage()
+	// The plan the master will serve the session (serveOnTheFlyMaster).
+	plan := h.planOnTheFly(r.Context(), src, caps, qParam)
+	if plan.mode == "remux" {
+		live := h.copyLive(r.Context(), plan)
+		group, _ := copyRenditions(src.probe, plan.ix, plan.audio, caps, live)
+		h.warmCopySession(src, plan.ix, plan, group, live, tSec)
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte("warming"))
+		return
+	}
+	useCopy := plan.mode == "passthrough"
 	// The pipeline the master will send the session to (liveSession).
 	useCopy, live := h.liveSession(r.Context(), src, useCopy)
 	if useCopy {
@@ -1102,7 +1141,7 @@ func (h *HLSHandler) transcodeVideoWindow(ctx context.Context, src *source, qual
 		filepath.Join(tmpDir, "playlist.m3u8"),
 	)
 	return h.runInstalling(ctx, args, fmt.Sprintf("vwin %d %s/%s", windowIdx, capQuality, src.label()),
-		&windowInstaller{h: h, tmpDir: tmpDir, key: src.key, quality: capQuality, windowIdx: windowIdx, installed: installed})
+		&windowInstaller{h: h, tmpDir: tmpDir, key: src.key, quality: capQuality, windowIdx: windowIdx, installed: installed, path: "encode"})
 }
 
 // invalidateWindowSegments removes every cached segment for one
@@ -1126,20 +1165,35 @@ func (h *HLSHandler) invalidateWindowSegments(itemID, quality string, windowIdx 
 // is rarely needed in practice, but symmetry keeps the recovery
 // behaviour predictable across both pipelines.
 func (h *HLSHandler) ensureAudioWindow(ctx context.Context, src *source, audioIdx, windowIdx, requestedSeg int) error {
-	audioKey := "audio-" + strconv.Itoa(audioIdx)
+	return h.ensureAudioWindowCh(ctx, src, audioIdx, windowIdx, requestedSeg, 2)
+}
+
+// audioCacheKey is the cache namespace of the audio track audioIdx converted
+// to channels: audio-N for stereo, as always, audio51-N for 5.1.
+func audioCacheKey(audioIdx, channels int) string {
+	if channels > 2 {
+		return "audio51-" + strconv.Itoa(audioIdx)
+	}
+	return "audio-" + strconv.Itoa(audioIdx)
+}
+
+// ensureAudioWindowCh is ensureAudioWindow for the track converted to
+// channels: 2 (stereo AAC), or 6 (5.1 AAC).
+func (h *HLSHandler) ensureAudioWindowCh(ctx context.Context, src *source, audioIdx, windowIdx, requestedSeg, channels int) error {
+	audioKey := audioCacheKey(audioIdx, channels)
 	initPath := h.cachePath(src.key, audioKey, "init")
 	requestedSegPath := h.cachePath(src.key, audioKey, strconv.Itoa(requestedSeg))
 	windowKey := fmt.Sprintf("%s/%s/%d", src.key, audioKey, windowIdx)
 	return h.awaitWindow(ctx, "awin", windowKey, requestedSeg,
 		func() bool { return statOK(initPath) && statOK(requestedSegPath) },
 		func(ctx context.Context, installed func()) (string, error) {
-			return h.transcodeAudioWindow(ctx, src, audioIdx, audioKey, windowIdx, installed)
+			return h.transcodeAudioWindow(ctx, src, audioIdx, audioKey, windowIdx, channels, installed)
 		},
 		func() error { return h.invalidateWindowSegments(src.key, audioKey, windowIdx) },
 	)
 }
 
-func (h *HLSHandler) transcodeAudioWindow(ctx context.Context, src *source, audioIdx int, audioKey string, windowIdx int, installed func()) (string, error) {
+func (h *HLSHandler) transcodeAudioWindow(ctx context.Context, src *source, audioIdx int, audioKey string, windowIdx, channels int, installed func()) (string, error) {
 	probe := src.probe
 	initPath := h.cachePath(src.key, audioKey, "init")
 	windowStartSec := windowIdx * windowSize * segmentSec
@@ -1188,7 +1242,11 @@ func (h *HLSHandler) transcodeAudioWindow(ctx context.Context, src *source, audi
 		"-vn",
 		"-map", stream,
 	)
-	args = append(args, aacArgs(h.AACEncoder, windowAudioBitrate)...)
+	if channels > 2 {
+		args = append(args, aacArgsChannels(h.AACEncoder, surroundAudioBitrate, 6)...)
+	} else {
+		args = append(args, aacArgs(h.AACEncoder, windowAudioBitrate)...)
+	}
 	args = append(args,
 		"-output_ts_offset", strconv.Itoa(windowStartSec),
 		"-f", "hls",
@@ -1203,7 +1261,7 @@ func (h *HLSHandler) transcodeAudioWindow(ctx context.Context, src *source, audi
 		filepath.Join(tmpDir, "playlist.m3u8"),
 	)
 	return h.runInstalling(ctx, args, fmt.Sprintf("awin %d/%d %s", audioIdx, windowIdx, src.label()),
-		&windowInstaller{h: h, tmpDir: tmpDir, key: src.key, quality: audioKey, windowIdx: windowIdx, installed: installed})
+		&windowInstaller{h: h, tmpDir: tmpDir, key: src.key, quality: audioKey, windowIdx: windowIdx, installed: installed, path: "audio"})
 }
 
 // A window's segments come out of ffmpeg's hls muxer with their tfdt
@@ -1579,6 +1637,12 @@ func (h *HLSHandler) AudioPlaylist(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
+	gridPlaylist(w, r, src)
+}
+
+// gridPlaylist writes the media playlist of an audio rendition of src on the
+// 6 s grid: floor(d/6) segments and a tail over 0.5 s.
+func gridPlaylist(w http.ResponseWriter, r *http.Request, src *source) {
 	durSec := float64(src.probe.DurationMs) / 1000.0
 	if durSec <= 0 {
 		http.Error(w, "source has no duration", http.StatusBadGateway)
@@ -1911,8 +1975,13 @@ func (h *HLSHandler) StartCacheSweeper(ctx context.Context, every, maxAge time.D
 func (h *HLSHandler) sweep(maxAge time.Duration) {
 	h.windowFails.prune()
 	h.Packages.prune()
+	h.sweepIndexes()
 	cutoff := time.Now().Add(-maxAge)
+	indexes := h.indexDir()
 	_ = filepath.Walk(h.CacheDir, func(path string, info os.FileInfo, err error) error {
+		if err == nil && info.IsDir() && path == indexes {
+			return filepath.SkipDir // the stream copy's indexes: kept as long as they are used
+		}
 		if err != nil || info.IsDir() {
 			return nil
 		}

@@ -297,21 +297,6 @@ func segmentURIs(r *rendition) []string {
 	return out
 }
 
-// decideSource is the on-the-fly mode and its reason for s and the client:
-// the original's, as DecideWith says (passthrough, remux, transcode); a
-// package's is always a transcode — the client decodes none of its rungs at
-// its height, and nothing of a package is stream-copied.
-func decideSource(s *source, caps Caps) (mode, reason string) {
-	mode, reason = s.probe.DecideWith(caps)
-	if !s.fromPackage() {
-		return mode, reason
-	}
-	if mode != "transcode" {
-		reason = fmt.Sprintf("the package's %s video at %dp is over the client's height for it", s.probe.VideoCodec, s.probe.Height)
-	}
-	return "transcode", reason + "; the original is retired, so the package's video is transcoded on the fly"
-}
-
 // audioChoice is one rendition of the audio group an on-the-fly master of a
 // package serves a client that decodes its 5.1 companions (onTheFlyUnion).
 type audioChoice struct {

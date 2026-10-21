@@ -54,6 +54,12 @@ type Caps struct {
 	// group of all the audio it decodes an MSE player gets (ladder.go:
 	// mirrorAudioGroups, serveUnion). The ?caps= token "native".
 	Native bool
+	// DolbyVision says the client plays Dolby Vision (HEVC based: dvh1, and
+	// hvc1 with a Dolby Vision configuration). Without it a Dolby Vision
+	// stream with no base layer other decoders play (profile 5) is never
+	// copied to it, and one with such a base layer (8.1, 8.4) is copied as
+	// that base layer. The ?caps= token "dvh".
+	DolbyVision bool
 }
 
 // MaxVideoHeight returns the tallest frame height the device can HW-
@@ -91,6 +97,7 @@ var DefaultCaps = Caps{
 // querystring into a Caps. Recognised tokens (any case, any order):
 //
 //	avc, hvc, av1, vp9                 → video
+//	dvh                                → Dolby Vision (HEVC based)
 //	aac, mp3, opus, vorbis, ac3, eac3  → audio
 //	aacmc                              → multi-channel AAC LC
 //
@@ -158,6 +165,8 @@ func ParseCaps(s string) Caps {
 			c.AACMultichannel = true
 		case "native":
 			c.Native = true
+		case "dvh", "dvh1", "dvhe":
+			c.DolbyVision = true
 		}
 		// Record the HW height ceiling for video tokens that carried a
 		// valid ":<height>" suffix. Keep the larger value if the same
@@ -194,6 +203,9 @@ type TrackInfo struct {
 	Default  bool   `json:"default,omitempty"`
 	Forced   bool   `json:"forced,omitempty"`
 	Channels int    `json:"channels,omitempty"`
+	// Profile is ffprobe's profile of an audio stream ("LC", "HE-AAC",
+	// "Dolby Digital Plus + Dolby Atmos"), "" when it names none.
+	Profile string `json:"-"`
 }
 
 type Probe struct {
@@ -217,6 +229,23 @@ type Probe struct {
 	ColorTransfer  string
 	ColorPrimaries string
 	ColorSpace     string
+
+	// What the first video stream is, as far as a client's decoder goes:
+	// its profile ("Main 10", "High"), pixel format ("yuv420p10le"), sample
+	// entry or codec tag as ffprobe names it ("hvc1", "dvh1"; Matroska has
+	// none), and its Dolby Vision configuration record's profile, level and
+	// base layer compatibility (DVProfile 0: none).
+	VideoProfile string
+	PixFmt       string
+	CodecTag     string
+	DVProfile    int
+	DVLevel      int
+	DVCompat     int
+
+	// StartTimeNs is the container's start time (format start_time) in
+	// nanoseconds: zero on the timeline of every on-the-fly rendition, as
+	// ffmpeg's output and the live worker's take it off.
+	StartTimeNs int64
 
 	// Per-stream metadata the player uses for audio + subtitle switching.
 	// Indexed inside their kind (audio[N] is `0:a:N` in ffmpeg).
@@ -375,25 +404,35 @@ func RunFFprobe(ctx context.Context, ffprobeBin, path string) (Probe, error) {
 		Streams []struct {
 			CodecType      string `json:"codec_type"`
 			CodecName      string `json:"codec_name"`
+			CodecTag       string `json:"codec_tag_string"`
 			Profile        string `json:"profile"`
+			PixFmt         string `json:"pix_fmt"`
 			Width          int    `json:"width"`
 			Height         int    `json:"height"`
 			Channels       int    `json:"channels"`
 			ColorTransfer  string `json:"color_transfer"`
 			ColorPrimaries string `json:"color_primaries"`
 			ColorSpace     string `json:"color_space"`
-			Tags           struct {
+			SideData       []struct {
+				Type          string `json:"side_data_type"`
+				DVProfile     int    `json:"dv_profile"`
+				DVLevel       int    `json:"dv_level"`
+				Compatibility int    `json:"dv_bl_signal_compatibility_id"`
+			} `json:"side_data_list"`
+			Tags struct {
 				Language string `json:"language"`
 				Title    string `json:"title"`
 			} `json:"tags"`
 			Disposition struct {
-				Default int `json:"default"`
-				Forced  int `json:"forced"`
+				Default     int `json:"default"`
+				Forced      int `json:"forced"`
+				AttachedPic int `json:"attached_pic"`
 			} `json:"disposition"`
 		} `json:"streams"`
 		Format struct {
 			FormatName string `json:"format_name"`
 			Duration   string `json:"duration"`
+			StartTime  string `json:"start_time"`
 			BitRate    string `json:"bit_rate"`
 		} `json:"format"`
 	}
@@ -410,12 +449,19 @@ func RunFFprobe(ctx context.Context, ffprobeBin, path string) (Probe, error) {
 	for _, s := range raw.Streams {
 		switch s.CodecType {
 		case "video":
-			if p.VideoCodec == "" {
+			// A cover picture is no video stream to play.
+			if p.VideoCodec == "" && s.Disposition.AttachedPic == 0 {
 				p.VideoCodec = s.CodecName
 				p.Width, p.Height = s.Width, s.Height
 				p.ColorTransfer = s.ColorTransfer
 				p.ColorPrimaries = s.ColorPrimaries
 				p.ColorSpace = s.ColorSpace
+				p.VideoProfile, p.PixFmt, p.CodecTag = s.Profile, s.PixFmt, s.CodecTag
+				for _, sd := range s.SideData {
+					if sd.Type == "DOVI configuration record" {
+						p.DVProfile, p.DVLevel, p.DVCompat = sd.DVProfile, sd.DVLevel, sd.Compatibility
+					}
+				}
 			}
 		case "audio":
 			if p.AudioCodec == "" {
@@ -430,6 +476,7 @@ func RunFFprobe(ctx context.Context, ffprobeBin, path string) (Probe, error) {
 				Default:  s.Disposition.Default == 1,
 				Forced:   s.Disposition.Forced == 1,
 				Channels: s.Channels,
+				Profile:  s.Profile,
 			})
 			audioIdx++
 		case "subtitle":
@@ -450,7 +497,37 @@ func RunFFprobe(ctx context.Context, ffprobeBin, path string) (Probe, error) {
 		_, _ = fmt.Sscanf(raw.Format.Duration, "%f", &secs)
 		p.DurationMs = int64(secs * 1000)
 	}
+	p.StartTimeNs = secondsNs(raw.Format.StartTime)
 	return p, nil
+}
+
+// secondsNs is a time ffprobe writes in seconds ("-0.021000", six decimals
+// at most) in nanoseconds, exactly; 0 for none.
+func secondsNs(s string) int64 {
+	s = strings.TrimSpace(s)
+	neg := strings.HasPrefix(s, "-")
+	s = strings.TrimPrefix(s, "-")
+	whole, frac, _ := strings.Cut(s, ".")
+	w, err := strconv.ParseInt(whole, 10, 64)
+	if err != nil {
+		return 0
+	}
+	if len(frac) > 9 {
+		frac = frac[:9]
+	}
+	f := int64(0)
+	if frac != "" {
+		v, err := strconv.ParseInt(frac+strings.Repeat("0", 9-len(frac)), 10, 64)
+		if err != nil {
+			return 0
+		}
+		f = v
+	}
+	ns := w*1e9 + f
+	if neg {
+		return -ns
+	}
+	return ns
 }
 
 // normalizeLang folds the various MKV/MP4 language conventions into a

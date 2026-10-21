@@ -119,6 +119,7 @@ func NewRouter(d Deps) (http.Handler, error) {
 		AACEncoder:      aacEncoder,
 		Live:            live,
 	}
+	playH.HLS = hlsH
 	// Sweep cached segments older than 2 h every 10 min. Tunable later
 	// when usage scales past one user.
 	hlsH.StartCacheSweeper(context.Background(), 10*time.Minute, 2*time.Hour)
