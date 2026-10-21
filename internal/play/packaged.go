@@ -24,6 +24,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/zaentrum/chino-stream/internal/catalog"
+	"github.com/zaentrum/chino-stream/internal/metrics"
 	"github.com/zaentrum/chino-stream/internal/pkgmanifest"
 )
 
@@ -407,8 +408,34 @@ func (h *HLSHandler) PackagedInitSegment(w http.ResponseWriter, r *http.Request)
 // value is matched as 5-digit zero-padded in the route so shaka's
 // seg-00001.m4s naming flows through unchanged.
 func (h *HLSHandler) PackagedSegment(w http.ResponseWriter, r *http.Request) {
-	h.servePackaged(w, r, "video/iso.segment", "segment not found",
-		"hls", chi.URLParam(r, "rendId"), "seg-"+chi.URLParam(r, "seg")+".m4s")
+	path, retry, err := h.packagedFile(r, "hls", chi.URLParam(r, "rendId"), "seg-"+chi.URLParam(r, "seg")+".m4s")
+	if err != nil {
+		packagedError(w, err)
+		return
+	}
+	if read := servePackagedStaticTimed(w, r, path, retry, "video/iso.segment", "segment not found"); read > 0 {
+		metrics.ObserveSegment("package", read, packagedSegmentSeconds(path))
+	}
+}
+
+// packagedSegmentSeconds is how long the packaged media segment at path
+// lasts, as its rendition's playlist lists it; 0 when it does not.
+func packagedSegmentSeconds(path string) float64 {
+	pl, err := readRendition(filepath.Join(filepath.Dir(path), "playlist.m3u8"))
+	if err != nil {
+		return 0
+	}
+	name := filepath.Base(path)
+	for i, s := range pl.segments {
+		if s.uri != name {
+			continue
+		}
+		if i+1 < len(pl.segments) {
+			return pl.segments[i+1].start - s.start
+		}
+		return 0
+	}
+	return 0
 }
 
 // PackagedSubtitleSegment serves one WebVTT segment of a packaged
@@ -488,6 +515,12 @@ func servePackagedStatic(w http.ResponseWriter, r *http.Request, path, contentTy
 // servePackagedStaticRetry is servePackagedStatic with retry, which finds
 // the file anew should it be missing at path (packagedFile).
 func servePackagedStaticRetry(w http.ResponseWriter, r *http.Request, path string, retry func() string, contentType, notFoundMsg string) {
+	servePackagedStaticTimed(w, r, path, retry, contentType, notFoundMsg)
+}
+
+// servePackagedStaticTimed is servePackagedStaticRetry, returning how long
+// reading the file from the storage took (0: it was in memory, or not read).
+func servePackagedStaticTimed(w http.ResponseWriter, r *http.Request, path string, retry func() string, contentType, notFoundMsg string) time.Duration {
 	st, err := os.Stat(path)
 	if err != nil && retry != nil {
 		if again := retry(); again != "" {
@@ -497,7 +530,7 @@ func servePackagedStaticRetry(w http.ResponseWriter, r *http.Request, path strin
 	}
 	if err != nil {
 		http.Error(w, notFoundMsg, http.StatusNotFound)
-		return
+		return 0
 	}
 	mtime := st.ModTime()
 
@@ -508,7 +541,7 @@ func servePackagedStaticRetry(w http.ResponseWriter, r *http.Request, path strin
 			w.Header().Set("Content-Type", contentType)
 			w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
 			http.ServeContent(w, r, filepath.Base(path), mtime, bytes.NewReader(entry.bytes))
-			return
+			return 0
 		}
 	}
 
@@ -524,20 +557,23 @@ func servePackagedStaticRetry(w http.ResponseWriter, r *http.Request, path strin
 			w.Header().Set("Content-Type", contentType)
 			w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
 			http.ServeContent(w, r, filepath.Base(path), mtime, bytes.NewReader(entry.bytes))
-			return
+			return 0
 		}
 	}
 
+	t0 := time.Now()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		http.Error(w, "read failed: "+err.Error(), http.StatusInternalServerError)
-		return
+		return 0
 	}
+	read := time.Since(t0)
 	entry := storePackaged(path, data, mtime)
 
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
 	http.ServeContent(w, r, filepath.Base(path), mtime, bytes.NewReader(entry.bytes))
+	return read
 }
 
 // evictPackagedCache drops the oldest-touched entries until the

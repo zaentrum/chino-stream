@@ -5,6 +5,7 @@ package metrics
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -114,7 +115,75 @@ var (
 		Name: "katalog_stream_remux_total",
 		Help: "Go remuxes of the live pipeline, by kind and result.",
 	}, []string{"kind", "result"})
+
+	// SegmentProduction is how long a segment took to make, wall seconds,
+	// when it was not in a cache: path package (a packaged segment read
+	// from the storage), copy (a stream copy remuxed in Go: an original's
+	// video and copied audio, a package's audio), audio (audio converted to
+	// AAC: an ffmpeg window's segment, a live worker job) or encode (video
+	// encoded: an ffmpeg window's segment, a live worker job). An ffmpeg
+	// window's segment counts from the one before it (the window's first
+	// from the window's start).
+	SegmentProduction = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "katalog_stream_segment_production_seconds",
+		Help:    "Wall time to make one segment not in a cache, by path.",
+		Buckets: []float64{0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 4, 6, 8, 12, 20, 30},
+	}, []string{"path"})
+
+	// SegmentRealtime is the same time divided by the segment's own
+	// duration: below 1 a segment is made faster than it plays, above 1
+	// playback outruns the making and stalls.
+	SegmentRealtime = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "katalog_stream_segment_realtime_ratio",
+		Help:    "Seconds to make a segment per second of media in it, by path.",
+		Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 5},
+	}, []string{"path"})
+
+	// CopyFallbacks counts the sessions of an original whose video the
+	// client decodes as it is that took the encode path instead, and the
+	// copies that failed: reason index (a file without a usable index, read
+	// through in the background meanwhile), plan (the copy does not take the
+	// file: a stream feature, a damaged index, a container it does not
+	// read) or segment (a copy segment could not be made; the title's new
+	// sessions take the encode path).
+	CopyFallbacks = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "katalog_stream_copy_fallbacks_total",
+		Help: "Stream copies that fell back to the encode path, by reason.",
+	}, []string{"reason"})
+
+	// CopyIndexes counts the stream copy's indexes as they were found:
+	// persisted (read back from the cache), cues (a Matroska file's own
+	// index), moov (an MP4's sample tables), scan (a file read through in
+	// the background), pending (queued for that), failed or error (could not
+	// be read; tried again later).
+	CopyIndexes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "katalog_stream_copy_indexes_total",
+		Help: "Stream copy indexes, by how they were found.",
+	}, []string{"result"})
+
+	// CopyIndexDuration is how long an index took to make, by how (cues,
+	// moov, scan).
+	CopyIndexDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "katalog_stream_copy_index_duration_seconds",
+		Help:    "Time to make a stream copy index, by how.",
+		Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 10, 60, 300, 1800},
+	}, []string{"how"})
+
+	// CopyScanQueue is the files waiting to be read through for an index.
+	CopyScanQueue = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "katalog_stream_copy_scan_queue",
+		Help: "Files queued to be read through for a stream copy index.",
+	})
 )
+
+// ObserveSegment records the making of one segment of mediaSec seconds on
+// path that took took.
+func ObserveSegment(path string, took time.Duration, mediaSec float64) {
+	SegmentProduction.WithLabelValues(path).Observe(took.Seconds())
+	if mediaSec > 0 {
+		SegmentRealtime.WithLabelValues(path).Observe(took.Seconds() / mediaSec)
+	}
+}
 
 // Handler returns the Prometheus scrape handler. Mounted at /metrics
 // (un-authed; service is cluster-internal).

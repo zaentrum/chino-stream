@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/zaentrum/chino-stream/internal/metrics"
 )
 
 // A window's segments are served as ffmpeg finishes them, not when the
@@ -251,9 +253,15 @@ type windowInstaller struct {
 	quality   string // the cache namespace: the rung's, or audio-N
 	windowIdx int
 	installed func() // called for each file installed; may be nil
+	// path is the metric path its segments count under (encode, audio); ""
+	// counts none.
+	path string
 
 	next       int // the next segment of the window to install
 	timescales map[uint32]uint32
+	// last is when the run started, then when its last segment was installed:
+	// a segment took from there to its own install.
+	last time.Time
 }
 
 // install installs what the run has finished: the init once the first
@@ -285,6 +293,11 @@ func (wi *windowInstaller) install(final bool) error {
 		absSeg := wi.windowIdx*windowSize + wi.next
 		if err := os.Rename(segSrc, filepath.Join(cacheRoot, strconv.Itoa(absSeg)+".bin")); err != nil {
 			return fmt.Errorf("install seg %d: %w", absSeg, err)
+		}
+		if wi.path != "" && !wi.last.IsZero() {
+			now := time.Now()
+			metrics.ObserveSegment(wi.path, now.Sub(wi.last), segmentSec)
+			wi.last = now
 		}
 		wi.next++
 		if wi.installed != nil {
@@ -331,6 +344,7 @@ func (wi *windowInstaller) installInit(cacheRoot string, final bool) error {
 // they are finished (wi), then, once it exited cleanly, the rest. It returns
 // the tail of ffmpeg's stderr and the first error.
 func (h *HLSHandler) runInstalling(ctx context.Context, args []string, label string, wi *windowInstaller) (string, error) {
+	wi.last = time.Now()
 	stop, stopped := make(chan struct{}), make(chan error, 1)
 	go func() {
 		t := time.NewTicker(installPoll)

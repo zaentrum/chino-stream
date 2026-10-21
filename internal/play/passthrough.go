@@ -13,9 +13,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Eyevinn/mp4ff/mp4"
 	"github.com/go-chi/chi/v5"
+
+	"github.com/zaentrum/chino-stream/internal/metrics"
 )
 
 // Stream-copy passthrough for legacy on-demand items whose codecs are
@@ -381,9 +384,13 @@ func (h *HLSHandler) liveCopyInit(ctx context.Context, src *source) (string, err
 func (h *HLSHandler) liveCopySegment(ctx context.Context, src *source, ix *copyIndex, seg int) (string, error) {
 	path := h.cachePath(src.key, "copy"+liveSuffix, strconv.Itoa(seg))
 	err := h.ensureCached(ctx, path, func(w io.Writer) error {
+		t0 := time.Now()
 		b, err := ix.segment(seg)
 		if err != nil {
 			return err
+		}
+		if seg < len(ix.plan.Segments) {
+			metrics.ObserveSegment("copy", time.Since(t0), ix.plan.Segments[seg].DurSec)
 		}
 		_, err = w.Write(b)
 		return err
@@ -554,6 +561,7 @@ func (h *HLSHandler) ensurePassthroughSegment(ctx context.Context, itemID, src s
 		"-hls_segment_filename", filepath.Join(tmpDir, "seg_%d.m4s"),
 		filepath.Join(tmpDir, "playlist.m3u8"),
 	}
+	t0 := time.Now()
 	if _, err := h.runFFmpeg(ctx, args, fmt.Sprintf("passthrough seg %d %s", seg, filepath.Base(src))); err != nil {
 		return err
 	}
@@ -561,5 +569,6 @@ func (h *HLSHandler) ensurePassthroughSegment(ctx context.Context, itemID, src s
 	if !statOK(produced) {
 		return fmt.Errorf("ffmpeg produced no segment for seg %d", seg)
 	}
+	metrics.ObserveSegment("copy", time.Since(t0), s.DurSec)
 	return os.Rename(produced, cachePath)
 }

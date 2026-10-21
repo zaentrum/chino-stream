@@ -263,12 +263,20 @@ func (h *HLSHandler) ensureLive(ctx context.Context, j liveJob) error {
 // fragment whose codec configuration is not the rung's init's would not decode
 // with the init a player holds: it is refused and asked for once more.
 func (h *HLSHandler) produceLive(ctx context.Context, j liveJob) error {
+	t0 := time.Now()
 	for attempt := 0; ; attempt++ {
 		out, err := h.Live.output(ctx, j.kind, j.req)
 		if err != nil {
 			return err
 		}
 		err = h.storeLive(j, out)
+		if err == nil && j.req.Segment != nil {
+			path := "encode"
+			if j.req.Track == api.TrackAudio {
+				path = "audio"
+			}
+			metrics.ObserveSegment(path, time.Since(t0), j.req.Segment.End-j.req.Segment.Start)
+		}
 		if !errors.Is(err, errCodecMismatch) || attempt > 0 {
 			return err
 		}
@@ -508,9 +516,15 @@ func (h *HLSHandler) ensurePackageAudio(ctx context.Context, src *source, audioI
 	}
 	path := h.cachePath(src.key, ns, leaf)
 	err := h.ensureCached(ctx, path, func(w io.Writer) error {
+		t0 := time.Now()
 		b, err := build()
 		if err != nil {
 			return err
+		}
+		if seg >= 0 {
+			if start, end, _, ok := liveSpan(src.probe.DurationMs, seg); ok {
+				metrics.ObserveSegment("copy", time.Since(t0), end-start)
+			}
 		}
 		_, err = w.Write(b)
 		return err
