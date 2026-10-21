@@ -2,9 +2,11 @@
 
 Streaming origin for the **chino** product on the zaentrum platform. Serves
 on-demand playback: pre-packaged CMAF byte-range delivery when an asset has
-already been packaged, and on-the-fly HLS transcoding (optionally NVENC-
-accelerated) for codecs a client can't decode (HEVC / DTS / AC3 / TrueHD) —
-from the original, or once that is retired from the package itself.
+already been packaged, and on the fly what is not: an original's video and
+audio copied into CMAF as they are wherever the client decodes them
+([below](#what-an-original-plays-as)), and HLS transcoding (optionally NVENC-
+accelerated) for what it cannot — from the original, or once that is retired
+from the package itself.
 
 It asks the catalog API (the read side of the CQRS split) where an item's
 original and package are rather than touching the catalog database, and
@@ -17,6 +19,8 @@ cmd/chino-stream/main.go        # entrypoint, env config, chi router wiring
 internal/http/router.go         # routes: /healthz, /readyz, /metrics, /api/play/*
 internal/auth/                  # OIDC bearer verification + per-stream token checks
 internal/catalog/client.go      # thin HTTP client to the catalog API
+internal/mkv/                   # Matroska: header, tracks, Cues and blocks by byte range
+internal/streamcopy/            # an original's tracks copied into CMAF: its index, its segments
 internal/play/                  # playback core
   resolve.go                    #   where an item's or an extra's package is (katalog-api, cached)
   packaged.go                   #   pre-packaged CMAF byte-range serving
@@ -28,7 +32,9 @@ internal/play/                  # playback core
   window.go                     #   a window's segments served as ffmpeg finishes them
   liveworker.go / live.go       #   the live worker: its calls, and the live pipeline of the on-the-fly routes
   liveshadow.go                 #   LIVE_WORKER_MODE shadow's checks
-  remuxcopy.go / remuxaudio.go  #   the stream copy and a package's audio, remuxed in Go
+  copyplan.go                   #   what of an original plays as it is, for a client
+  copyindex.go / copyserve.go   #   the stream copy's indexes; its master, playlists and segments
+  remuxcopy.go / remuxaudio.go  #   the muxed stream copy and a package's audio, remuxed in Go
   webvtt.go                     #   a package's subtitle, shifted in Go
   ffprobe.go                    #   source probing
   zappool.go                    #   zap-feed warm-pool
@@ -58,6 +64,7 @@ Dockerfile
 | GET    | `/api/play/{itemId}/{vN}/iframes.m3u8`       | I-frame playlist of a video rung    |
 | GET    | `/api/play/{itemId}/{sN}/playlist.m3u8`, `seg-{n}.vtt` | packaged WebVTT rendition |
 | GET    | `/api/play/{itemId}/{high\|medium\|low}/…`, `copy/…`, `audio/{n}/…` | on-the-fly HLS |
+| GET    | `/api/play/{itemId}/video/…`, `audiocopy{n}/…`, `surround{n}/…` | an original's stream copy ([below](#what-an-original-plays-as)) |
 | GET    | `/api/play/{itemId}/extras/{extraId}/master.m3u8` | an extra's HLS master ([below](#extras)) |
 | GET    | `/api/play/{itemId}/extras/{extraId}/{vN\|aN\|sN}/…` | its renditions, as a packaged title's |
 | GET    | `/api/play/{itemId}/extras/{extraId}/{high\|medium\|low}/…`, `audio/{n}/…` | its on-the-fly HLS |
@@ -122,6 +129,78 @@ ffmpeg run; each segment is served as soon as it is finished, so the first
 segment of a window comes within about a second — not when the window is
 done. A window nobody asks for any more for 20 s is given up.
 
+## What an original plays as
+
+On the fly, what of an original is encoded is decided per client, from its
+probe and `caps` (`internal/play/copyplan.go`). The container never forces
+an encode, and the video is never encoded for the audio's sake:
+
+- **The video is copied** when the client decodes it as it is: H.264
+  Baseline, Main or High at 8 bits, HEVC Main or Main 10, AV1 Main (VP9 from
+  an MP4 only), 4:2:0, no taller than the client's cap for its codec
+  (`hvc:1080`). HDR10 and HLG are copied where the client takes the codec at
+  that height, as a package's HEVC is served. Dolby Vision whose base layer
+  other decoders play (8.1, 8.4) is copied as that base layer; profile 5 only
+  to a client that declares Dolby Vision (`dvh`); profile 7 never. Any other
+  video, and a `q` below high, takes the transcode ladder.
+- **Each audio track is copied** when the client decodes it: AAC (beyond
+  two channels with `aacmc`), AC-3, E-AC-3, multichannel included. Any other
+  track is **converted** on a rendition of its own: stereo AAC
+  (`audio/{n}/`, on the 6 s grid, as the ladder's audio always was), and 5.1
+  AAC as well for a client with `aacmc` (`surround{n}/`, just before its
+  stereo one). An original with no track converted encodes nothing.
+- An MP4 original the client takes whole (its video and first audio track)
+  stays the muxed stream copy (`copy/`) it always was; so does an MPEG-TS
+  one, its keyframes probed in the background (its first session takes the
+  ladder meanwhile).
+
+The stream copy (`internal/streamcopy`, `internal/mkv`):
+
+- **The index.** An original is indexed once: its keyframes from its
+  container's own index — a Matroska file's Cues, found through its
+  SeekHead (kilobytes at the end of the file, read in milliseconds), an MP4's
+  `stss` and `stts` — and each track's CMAF header: its codec configuration
+  as the original has it, an edit list taking the reordering delay off.
+  Nothing reads a whole file on the request path. Indexes are kept by path,
+  size and mtime: in memory, and a Matroska one in the cache folder
+  `copy-index/`, which the 2 h sweep leaves alone (one unused for 30 days
+  goes) — across restarts for as long as the cache volume lasts. `/info`,
+  the master and `/prewarm` make it, so it is there before the first
+  segment.
+- **No usable index.** A Matroska file without Cues for its video, or with
+  keyframes more than 20 s apart in them, is read through in the
+  background, one file at a time at 32 MiB/s, for its keyframes; its
+  sessions take the ladder until then.
+- **Segments.** The keyframes grouped into segments of at least 6 s.
+  Segment n is one read of the byte range from its keyframe's block to the
+  next segment's: its video and every copied audio track, each a fragment
+  of its own on the track's own timeline — decode times the presentation
+  times sorted, so no gap or overlap at a segment's edge — presentation zero
+  the container's start time, as every on-the-fly rendition's, so a copied
+  video plays in step with converted audio. Segments are kept in memory
+  (384 MiB, the least recently used dropped: they are cheap to make again),
+  the next two made ahead of the play head.
+- **The master.** One variant, `video/index.m3u8`: `CODECS` from the codec
+  configuration (`hvc1.2.4.L150.90,ec-3`), `VIDEO-RANGE` the source's,
+  `BANDWIDTH` the copy's peak; its audio group each track at
+  `audiocopy{n}/` or converted. A `native` player gets Apple's shape: the
+  stereo group (each track as AAC) and, when a track plays in surround, a
+  5.1 group of the same members, the variant once per group. The URIs carry
+  `c=`, the fingerprint of the file the session began on: another file at
+  the title's path answers 404.
+- **Fail safe.** A file the copy does not take (a stream feature it does not
+  carry, a damaged index, a track list its probe does not match) plays the
+  ladder; a segment it cannot make answers 404 — players step down onto the
+  ladder on it — and the title's new sessions take the ladder until the
+  file changes (a read that failed only, for a minute). Each is logged and
+  counted (`katalog_stream_copy_fallbacks_total`).
+
+`/play/info`'s `mode` is `passthrough` for the muxed copy, `remux` for the
+stream copy (no quality menu, as before), `transcode` for the ladder (high,
+medium, low); its `reason` says what happens and why, as the player shows
+it: "The video plays as it is in the file. The audio is converted to stereo
+AAC, because this device does not play E-AC-3."
+
 ## The live worker
 
 ADR-0013 (live rungs beside the package, as a supervised safety net), phase
@@ -155,11 +234,15 @@ The live pipeline of a session:
 - **A package's audio**: the stereo rendition's own AAC frames presented in
   each segment, remuxed in Go (mp4ff) with their own timestamps; the init is
   the rendition's.
-- **The stream copy**: remuxed in Go — the init from the original's `moov`,
-  each segment its samples read by byte range — on the plan the ffmpeg path
-  makes; a fragmented original's keyframes come from its `trun` flags. An
-  original mp4ff cannot read (MPEG-TS, FLV) takes the transcode ladder
-  (remux), as Matroska does.
+- **The muxed stream copy** of an MP4: remuxed in Go — the init from the
+  original's `moov`, each segment its samples read by byte range — on the
+  plan the ffmpeg path makes; a fragmented original's keyframes come from
+  its `trun` flags. An original mp4ff cannot read (MPEG-TS, FLV) takes the
+  transcode ladder.
+- **The stream copy** ([above](#what-an-original-plays-as)) is chino-stream's
+  own in Go in every mode; with `on` an audio track it converts is the
+  worker's, a job per segment of the grid in its `cpu` lane, the session
+  pinned with `lw=1` (the worker converts to stereo: no `surround{n}/`).
 - **Embedded subtitles**: an original's are the worker's (`POST
   /v1/subtitle`; a bitmap stream is 502, as before); a package's WebVTT is
   shifted in Go.
@@ -175,7 +258,14 @@ their own (`high-lw1`, `audio-0-lw1`, `copy-lw1`, `sub-lw1`). With the worker
 not ready (`/readyz`), a new session goes to ffmpeg. Without
 `LIVE_WORKER_URL` there is no live pipeline, and `lw` means nothing.
 
-Metrics: `katalog_stream_live_worker_requests_total` and
+Metrics of every pipeline: `katalog_stream_segment_production_seconds` and
+`katalog_stream_segment_realtime_ratio` (the seconds a segment not in a cache
+took to make, and those per second of media in it; `path` package, copy,
+audio or encode), `katalog_stream_copy_fallbacks_total` (`reason` index,
+plan, segment), `katalog_stream_copy_indexes_total` (`result`),
+`katalog_stream_copy_index_duration_seconds` (`how`: cues, moov, scan) and
+`katalog_stream_copy_scan_queue`. Of the live worker:
+`katalog_stream_live_worker_requests_total` and
 `katalog_stream_live_worker_request_duration_seconds` (`kind`, `track`,
 `priority`, `result`), `katalog_stream_live_worker_retries_total` (`kind`,
 `reason`), `katalog_stream_live_worker_fallbacks_total` (`reason`: `unready`,
@@ -190,8 +280,9 @@ A packaged title's master, `/info` and `/prewarm` read the same query:
 - `caps` — what the client decodes, comma-separated: video `avc`, `hvc`,
   `av1`, `vp9`, each with an optional `:<height>` (the hardware decoder's
   tallest frame, e.g. `hvc:1080`); audio `aac`, `mp3`, `opus`, `vorbis`,
-  `ac3`, `eac3`; `aacmc` for AAC beyond two channels. Without `caps` the
-  default set applies: H.264, VP9, AV1, AAC, MP3, Opus, Vorbis — no HEVC.
+  `ac3`, `eac3`; `aacmc` for AAC beyond two channels; `dvh` for Dolby Vision
+  (HEVC based). Without `caps` the default set applies: H.264, VP9, AV1,
+  AAC, MP3, Opus, Vorbis — no HEVC.
   `native` says the client plays the master with the platform's own HLS
   player — AVPlayer (the iOS and tvOS app), Safari's native HLS (chino-web
   without MSE) — which picks between audio groups itself; it changes only
