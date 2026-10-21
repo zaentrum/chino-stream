@@ -131,6 +131,12 @@ func TestRealFiles(t *testing.T) {
 				ix.Video.Shift, ix.Video.DVProfile, ix.Video.DVCompatibility, len(ix.Keyframes),
 				float64(ix.DurationNs)/1e9/float64(len(ix.Keyframes)), len(spans), spans[0].Dur, codecs)
 
+			// A Dolby Vision stream: its record only in the header for a client
+			// that plays it.
+			if ix.Video.DVProfile > 0 && (!bytes.Contains(ix.Video.InitDV, []byte("dvvC")) && !bytes.Contains(ix.Video.InitDV, []byte("dvcC")) ||
+				bytes.Contains(ix.Video.Init, []byte("dvvC")) || bytes.Contains(ix.Video.Init, []byte("dvcC"))) {
+				t.Errorf("Dolby Vision %d: the record in the wrong header", ix.Video.DVProfile)
+			}
 			out, err := ix.Produce(s, 0, copied)
 			if errors.Is(err, errHole) {
 				// A segment larger than the sampled head (a remux's first one runs

@@ -2,6 +2,7 @@ package streamcopy
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -158,5 +159,58 @@ func TestAudioShorterThanTheVideo(t *testing.T) {
 	af := write(t, "audio.mp4", aud[0])
 	if want, got := hashes(t, file, "a:0", true), hashes(t, af, "a:0", true); len(got) != len(want) {
 		t.Errorf("audio: %d packets, the original %d", len(got), len(want))
+	}
+}
+
+// dvRecordOf is a Dolby Vision configuration record of profile, level and
+// base layer compatibility (24 bytes, version 1.0, RPU and base layer).
+func dvRecordOf(profile, level, compat int) []byte {
+	b := make([]byte, 24)
+	b[0], b[1] = 1, 0
+	b[2] = byte(profile<<1 | level>>5)
+	b[3] = byte(level&0x1F<<3 | 1<<2 | 0<<1 | 1) // rpu, no el, bl
+	b[4] = byte(compat << 4)
+	return b
+}
+
+// The headers of a Dolby Vision stream: for a client that plays Dolby
+// Vision its record in the sample entry — profile 5 (no other base layer)
+// as dvh1, 8.1 as the hvc1 it is compatible with — and for any other the
+// HEVC alone.
+func TestDolbyVisionHeaders(t *testing.T) {
+	for _, tc := range []struct {
+		profile, compat int
+		box, entry      string
+	}{{5, 0, "dvcC", "dvh1"}, {8, 1, "dvvC", "hvc1"}} {
+		dv, err := parseDV(tc.box, dvRecordOf(tc.profile, 6, tc.compat))
+		if err != nil || dv.profile != tc.profile || dv.level != 6 || dv.compatibility != tc.compat {
+			t.Fatalf("record %+v %v", dv, err)
+		}
+		if want := fmt.Sprintf("dvh1.%02d.06", tc.profile); dv.codecs() != want {
+			t.Errorf("codecs %s, want %s", dv.codecs(), want)
+		}
+		cfg := &videoConfig{sampleEntry: "hvc1", boxType: "hvcC", box: []byte{1, 2, 3}, width: 3840, height: 2160}
+		for _, withDV := range []bool{true, false} {
+			entry, rec := cfg.sampleEntry, dv
+			if !withDV {
+				rec = nil
+			} else if tc.compat == 0 {
+				entry = "dvh1"
+			}
+			b, err := videoInit(entry, cfg, rec, 24000, 2002, 0, 0, "eng")
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := string(b)
+			if withDV && (!strings.Contains(s, tc.entry) || !strings.Contains(s, tc.box)) {
+				t.Errorf("profile %d for a Dolby Vision client: no %s with its %s", tc.profile, tc.entry, tc.box)
+			}
+			if !withDV && (strings.Contains(s, tc.box) || strings.Contains(s, "dvh1") || !strings.Contains(s, "hvc1")) {
+				t.Errorf("profile %d for another client: the record is in the header", tc.profile)
+			}
+			if !strings.Contains(s, "hvcC") || !strings.Contains(s, "elst") {
+				t.Error("no HEVC configuration or no edit list")
+			}
+		}
 	}
 }
