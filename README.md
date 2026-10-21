@@ -141,8 +141,13 @@ an encode, and the video is never encoded for the audio's sake:
   (`hvc:1080`). HDR10 and HLG are copied where the client takes the codec at
   that height, as a package's HEVC is served. Dolby Vision whose base layer
   other decoders play (8.1, 8.4) is copied as that base layer; profile 5 only
-  to a client that declares Dolby Vision (`dvh`); profile 7 never. Any other
-  video, and a `q` below high, takes the transcode ladder.
+  to a client that declares Dolby Vision (`dvh`); profile 7 never — the
+  file's own record decides, whatever the probe says. An MP4 of profile 5 or
+  7 plays as it always did: the muxed copy where the client takes it whole,
+  else the ladder (until clients declare `dvh` from their decoders and the
+  ladder reshapes profile 5). A client that sends no `caps` is copied video
+  up to 1080p. Any other video, and a `q` below high, takes the transcode
+  ladder.
 - **Each audio track is copied** when the client decodes it: AAC (beyond
   two channels with `aacmc`), AC-3, E-AC-3, multichannel included. Any other
   track is **converted** on a rendition of its own: stereo AAC
@@ -151,9 +156,9 @@ an encode, and the video is never encoded for the audio's sake:
   stereo one). An original with no track converted encodes nothing.
 - An MP4 original the client takes whole (its video and first audio track)
   stays the muxed stream copy (`copy/`) it always was; so does an MPEG-TS
-  one, its keyframes probed in the background (read at 32 MiB/s, ffprobe
-  at the lowest CPU priority; its first session takes the ladder
-  meanwhile).
+  one, its keyframes probed in the background once (read at 32 MiB/s,
+  ffprobe at the lowest CPU priority; its first session takes the ladder
+  meanwhile) and kept in `copy-index/`.
 
 The stream copy (`internal/streamcopy`, `internal/mkv`):
 
@@ -162,12 +167,15 @@ The stream copy (`internal/streamcopy`, `internal/mkv`):
   SeekHead (kilobytes at the end of the file, read in milliseconds), an MP4's
   `stss` and `stts` — and each track's CMAF header: its codec configuration
   as the original has it, an edit list taking the reordering delay off.
-  Nothing reads a whole file on the request path. Indexes are kept by path,
-  size and mtime: in memory, and a Matroska one in the cache folder
-  `copy-index/`, which the 2 h sweep leaves alone (one unused for 30 days
-  goes) — across restarts for as long as the cache volume lasts. `/info`,
-  the master and `/prewarm` make it, so it is there before the first
-  segment.
+  Nothing reads a whole file on the request path: of a Matroska file its
+  head (to its first keyframe and each copied audio track's first frame,
+  further only for a video whose parameter sets do not say how far its
+  frames are reordered; at most 16 MiB) and its Cues. Indexes are kept by path, size and mtime: in
+  memory, and a Matroska one in the cache folder `copy-index/`, which the
+  2 h sweep leaves alone (one unused for 30 days goes) — across restarts
+  for as long as the cache volume lasts. `/info`, the master and `/prewarm`
+  make it — one build per file, which the others wait for — so it is there
+  before the first segment.
 - **No usable index.** A Matroska file without Cues for its video, with
   keyframes more than 20 s apart in them, or with Cues its first Clusters
   show wrong (a cue on a frame that is no keyframe), is read through in the
@@ -179,9 +187,11 @@ The stream copy (`internal/streamcopy`, `internal/mkv`):
   of its own on the track's own timeline — decode times the presentation
   times sorted, so no gap or overlap at a segment's edge — presentation zero
   the container's start time, as every on-the-fly rendition's, so a copied
-  video plays in step with converted audio. Segments are kept in memory
-  (384 MiB, the least recently used dropped: they are cheap to make again),
-  the next two made ahead of the play head.
+  video plays in step with converted audio; an audio frame missing in the
+  file stays a gap, and a track with no frame in a segment has a fragment
+  of none there. Segments are kept in memory (384 MiB, the least recently
+  used dropped: they are cheap to make again), the next two made ahead of
+  the play head.
 - **The master.** One variant, `video/index.m3u8`: `CODECS` from the codec
   configuration (`hvc1.2.4.L150.90,ec-3`), `VIDEO-RANGE` the source's,
   `BANDWIDTH` the copy's peak; its audio group each track at
@@ -192,12 +202,19 @@ The stream copy (`internal/streamcopy`, `internal/mkv`):
   the title's path answers 404.
 - **Fail safe.** A file the copy does not take (a stream feature it does not
   carry, a damaged index, a track list its probe does not match) plays the
-  ladder; a segment it cannot make (its keyframe not where the index says:
-  found out within a keyframe's distance, not at the end of the file)
-  answers 404 — players step down onto the ladder on it — and the title's
-  new sessions take the ladder until the file changes (a read that failed
-  only, for a minute). Each is logged and counted
+  ladder. A segment it cannot make answers 404 — players step down onto the
+  ladder on it — and the title's new sessions take the ladder until the
+  file changes (a session under way goes on with the segments that can be
+  made): one the file is the cause of (its keyframe not where the index
+  says, found out within a keyframe's distance; frames it cannot lay out),
+  at once; one the storage failed to read, 503 with `Retry-After` twice,
+  then so for a minute. A damaged or cut-short file is an error, never a
+  crash: a panic of the reader fails its file. Each is logged and counted
   (`katalog_stream_copy_fallbacks_total`).
+- **Index version.** `IndexVersion` (`internal/streamcopy`) is part of a
+  session's `c=`: raising it makes every index and plan be made anew, which
+  also clears the files kept as failed — and answers 404 to the copy
+  sessions under way, whose players step down onto the ladder.
 
 `/play/info`'s `mode` is `passthrough` for the muxed copy, `remux` for the
 stream copy (no quality menu, as before), `transcode` for the ladder (high,
@@ -266,7 +283,7 @@ Metrics of every pipeline: `katalog_stream_segment_production_seconds` and
 `katalog_stream_segment_realtime_ratio` (the seconds a segment not in a cache
 took to make, and those per second of media in it; `path` package, copy,
 audio or encode), `katalog_stream_copy_fallbacks_total` (`reason` index,
-plan, segment), `katalog_stream_copy_indexes_total` (`result`),
+plan, segment, panic), `katalog_stream_copy_indexes_total` (`result`),
 `katalog_stream_copy_index_duration_seconds` (`how`: cues, moov, scan) and
 `katalog_stream_copy_scan_queue`. Of the live worker:
 `katalog_stream_live_worker_requests_total` and
