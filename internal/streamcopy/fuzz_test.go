@@ -30,7 +30,21 @@ func FuzzMatroskaCopy(f *testing.F) {
 				f.Add(b)
 			}
 		}
+		// H.264 and AAC written anew with the AAC stored zlib-compressed, a
+		// block of it inflating past the bounds the fuzz reads with.
+		aac := filepath.Join(dir, "aac.mkv")
+		if exec.Command(ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error",
+			"-f", "lavfi", "-i", "testsrc2=size=64x48:rate=24:duration=2", "-f", "lavfi", "-i", "sine=sample_rate=48000:duration=2",
+			"-c:v", "libx264", "-preset", "ultrafast", "-g", "12", "-bf", "0", "-c:a", "aac", "-y", aac).Run() == nil {
+			mf, blocks := blocksOf(f, aac)
+			f.Add(zlibFilm(f, mf, blocks, true, 2, 1, 16, 256<<10))
+		}
 	}
+	// Bounds far below the real ones: a block of zeros inflating past them
+	// is found in milliseconds.
+	oldHead, oldSegment := maxHeadInflated, maxSegmentInflated
+	maxHeadInflated, maxSegmentInflated = 1<<20, 1<<20
+	f.Cleanup(func() { maxHeadInflated, maxSegmentInflated = oldHead, oldSegment })
 	f.Fuzz(func(t *testing.T, data []byte) {
 		r := bytes.NewReader(data)
 		ix, err := IndexMatroska(r, int64(len(data)), Options{DurationNs: 2e9})

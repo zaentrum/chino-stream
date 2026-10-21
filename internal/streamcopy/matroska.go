@@ -41,6 +41,15 @@ const headLimit = 16 << 20
 // SPS without its bitstream restrictions): two seconds or so.
 const headFrames = 48
 
+// What the frames of the head and of a segment inflate to at most (a
+// track's zlib content encoding), all of them together: far above any real
+// one (zlib compresses subtitles, rarely anything else), far below what a
+// file made to inflate to gigabytes would take. Variables for the tests.
+var (
+	maxHeadInflated    int64 = 16 << 20
+	maxSegmentInflated int64 = 256 << 20
+)
+
 // IndexMatroska indexes the Matroska original r of size bytes: its tracks'
 // headers (reading its first Clusters for what they need) and the keyframes
 // its Cues list. An index whose file has no usable Cues has no keyframes
@@ -326,6 +335,14 @@ func (ix *Index) readHead(r io.ReaderAt, f *mkv.File, vt *mkv.Track, audio []*mk
 		byNumber[t.Number] = i
 	}
 	firstSeen := make([]bool, len(audio))
+	// The first frame of each audio track that may be copied: the video's
+	// blocks say what the index needs of them in their headers, and no other
+	// frame is read (nor inflated).
+	rd.Want = func(track uint64) bool {
+		i, ok := byNumber[track]
+		return ok && ix.Audio[i].Why == "" && !firstSeen[i]
+	}
+	rd.MaxInflated = maxHeadInflated
 	pending := 0
 	for i := range audio {
 		if ix.Audio[i].Why == "" {
@@ -546,14 +563,19 @@ func (ix *Index) produceMatroska(r io.ReaderAt, n int, audio []int) (*Output, er
 	// Large reads: a segment is megabytes, and what a read takes past its end
 	// is the next segment's start, which its prefetch reads next.
 	rd.Chunk = segmentChunk
+	rd.MaxInflated = maxSegmentInflated
 	want := map[uint64]int{}
 	for _, a := range audio {
 		want[ix.Audio[a].Number] = a
 	}
 	vnum := ix.Video.Number
+	// The video's frames, and the copied audio's while the segment's audio
+	// runs: what lies before it in the file (the segment before's) and after
+	// it is not read (nor inflated) — a block a segment fails on is its own.
+	var audioIn, after bool
 	rd.Want = func(t uint64) bool {
 		_, ok := want[t]
-		return t == vnum || ok
+		return t == vnum || ok && audioIn && !after
 	}
 	v := &ix.Video
 	tol := int64(v.Timescale) / 1000
@@ -568,7 +590,8 @@ func (ix *Index) produceMatroska(r io.ReaderAt, n int, audio []int) (*Output, er
 	// The video starts at the segment's keyframe; the audio of segment 0 at
 	// the first Cluster, of any other at that keyframe too: what lies before
 	// it in the file is the segment before's.
-	videoIn, audioIn, after := false, n == 0, false
+	videoIn := false
+	audioIn, after = n == 0, false
 	nextPTS, leadMin, leading := int64(0), int64(0), 0
 	// A keyframe not where the index says fails the segment at once, not at
 	// the end of the file: keyframes come in the order they are presented,

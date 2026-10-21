@@ -209,8 +209,9 @@ The stream copy (`internal/streamcopy`, `internal/mkv`):
   says, found out within a keyframe's distance; frames it cannot lay out),
   at once; one the storage failed to read, 503 with `Retry-After` twice,
   then so for a minute. A damaged or cut-short file is an error, never a
-  crash: a panic of the reader fails its file. Each is logged and counted
-  (`katalog_stream_copy_fallbacks_total`).
+  crash, and so are frames made to inflate past 64 MiB a block (256 MiB a
+  segment, 16 MiB the head); a panic of the reader fails its file. Each is
+  logged and counted (`katalog_stream_copy_fallbacks_total`).
 - **Index version.** `IndexVersion` (`internal/streamcopy`) is part of a
   session's `c=`: raising it makes every index and plan be made anew, which
   also clears the files kept as failed — and answers 404 to the copy

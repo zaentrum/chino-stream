@@ -2,6 +2,7 @@ package streamcopy
 
 import (
 	"bytes"
+	"compress/zlib"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"math"
 	"os"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -33,7 +35,7 @@ type blockAt struct {
 }
 
 // blocksOf lists every block of the Matroska file.
-func blocksOf(t *testing.T, file string) (*mkv.File, []blockAt) {
+func blocksOf(t testing.TB, file string) (*mkv.File, []blockAt) {
 	t.Helper()
 	fh, err := os.Open(file)
 	if err != nil {
@@ -532,4 +534,185 @@ func TestTheHeadIsReadAsFarAsNeeded(t *testing.T) {
 		t.Errorf("indexing read %d bytes of a file of %d", r.n, st.Size())
 	}
 	t.Logf("indexing read %d bytes of %d", r.n, st.Size())
+}
+
+// zeroStream is a zlib stream of n zeros.
+func zeroStream(t testing.TB, n int) []byte {
+	var buf bytes.Buffer
+	w, _ := zlib.NewWriterLevel(&buf, zlib.BestCompression)
+	chunk := make([]byte, 1<<20)
+	for n > 0 {
+		k := min(n, len(chunk))
+		if _, err := w.Write(chunk[:k]); err != nil {
+			t.Fatal(err)
+		}
+		n -= k
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func zlibbed(t testing.TB, b []byte) []byte {
+	var buf bytes.Buffer
+	w := zlib.NewWriter(&buf)
+	if _, err := w.Write(b); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// zlibFilm writes the blocks of the Matroska file f (an H.264 track 1 and
+// an AAC track 2) anew, a Cluster per video keyframe and Cues, with a
+// zlib-compressed subtitle track 3 besides — the audio's frames
+// zlib-compressed too with zlibAudio — and in Cluster bombAt a block of
+// track bomb: frames laced frames that each inflate to size zeros.
+func zlibFilm(t testing.TB, f *mkv.File, blocks []blockAt, zlibAudio bool, bomb uint64, bombAt, frames, size int) []byte {
+	t.Helper()
+	type cluster struct {
+		ts, kf int64
+		video  bool
+		blocks []blockAt
+	}
+	var cls []cluster
+	vt, at := f.Tracks[0], f.Track(2)
+	for _, b := range blocks {
+		if len(cls) == 0 || (b.track == vt.Number && b.key && cls[len(cls)-1].video) {
+			cls = append(cls, cluster{ts: b.ts, kf: -1})
+		}
+		c := &cls[len(cls)-1]
+		if b.track == vt.Number {
+			c.video = true
+			if b.key && c.kf < 0 {
+				c.kf = b.ts
+			}
+		}
+		c.blocks = append(c.blocks, b)
+	}
+	simple := func(track uint64, rel int64, flags byte, data []byte) []byte {
+		return ebml(0xA3, append([]byte{0x80 | byte(track), byte(uint16(rel) >> 8), byte(rel), flags}, data...))
+	}
+	var data [][]byte
+	for i, c := range cls {
+		parts := [][]byte{ebmlUint(0xE7, uint64(c.ts))}
+		if i == bombAt {
+			// First in its Cluster: where a read of the head meets it.
+			z := zeroStream(t, size)
+			laced, flags := z, byte(0x80)
+			if frames > 1 {
+				laced, flags = append([]byte{byte(frames - 1)}, bytes.Repeat(z, frames)...), 0x80|2<<1 // fixed lacing
+			}
+			parts = append(parts, simple(bomb, 0, flags, laced))
+		}
+		for _, b := range c.blocks {
+			frame, flags := b.frames[0], byte(0)
+			if b.key {
+				flags = 0x80
+			}
+			if b.track == at.Number && zlibAudio {
+				frame = zlibbed(t, frame)
+			}
+			parts = append(parts, simple(b.track, b.ts-c.ts, flags, frame))
+		}
+		data = append(data, ebml(0x1F43B675, parts...))
+	}
+	zlibEnc := ebml(0x6D80, ebml(0x6240, ebmlUint(0x5031, 0), ebmlUint(0x5032, 1), ebmlUint(0x5033, 0), ebml(0x5034, ebmlUint(0x4254, 0))))
+	info := ebml(0x1549A966, ebmlUint(0x2AD7B1, uint64(f.TimestampScale)), ebmlFloat(0x4489, f.Duration))
+	video := ebml(0xAE, ebmlUint(0xD7, vt.Number), ebmlUint(0x73C5, 1), ebmlUint(0x83, 1), ebml(0x86, []byte(vt.CodecID)),
+		ebml(0x63A2, vt.CodecPrivate), ebmlUint(0x23E383, vt.DefaultDuration),
+		ebml(0xE0, ebmlUint(0xB0, vt.Video.PixelWidth), ebmlUint(0xBA, vt.Video.PixelHeight)))
+	audioParts := [][]byte{ebmlUint(0xD7, at.Number), ebmlUint(0x73C5, 2), ebmlUint(0x83, 2), ebml(0x86, []byte(at.CodecID)),
+		ebml(0x63A2, at.CodecPrivate), ebml(0xE1, ebmlFloat(0xB5, at.Audio.SamplingFrequency), ebmlUint(0x9F, at.Audio.Channels))}
+	if zlibAudio {
+		audioParts = append(audioParts, zlibEnc)
+	}
+	subs := ebml(0xAE, ebmlUint(0xD7, 3), ebmlUint(0x73C5, 3), ebmlUint(0x83, 17), ebml(0x86, []byte("S_TEXT/UTF8")), zlibEnc)
+	tracks := ebml(0x1654AE6B, video, ebml(0xAE, audioParts...), subs)
+	cues := func(first int64) []byte {
+		var points [][]byte
+		pos := first
+		for i, c := range cls {
+			points = append(points, ebml(0xBB, ebmlUint(0xB3, uint64(c.kf)), ebml(0xB7, ebmlUint(0xF7, vt.Number), ebmlUint(0xF1, uint64(pos)))))
+			pos += int64(len(data[i]))
+		}
+		return ebml(0x1C53BB6B, points...)
+	}
+	first := int64(len(info)+len(tracks)) + int64(len(cues(0)))
+	segment := bytes.Join(append([][]byte{info, tracks, cues(first)}, data...), nil)
+	return append(ebml(0x1A45DFA3, ebml(0x4282, []byte("matroska"))), ebml(0x18538067, segment)...)
+}
+
+// bytesAllocated is how many bytes fn allocates.
+func bytesAllocated(fn func()) uint64 {
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	fn()
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
+}
+
+// A subtitle block in the head that inflates to 256 MiB (laced frames of
+// zeros, as a file made to exhaust memory has): the index reads only the
+// copied audio's first frame and the video's block headers, and inflates
+// none of it; nor does a segment, which reads the subtitles no more.
+func TestAZlibBombNotCopiedIsNotInflated(t *testing.T) {
+	src := gopFilm(t, 20)
+	f, blocks := blocksOf(t, src)
+	file := write(t, "bomb.mkv", zlibFilm(t, f, blocks, false, 3, 0, 256, 1<<20))
+	var ix *Index
+	if n := bytesAllocated(func() { ix = index(t, file) }); n > 32<<20 {
+		t.Errorf("indexing allocated %d MiB", n>>20)
+	}
+	fh, _ := os.Open(file)
+	defer fh.Close()
+	var err error
+	if n := bytesAllocated(func() { _, err = ix.Produce(fh, 0, []int{0}) }); err != nil || n > 64<<20 {
+		t.Errorf("segment 0: %v, %d MiB allocated", err, n>>20)
+	}
+}
+
+// A copied audio track stored zlib-compressed: its frames copied inflated,
+// ffmpeg's packets; a block of it that inflates to 256 MiB fails its segment
+// as the file's, bounded, and the other segments are made.
+func TestAZlibBombInACopiedTrackFailsItsSegment(t *testing.T) {
+	src := gopFilm(t, 20)
+	f, blocks := blocksOf(t, src)
+	file := write(t, "bomb.mkv", zlibFilm(t, f, blocks, true, 2, 3, 256, 1<<20))
+	ix := index(t, file)
+	if !ix.Audio[0].Copyable() {
+		t.Fatalf("the audio is not copied: %s", ix.Audio[0].Why)
+	}
+	fh, _ := os.Open(file)
+	defer fh.Close()
+	failed := 0
+	for n := range ix.Spans() {
+		var err error
+		allocated := bytesAllocated(func() { _, err = ix.Produce(fh, n, []int{0}) })
+		switch {
+		case errors.Is(err, mkv.ErrFormat):
+			failed++
+			// A few times the block's bound (the growing buffers, the race
+			// detector's share), not the bomb's 256 MiB and more.
+			if allocated > 6*mkv.MaxBlockInflated {
+				t.Errorf("segment %d: %d MiB allocated before it failed", n, allocated>>20)
+			}
+		case err != nil:
+			t.Errorf("segment %d: %v", n, err)
+		}
+	}
+	if failed != 1 {
+		t.Errorf("%d segments failed, want the bomb's", failed)
+	}
+	// Without the bomb: every frame copied inflated, as ffmpeg reads them.
+	clean := write(t, "zlib.mkv", zlibFilm(t, f, blocks, true, 3, -1, 0, 0))
+	ixc := index(t, clean)
+	_, aud, _ := produceAll(t, ixc, []int{0})
+	if want, got := hashes(t, clean, "a:0", true), hashes(t, write(t, "audio.mp4", aud[0]), "a:0", true); !reflect.DeepEqual(got, want) {
+		t.Errorf("zlib-compressed audio: %d packets copied, ffmpeg reads %d (equal: %v)", len(got), len(want), reflect.DeepEqual(got, want))
+	}
 }

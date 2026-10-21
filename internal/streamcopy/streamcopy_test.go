@@ -19,7 +19,7 @@ import (
 )
 
 // tool is ffmpeg or ffprobe from $PATH; the test is skipped without it.
-func tool(t *testing.T, name string) string {
+func tool(t testing.TB, name string) string {
 	t.Helper()
 	p, err := exec.LookPath(name)
 	if err != nil {
@@ -29,7 +29,7 @@ func tool(t *testing.T, name string) string {
 }
 
 // run runs a command, failing the test with its output when it fails.
-func run(t *testing.T, name string, args ...string) []byte {
+func run(t testing.TB, name string, args ...string) []byte {
 	t.Helper()
 	var stderr bytes.Buffer
 	cmd := exec.Command(name, args...)
@@ -45,7 +45,7 @@ func run(t *testing.T, name string, args ...string) []byte {
 }
 
 // makeFile makes a media file with ffmpeg: args after the inputs.
-func makeFile(t *testing.T, name string, args ...string) string {
+func makeFile(t testing.TB, name string, args ...string) string {
 	t.Helper()
 	out := filepath.Join(t.TempDir(), name)
 	run(t, tool(t, "ffmpeg"), append(append([]string{"-nostdin", "-hide_banner", "-loglevel", "error"}, args...), "-y", out)...)
@@ -137,7 +137,7 @@ func produceAll(t *testing.T, ix *Index, audio []int) (video []byte, aud map[int
 	return video, aud, segs
 }
 
-func write(t *testing.T, name string, b []byte) string {
+func write(t testing.TB, name string, b []byte) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), name)
 	if err := os.WriteFile(p, b, 0o644); err != nil {

@@ -3,6 +3,7 @@ package mkv
 import (
 	"bytes"
 	"compress/zlib"
+	"errors"
 	"io"
 )
 
@@ -40,6 +41,11 @@ type Reader struct {
 	Want func(track uint64) bool
 	// Chunk is how much one read reads at least.
 	Chunk int
+	// MaxInflated bounds the bytes the frames the Reader returns inflate to
+	// (a track's zlib content encoding), all blocks together; 0:
+	// DefaultMaxInflated. One block inflates to MaxBlockInflated at most.
+	MaxInflated int64
+	inflated    int64
 
 	buf   []byte
 	bufAt int64
@@ -57,6 +63,15 @@ const DefaultChunk = 1 << 20
 // MaxBlock bounds one block (a SimpleBlock's or a Block's payload): a block
 // said to be larger is damage, not a frame, and nothing is read for it.
 const MaxBlock = 256 << 20
+
+// The bounds of what frames inflate to (zlib): a block's frames together,
+// and a Reader's blocks together unless its MaxInflated says otherwise. No
+// real block comes near them — zlib compresses subtitles, rarely anything
+// else — a block made to inflate to gigabytes (laced frames of zeros) does.
+const (
+	MaxBlockInflated   = 64 << 20
+	DefaultMaxInflated = 256 << 20
+)
 
 // Blocks is a Reader of r (the file f) from the Cluster at the absolute
 // position from to the end of the Segment.
@@ -252,15 +267,30 @@ func (rd *Reader) block(elem, at, size int64, simple bool) (*Block, error) {
 		return nil, formatErr("block at %d: %v", elem, err)
 	}
 	if t := rd.f.Track(track); t != nil && len(t.Encodings) > 0 {
+		limit := rd.MaxInflated
+		if limit <= 0 {
+			limit = DefaultMaxInflated
+		}
+		bound := max(0, min(int64(MaxBlockInflated), limit-rd.inflated))
+		budget := bound
 		for i, fr := range frames {
-			if frames[i], err = t.decode(fr); err != nil {
+			var inflated int64
+			if frames[i], inflated, err = t.decode(fr, budget); err != nil {
+				if errors.Is(err, errInflated) {
+					return nil, formatErr("block at %d: its frames inflate past %d bytes", elem, bound)
+				}
 				return nil, formatErr("block at %d: %v", elem, err)
 			}
+			budget -= inflated
+			rd.inflated += inflated
 		}
 	}
 	blk.Frames = frames
 	return blk, nil
 }
+
+// Inflated is how many bytes the frames the Reader returned inflated to.
+func (rd *Reader) Inflated() int64 { return rd.inflated }
 
 // group reads a BlockGroup of size bytes from at (its element at elem): its
 // Block, its duration, and whether it references another (then it is no
@@ -413,16 +443,20 @@ func (t *Track) Decodable() bool {
 	return true
 }
 
+// errInflated is a frame that inflates past what it may.
+var errInflated = errors.New("inflates past its bound")
+
 // decode undoes the track's content encodings on a frame, the highest order
-// first.
-func (t *Track) decode(frame []byte) ([]byte, error) {
+// first, inflating it to budget bytes at most (errInflated past them);
+// inflated is how many its zlib layers came to.
+func (t *Track) decode(frame []byte, budget int64) (out []byte, inflated int64, err error) {
 	for i := len(t.Encodings) - 1; i >= 0; i-- {
 		e := t.Encodings[i]
 		if e.Scope&1 == 0 {
 			continue
 		}
 		if e.Type != 0 {
-			return nil, formatErr("track %d is encrypted", t.Number)
+			return nil, inflated, formatErr("track %d is encrypted", t.Number)
 		}
 		switch e.CompAlgo {
 		case compHeaderStripping:
@@ -431,16 +465,24 @@ func (t *Track) decode(frame []byte) ([]byte, error) {
 		case compZlib:
 			zr, err := zlib.NewReader(bytes.NewReader(frame))
 			if err != nil {
-				return nil, formatErr("track %d: zlib: %v", t.Number, err)
+				return nil, inflated, formatErr("track %d: zlib: %v", t.Number, err)
 			}
-			out, err := io.ReadAll(io.LimitReader(zr, 64<<20))
+			left := budget - inflated
+			if left < 0 {
+				left = 0
+			}
+			out, err := io.ReadAll(io.LimitReader(zr, left+1))
 			if err != nil {
-				return nil, formatErr("track %d: zlib: %v", t.Number, err)
+				return nil, inflated, formatErr("track %d: zlib: %v", t.Number, err)
 			}
+			if int64(len(out)) > left {
+				return nil, inflated, errInflated
+			}
+			inflated += int64(len(out))
 			frame = out
 		default:
-			return nil, formatErr("track %d: compression %d", t.Number, e.CompAlgo)
+			return nil, inflated, formatErr("track %d: compression %d", t.Number, e.CompAlgo)
 		}
 	}
-	return frame, nil
+	return frame, inflated, nil
 }

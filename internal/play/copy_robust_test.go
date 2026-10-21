@@ -648,3 +648,60 @@ func TestAnMPEGTSPlanOutlivesTheSweep(t *testing.T) {
 		t.Errorf("the copy's playlist after the sweep: %d", pl.Code)
 	}
 }
+
+// A segment refused for a while (the storage failed it copySegmentTries
+// times in a row) that is made meanwhile — by a prefetch, or found in the
+// cache — is served, not refused for the rest of the while.
+func TestARefusedSegmentIsServedOnceMade(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a file of mode 0")
+	}
+	ffmpeg, ffprobe := realFFmpeg(t)
+	captureLog(t)
+	inPlaceWarms(t)
+	old := copyIndexRetry
+	copyIndexRetry = time.Minute // refused for longer than the test runs
+	t.Cleanup(func() { copyIndexRetry = old })
+	root, file := plainFilm(t, ffmpeg, 14, 14, false)
+	h := copyHandler(t, root, file, windowFFmpeg(t, t.TempDir(), 0, 10, ""), ffprobe)
+	video, _ := copySession(t, h, "?caps=avc,aac")
+	refuse := func() {
+		t.Helper()
+		if err := os.Chmod(file, 0); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Chmod(file, 0o644) }()
+		for try := 1; try <= copySegmentTries; try++ {
+			if w := get(h, segmentURI(video, 1)); try == copySegmentTries && w.Code != 404 {
+				t.Fatalf("try %d: %d", try, w.Code)
+			}
+		}
+		if w := get(h, segmentURI(video, 1)); w.Code != 404 {
+			t.Fatalf("not refused: %d", w.Code)
+		}
+	}
+	refuse()
+	src := &source{key: "i1", file: file, probe: mustProbe(t, ffprobe, file)}
+	ix, _, _ := h.streamIndex(context.Background(), src)
+	if ix == nil {
+		t.Fatal("no index")
+	}
+	// Made by a prefetch.
+	if _, err := h.ensureCopySegment(context.Background(), src, ix, 1, true); err != nil {
+		t.Fatal(err)
+	}
+	if w := get(h, segmentURI(video, 1)); w.Code != 200 {
+		t.Errorf("made by a prefetch: %d", w.Code)
+	}
+	// In the cache while refused.
+	key := h.copyKey(src, ix, 1)
+	seg := h.copyCache.get(key)
+	h.copyCache.mu.Lock()
+	h.copyCache.m, h.copyCache.bytes = nil, 0
+	h.copyCache.mu.Unlock()
+	refuse()
+	h.copyCache.put(key, seg)
+	if w := get(h, segmentURI(video, 1)); w.Code != 200 {
+		t.Errorf("in the cache: %d", w.Code)
+	}
+}

@@ -101,8 +101,8 @@ func TestUnlace(t *testing.T) {
 // Header stripping puts the bytes back that the muxer took off every frame.
 func TestHeaderStripping(t *testing.T) {
 	tr := Track{Number: 2, Encodings: []ContentEncoding{{Scope: 1, Type: 0, CompAlgo: compHeaderStripping, CompSettings: []byte{0x0B, 0x77}}}}
-	got, err := tr.decode([]byte{1, 2, 3})
-	if err != nil || !bytes.Equal(got, []byte{0x0B, 0x77, 1, 2, 3}) || !tr.Decodable() {
+	got, inflated, err := tr.decode([]byte{1, 2, 3}, MaxBlockInflated)
+	if err != nil || inflated != 0 || !bytes.Equal(got, []byte{0x0B, 0x77, 1, 2, 3}) || !tr.Decodable() {
 		t.Errorf("decode = % x, %v", got, err)
 	}
 	enc := Track{Encodings: []ContentEncoding{{Scope: 1, Type: 1}}}

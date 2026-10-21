@@ -667,11 +667,17 @@ func (h *HLSHandler) copyKey(src *source, ix *streamcopy.Index, n int) string {
 // could not be read for is 503, to be asked for again.
 func (h *HLSHandler) serveCopySegment(w http.ResponseWriter, r *http.Request, src *source, ix *streamcopy.Index, track, n int) bool {
 	key := h.copyKey(src, ix, n)
-	if h.copyTries.refused(key) {
+	// A segment in the cache is served, whatever was answered for it before
+	// (a prefetch may have made it since).
+	seg := h.copyCache.get(key)
+	if seg == nil && h.copyTries.refused(key) {
 		http.Error(w, "segment unavailable", http.StatusNotFound)
 		return false
 	}
-	seg, err := h.ensureCopySegment(r.Context(), src, ix, n, false)
+	var err error
+	if seg == nil {
+		seg, err = h.ensureCopySegment(r.Context(), src, ix, n, false)
+	}
 	if err != nil {
 		if r.Context().Err() != nil {
 			return false
@@ -750,10 +756,12 @@ func (c *copyTries) failed(key string) int {
 	return c.n[key]
 }
 
+// clear forgets the failures of key: it was made.
 func (c *copyTries) clear(key string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.n, key)
+	delete(c.none, key)
 }
 
 // refuse has the segment key answered 404 at once until until.
@@ -889,6 +897,7 @@ func (h *HLSHandler) makeCopySegment(src *source, ix *streamcopy.Index, n int, k
 		seg.size += int64(len(b))
 	}
 	h.copyCache.put(key, seg)
+	h.copyTries.clear(key)
 	metrics.ObserveSegment("copy", time.Since(t0), ix.Spans()[n].Dur)
 	metrics.BytesServed.WithLabelValues("copy-read").Add(float64(out.Read))
 	return seg, nil

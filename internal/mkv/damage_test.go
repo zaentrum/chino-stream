@@ -5,6 +5,7 @@ import (
 	"compress/zlib"
 	"errors"
 	"io"
+	"runtime"
 	"testing"
 )
 
@@ -125,14 +126,16 @@ func handMadeFile(t testing.TB, pad int) []byte {
 }
 
 // readAll reads every block of data from its first Cluster, the frames of
-// the tracks want wants (nil: all), with reads of chunk bytes.
-func readAll(data []byte, want func(uint64) bool, chunk int) ([]*Block, error) {
+// the tracks want wants (nil: all), with reads of chunk bytes, inflating
+// them to maxInflated bytes at most (0: the default).
+func readAll(data []byte, want func(uint64) bool, chunk int, maxInflated int64) ([]*Block, error) {
 	f, err := Open(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return nil, err
 	}
 	rd := f.Blocks(bytes.NewReader(data), f.FirstCluster)
 	rd.Want = want
+	rd.MaxInflated = maxInflated
 	if chunk > 0 {
 		rd.Chunk = chunk
 	}
@@ -158,7 +161,7 @@ func TestHandMadeFile(t *testing.T) {
 	if len(f.Tracks) != 3 || len(f.Cues) != 2 || f.FirstCluster < 0 {
 		t.Fatalf("%d tracks, %d cues, first cluster %d", len(f.Tracks), len(f.Cues), f.FirstCluster)
 	}
-	blocks, err := readAll(data, nil, 0)
+	blocks, err := readAll(data, nil, 0, 0)
 	if !errors.Is(err, io.EOF) {
 		t.Fatalf("read: %v", err)
 	}
@@ -199,7 +202,7 @@ func TestTruncatedFiles(t *testing.T) {
 							t.Fatalf("cut at %d, %s wanted, chunk %d: panic %v", cut, name, chunk, r)
 						}
 					}()
-					_, err := readAll(data[:cut], want, chunk)
+					_, err := readAll(data[:cut], want, chunk, 0)
 					if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, ErrFormat) {
 						t.Fatalf("cut at %d, %s wanted: %v", cut, name, err)
 					}
@@ -221,7 +224,7 @@ func TestTruncatedBlockGroup(t *testing.T) {
 		el(idCluster, uintEl(idTimestamp, 0), simple, group))...)
 	cut := bytes.Index(file, bytes.Repeat([]byte{'x'}, 16)) + 500
 	for _, want := range []func(uint64) bool{func(uint64) bool { return false }, func(t uint64) bool { return t == 1 }} {
-		blocks, err := readAll(file[:cut], want, 0)
+		blocks, err := readAll(file[:cut], want, 0, 0)
 		if !errors.Is(err, io.EOF) || len(blocks) != 1 {
 			t.Errorf("%d blocks, then %v; want the video's, then io.EOF", len(blocks), err)
 		}
@@ -376,6 +379,103 @@ func TestCuesThatCannotBeRead(t *testing.T) {
 	}
 }
 
+// zeros is a zlib stream of n zero bytes.
+func zeros(t testing.TB, n int) []byte {
+	var buf bytes.Buffer
+	w, _ := zlib.NewWriterLevel(&buf, zlib.BestCompression)
+	chunk := make([]byte, 1<<20)
+	for n > 0 {
+		k := min(n, len(chunk))
+		if _, err := w.Write(chunk[:k]); err != nil {
+			t.Fatal(err)
+		}
+		n -= k
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// zlibBombFile is a file of a video track (1) and a zlib-compressed
+// subtitle track (3) whose blocks (one per given count) hold frames laced
+// frames each, each a zlib stream of size zeros: a block that inflates to
+// frames × size bytes.
+func zlibBombFile(t testing.TB, frames, size, blocks int) []byte {
+	tracks := el(idTracks,
+		el(idTrackEntry, uintEl(idTrackNumber, 1), uintEl(idTrackType, TrackVideo), strEl(idCodecID, "V_MPEG4/ISO/AVC")),
+		el(idTrackEntry, uintEl(idTrackNumber, 3), uintEl(idTrackType, TrackSubtitle), strEl(idCodecID, "S_TEXT/UTF8"),
+			el(idContentEncs, el(idContentEnc, uintEl(idContentEncScope, 1), el(idContentComp, uintEl(idContentCompAlgo, compZlib))))))
+	frame := zeros(t, size)
+	parts := [][]byte{uintEl(idTimestamp, 0), el(idSimpleBlock, blockPayload(1, 0, 0x80, []byte{1, 2, 3}))}
+	for i := 0; i < blocks; i++ {
+		laced := append([]byte{byte(frames - 1)}, bytes.Repeat(frame, frames)...) // fixed-size lacing
+		flags := byte(0)
+		if frames > 1 {
+			flags = 2 << 1
+		} else {
+			laced = frame
+		}
+		parts = append(parts, el(idSimpleBlock, blockPayload(3, int16(i), 0x80|flags, laced)))
+	}
+	return append(ebmlHeader(), el(idSegment, el(idInfo, uintEl(idTSScale, 1_000_000)), tracks, el(idCluster, parts...))...)
+}
+
+// allocated is how many bytes fn allocates.
+func allocated(fn func()) uint64 {
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	fn()
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
+}
+
+// A frame that inflates to 128 MiB from 127 KB, and a block of 256 frames
+// that inflate to 1 MiB each: errors of the file's format, read no further
+// than a block's bound — not a frame cut short, not 256 MiB in memory.
+func TestZlibBombs(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		frames, size int
+	}{{"one frame of 128 MiB", 1, 128 << 20}, {"256 frames of 1 MiB", 256, 1 << 20}} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := zlibBombFile(t, tc.frames, tc.size, 1)
+			var blocks []*Block
+			var err error
+			n := allocated(func() { blocks, err = readAll(data, nil, 0, 0) })
+			if !errors.Is(err, ErrFormat) || len(blocks) != 1 {
+				t.Errorf("%d blocks, then %v; want the video's, then the file's error", len(blocks), err)
+			}
+			// What a block bounded at MaxBlockInflated allocates (the growing
+			// buffers, the race detector's share) is a few times the bound:
+			// one inflating its 256 MiB allocates twice that and more.
+			if n > 6*MaxBlockInflated {
+				t.Errorf("%d MiB allocated reading a block of %d KB", n>>20, len(data)>>10)
+			}
+			t.Logf("%d KB, %d MiB allocated: %v", len(data)>>10, n>>20, err)
+		})
+	}
+	// A block the subtitle track's frames are not wanted of is not inflated.
+	data := zlibBombFile(t, 256, 1<<20, 1)
+	var err error
+	if n := allocated(func() { _, err = readAll(data, func(t uint64) bool { return t == 1 }, 0, 0) }); n > 8<<20 || !errors.Is(err, io.EOF) {
+		t.Errorf("not wanted: %d MiB allocated, %v", n>>20, err)
+	}
+}
+
+// Blocks below a block's bound inflate to a Reader's at most, all together.
+func TestAReadersInflationIsBounded(t *testing.T) {
+	data := zlibBombFile(t, 40, 256<<10, 4) // 10 MiB a block
+	blocks, err := readAll(data, nil, 0, 25<<20)
+	if !errors.Is(err, ErrFormat) || len(blocks) != 3 {
+		t.Errorf("%d blocks, then %v; want the video's and two of 10 MiB, then the file's error", len(blocks), err)
+	}
+	if blocks, err := readAll(data, nil, 0, 0); !errors.Is(err, io.EOF) || len(blocks) != 5 {
+		t.Errorf("with the default bound: %d blocks, %v", len(blocks), err)
+	}
+}
+
 // The fuzz targets: whatever the bytes, Open and the block reader end in a
 // File and blocks, or an error.
 
@@ -384,10 +484,13 @@ func FuzzReader(f *testing.F) {
 	f.Add(data)
 	f.Add(data[:len(data)/2])
 	f.Add(data[:len(data)-7])
+	// A block of zlib frames that inflate to 4 MiB, past the bound the fuzz
+	// reads with.
+	f.Add(zlibBombFile(f, 64, 64<<10, 1))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		for _, want := range []func(uint64) bool{nil, func(uint64) bool { return false }, func(t uint64) bool { return t == 1 }} {
 			for _, chunk := range []int{0, 7} {
-				_, _ = readAll(data, want, chunk)
+				_, _ = readAll(data, want, chunk, 1<<20)
 			}
 		}
 	})
