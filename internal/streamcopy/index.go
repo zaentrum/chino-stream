@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"sync"
 )
 
 // IndexVersion is the version of what an Index holds; a persisted index of
@@ -76,8 +77,11 @@ type Index struct {
 	FirstData   int64                 `json:"firstData,omitempty"` // the first Cluster
 	Encodings   map[uint64][]Encoding `json:"encodings,omitempty"`
 
-	spans []Span
-	mp4   *mp4Source // an MP4's sample tables, in memory only
+	// spans are made of the keyframes the first time they are asked for,
+	// by whichever session asks first.
+	spansMu sync.Mutex
+	spans   []Span
+	mp4     *mp4Source // an MP4's sample tables, in memory only
 }
 
 // Encoding is a Matroska track's content encoding (mkv.ContentEncoding).
@@ -172,6 +176,8 @@ type Span struct {
 // Spans are the segments of the copy, its keyframes grouped into segments of
 // at least TargetSegment seconds, the last up to the end.
 func (ix *Index) Spans() []Span {
+	ix.spansMu.Lock()
+	defer ix.spansMu.Unlock()
 	if ix.spans != nil || len(ix.Keyframes) == 0 || ix.Video.Timescale == 0 {
 		return ix.spans
 	}
@@ -208,37 +214,43 @@ func (ix *Index) Spans() []Span {
 
 // Check says whether the index is one segments can be made by: keyframes
 // from the start to the end, none farther apart than maxKeyframeGap, in
-// order. A Matroska index that is not is ErrNoIndex.
+// order. A Matroska index that is not is ErrNoIndex (a scan of the file finds
+// its keyframes); an MP4's sample tables are the keyframes it has, so an MP4
+// whose are not is not copied (ErrUnsupported).
 func (ix *Index) Check() error {
 	if ix.DurationNs <= 0 {
 		return unsupported("a file of no known duration")
 	}
-	if len(ix.Keyframes) == 0 {
-		return ErrNoIndex
+	noIndex := ErrNoIndex
+	if ix.Kind != KindMatroska {
+		noIndex = errUnsupported
+	}
+	if len(ix.Keyframes) == 0 || ix.Video.Timescale == 0 {
+		return fmt.Errorf("%w: no keyframes", noIndex)
 	}
 	ts := float64(ix.Video.Timescale)
 	prev := int64(-1)
 	for i, k := range ix.Keyframes {
 		if k.PTS <= prev {
-			return fmt.Errorf("%w: keyframe %d at %d is not after %d", ErrNoIndex, i, k.PTS, prev)
+			return fmt.Errorf("%w: keyframe %d at %d is not after %d", noIndex, i, k.PTS, prev)
 		}
 		if i > 0 && float64(k.PTS-prev)/ts > maxKeyframeGap {
-			return fmt.Errorf("%w: %.1f s without a keyframe at %.1f s", ErrNoIndex, float64(k.PTS-prev)/ts, float64(prev)/ts)
+			return fmt.Errorf("%w: %.1f s without a keyframe at %.1f s", noIndex, float64(k.PTS-prev)/ts, float64(prev)/ts)
 		}
 		if i > 0 && k.Pos < ix.Keyframes[i-1].Pos {
-			return fmt.Errorf("%w: keyframe %d lies before the one before it", ErrNoIndex, i)
+			return fmt.Errorf("%w: keyframe %d lies before the one before it", noIndex, i)
 		}
 		if ix.Kind == KindMatroska && (k.Pos < ix.SegmentData || k.Pos >= ix.Size) {
-			return fmt.Errorf("%w: keyframe %d at %d, outside the file's %d bytes", ErrNoIndex, i, k.Pos, ix.Size)
+			return fmt.Errorf("%w: keyframe %d at %d, outside the file's %d bytes", noIndex, i, k.Pos, ix.Size)
 		}
 		prev = k.PTS
 	}
 	dur := float64(ix.DurationNs) / 1e9
 	if first := float64(ix.Keyframes[0].PTS) / ts; first > maxKeyframeGap/2 {
-		return fmt.Errorf("%w: the first keyframe is at %.1f s", ErrNoIndex, first)
+		return fmt.Errorf("%w: the first keyframe is at %.1f s", noIndex, first)
 	}
 	if last := float64(prev) / ts; dur > 0 && dur-last > maxKeyframeGap {
-		return fmt.Errorf("%w: the last keyframe is %.1f s before the end", ErrNoIndex, dur-last)
+		return fmt.Errorf("%w: the last keyframe is %.1f s before the end", noIndex, dur-last)
 	}
 	return nil
 }
@@ -291,18 +303,9 @@ func (ix *Index) spanBytes(i int, s Span) float64 {
 		for _, smp := range v.samples[v0:v1] {
 			n += float64(smp.size)
 		}
-		// The audio by its share of the whole.
-		for _, a := range ix.mp4.audio {
-			if a == nil || len(a.samples) == 0 {
-				continue
-			}
-			var all float64
-			for _, smp := range a.samples {
-				all += float64(smp.size)
-			}
-			if ix.DurationNs > 0 {
-				n += all * s.Dur / (float64(ix.DurationNs) / 1e9)
-			}
+		// The audio by its share of the whole (summed once, when indexed).
+		if ix.DurationNs > 0 {
+			n += ix.mp4.audioBytes * s.Dur / (float64(ix.DurationNs) / 1e9)
 		}
 		return n
 	}

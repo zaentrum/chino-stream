@@ -174,7 +174,13 @@ func parseDV(t string, b []byte) (*dvRecord, error) {
 }
 
 // codecs is the CODECS entry of a Dolby Vision stream of its own (dvh1.PP.LL).
-func (d *dvRecord) codecs() string { return fmt.Sprintf("dvh1.%02d.%02d", d.profile, d.level) }
+func (d *dvRecord) codecs() string { return d.codecsFor("dvh1") }
+
+// codecsFor is the CODECS entry of the stream in a Dolby Vision sample entry
+// of type entry (dvh1, dvhe, dav1, …).
+func (d *dvRecord) codecsFor(entry string) string {
+	return fmt.Sprintf("%s.%02d.%02d", entry, d.profile, d.level)
+}
 
 // Audio.
 

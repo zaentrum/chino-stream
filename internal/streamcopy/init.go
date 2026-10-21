@@ -2,6 +2,8 @@ package streamcopy
 
 import (
 	"bytes"
+	"fmt"
+	"math"
 
 	"github.com/Eyevinn/mp4ff/mp4"
 )
@@ -127,8 +129,16 @@ type fragmentSample struct {
 
 // fragment writes samples (in decode order) as fragment seq of a one-track
 // file: a styp, a moof (trun version 0 when no composition offset is
-// negative, else 1) and an mdat.
-func fragment(seq uint32, samples []fragmentSample) ([]byte, error) {
+// negative, else 1) and an mdat. Without samples it is a fragment of none
+// that starts at the decode time start.
+func fragment(seq uint32, samples []fragmentSample, start int64) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := mp4.NewStyp("msdh", 0, []string{"msdh", "msix", "cmfs"}).Encode(&buf); err != nil {
+		return nil, err
+	}
+	if len(samples) == 0 {
+		return emptyFragment(&buf, seq, start)
+	}
 	frag, err := mp4.CreateFragment(seq, 1)
 	if err != nil {
 		return nil, err
@@ -143,6 +153,9 @@ func fragment(seq uint32, samples []fragmentSample) ([]byte, error) {
 		if cto < 0 {
 			negative = true
 		}
+		if s.dur < 0 || s.dur > math.MaxUint32 || s.dts < 0 || cto < math.MinInt32 || cto > math.MaxInt32 {
+			return nil, fmt.Errorf("a sample at %d lasting %d presented at %d", s.dts, s.dur, s.pts)
+		}
 		frag.AddFullSample(mp4.FullSample{Sample: mp4.Sample{Flags: flags, Dur: uint32(s.dur), Size: uint32(len(s.data)),
 			CompositionTimeOffset: int32(cto)}, DecodeTime: uint64(s.dts), Data: s.data})
 	}
@@ -151,28 +164,21 @@ func fragment(seq uint32, samples []fragmentSample) ([]byte, error) {
 			trun.Version = 0
 		}
 	}
-	var buf bytes.Buffer
-	if err := mp4.NewStyp("msdh", 0, []string{"msdh", "msix", "cmfs"}).Encode(&buf); err != nil {
-		return nil, err
-	}
-	if len(samples) == 0 {
-		// A track that holds nothing in this segment: a moof with its track
-		// fragment's decode time and no run, and an empty mdat.
-		return emptyFragment(&buf, seq)
-	}
 	if err := frag.Encode(&buf); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
 }
 
-// emptyFragment appends to buf a fragment without samples.
-func emptyFragment(buf *bytes.Buffer, seq uint32) ([]byte, error) {
+// emptyFragment appends to buf a fragment without samples: a moof whose
+// track fragment has its decode time (start) and no run, and an empty mdat.
+func emptyFragment(buf *bytes.Buffer, seq uint32, start int64) ([]byte, error) {
 	moof := &mp4.MoofBox{}
 	moof.AddChild(&mp4.MfhdBox{SequenceNumber: seq})
 	traf := &mp4.TrafBox{}
 	moof.AddChild(traf)
 	traf.AddChild(&mp4.TfhdBox{Flags: 0x020000, TrackID: 1})
+	traf.AddChild(mp4.CreateTfdt(uint64(max(0, start))))
 	if err := moof.Encode(buf); err != nil {
 		return nil, err
 	}

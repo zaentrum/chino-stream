@@ -37,8 +37,8 @@ type Options struct {
 const headLimit = 16 << 20
 
 // headFrames is how many video frames of the first Clusters are read for the
-// reordering delay (the SPS's reorder count, where it gives one, is taken
-// at the least): two seconds or so, a megabyte or a few.
+// reordering delay of a video whose parameter sets do not give it (an H.264
+// SPS without its bitstream restrictions): two seconds or so.
 const headFrames = 48
 
 // IndexMatroska indexes the Matroska original r of size bytes: its tracks'
@@ -105,9 +105,6 @@ func IndexMatroska(r io.ReaderAt, size int64, o Options) (*Index, error) {
 		if t.CodecDelay > 0 && f.TimestampScale > 0 {
 			at.DelayUnits = (int64(t.CodecDelay) + f.TimestampScale/2) / f.TimestampScale
 		}
-		if acfg[i] != nil && len(t.Encodings) > 0 {
-			ix.Encodings[t.Number] = encodingsOf(t.Encodings)
-		}
 		ix.Audio = append(ix.Audio, at)
 	}
 
@@ -154,6 +151,11 @@ func IndexMatroska(r io.ReaderAt, size int64, o Options) (*Index, error) {
 		if a.Init, err = audioInit(c, a.Base, audio[i].Language); err != nil {
 			return nil, err
 		}
+		// Its frames as they are stored (header stripping takes an AC-3
+		// frame's syncword off), undone on every segment as on the head.
+		if len(audio[i].Encodings) > 0 {
+			ix.Encodings[audio[i].Number] = encodingsOf(audio[i].Encodings)
+		}
 	}
 
 	ix.Keyframes = cueKeyframes(f, vt.Number, ix)
@@ -169,22 +171,31 @@ func IndexMatroska(r io.ReaderAt, size int64, o Options) (*Index, error) {
 }
 
 // headKeys are what the read of a file's head saw of its video: its
-// keyframes (each timestamp's Cluster), the latest timestamp of a frame, and
-// the Cluster it stopped in (every one before it was read through).
+// keyframes (each timestamp's Cluster), the first of them, the latest
+// timestamp of a frame, and the Cluster it stopped in (every one before it
+// was read through).
 type headKeys struct {
 	at     map[int64]int64
+	first  Keyframe // TS and Pos (its Cluster) of the first keyframe
 	latest int64
 	last   int64
 }
 
-// confirms says whether each of the keyframes kfs the head reached is one it
-// saw, in that Cluster: each in a Cluster it read through, and each presented
-// more than margin (timestamp units: the reordering delay) before the latest
-// frame it read — the frames decoded before a keyframe are presented before
-// it, so a frame presented after it comes after it in the file.
+// confirms says whether the keyframes kfs (the Cues') are the ones the head
+// saw, as far as it reached: the first of them the file's first keyframe,
+// and each other in a Cluster it read through, or presented more than
+// margin (timestamp units: the reordering delay) before the latest frame it
+// read — the frames decoded before a keyframe are presented before it, so a
+// frame presented after it comes after it in the file — one it saw there.
 func (h headKeys) confirms(kfs []Keyframe, margin int64) bool {
+	if len(h.at) == 0 {
+		return true
+	}
+	if len(kfs) > 0 && (kfs[0].TS != h.first.TS || kfs[0].Pos != h.first.Pos) {
+		return false
+	}
 	for _, k := range kfs {
-		if k.Pos >= h.last && (len(h.at) == 0 || k.TS > h.latest-margin) {
+		if k.Pos >= h.last && k.TS > h.latest-margin {
 			continue
 		}
 		if pos, ok := h.at[k.TS]; !ok || pos != k.Pos {
@@ -335,6 +346,9 @@ func (ix *Index) readHead(r io.ReaderAt, f *mkv.File, vt *mkv.Track, audio []*mk
 		if b.Track == vt.Number {
 			head.latest = max(head.latest, b.Timestamp)
 			if b.Keyframe {
+				if keyframes == 0 {
+					head.first = Keyframe{TS: b.Timestamp, Pos: b.Cluster}
+				}
 				keyframes++
 				head.at[b.Timestamp] = b.Cluster
 			}
@@ -365,7 +379,11 @@ func (ix *Index) readHead(r io.ReaderAt, f *mkv.File, vt *mkv.Track, audio []*mk
 				}
 			}
 		}
-		if (len(pts) >= headFrames || keyframes > 1) && pending <= 0 {
+		// What the index needs and no more: the first keyframe and each
+		// copied audio track's first frame — and, for a video whose parameter
+		// sets do not say how far its frames are reordered, the frames that
+		// show it.
+		if keyframes > 0 && pending <= 0 && (cfg.reorder >= 0 || len(pts) >= headFrames || keyframes > 1) {
 			break
 		}
 		if rd.BytesRead() > headLimit {
@@ -479,7 +497,9 @@ func (ix *Index) ScanMatroska(r io.ReaderAt) error {
 			kfs = append(kfs, Keyframe{TS: b.Timestamp, Pos: b.Cluster})
 		}
 	}
+	ix.spansMu.Lock()
 	ix.Keyframes, ix.Source, ix.spans = ix.keyframes(kfs), FromScan, nil
+	ix.spansMu.Unlock()
 	return nil
 }
 
@@ -584,7 +604,7 @@ func (ix *Index) produceMatroska(r io.ReaderAt, n int, audio []int) (*Output, er
 				// keyframe: where its presentation starts.
 				p := vpts(b.Timestamp)
 				if p > nextPTS || leading >= leadingLimit {
-					return ix.writeMatroska(n, frames, got, leadMin, true, rd.BytesRead())
+					return ix.writeMatroska(n, frames, got, audio, leadMin, true, rd.BytesRead())
 				}
 				leadMin = min(leadMin, p)
 				leading++
@@ -631,7 +651,7 @@ func (ix *Index) produceMatroska(r io.ReaderAt, n int, audio []int) (*Output, er
 	if !videoIn {
 		return nil, missing(kf, n)
 	}
-	return ix.writeMatroska(n, frames, got, leadMin, after, rd.BytesRead())
+	return ix.writeMatroska(n, frames, got, audio, leadMin, after, rd.BytesRead())
 }
 
 // eac3Samples is how many samples an E-AC-3 frame holds (its first
@@ -657,23 +677,42 @@ type videoFrame struct {
 // writeMatroska writes segment n's fragments: the video's frames, decode
 // times their presentation times sorted, each lasting until the next one's
 // decode time and the last until where the next segment's presentation
-// starts (end, when known: the segment after it was looked into), and each
-// audio track's frames as they are.
-func (ix *Index) writeMatroska(n int, frames []videoFrame, got map[int][]fragmentSample, end int64, known bool, read int64) (*Output, error) {
+// starts (end, when known: the segment after it was looked into); and a
+// fragment for every audio track asked for (audio), its frames each lasting
+// until the next one's time — a gap in a track stays a gap — or, for a track
+// with no frame in the segment, none, at the segment's start. Whatever it
+// fails on is the file's.
+func (ix *Index) writeMatroska(n int, frames []videoFrame, got map[int][]fragmentSample, audio []int, end int64, known bool,
+	read int64) (*Output, error) {
 	samples, err := ix.videoSamples(frames, end, known)
 	if err != nil {
-		return nil, fmt.Errorf("segment %d: %w", n, err)
+		return nil, fmt.Errorf("%w: segment %d: %v", mkv.ErrFormat, n, err)
 	}
 	out := &Output{Audio: map[int][]byte{}, Read: read}
-	if out.Video, err = fragment(uint32(n+1), samples); err != nil {
-		return nil, err
+	if out.Video, err = fragment(uint32(n+1), samples, 0); err != nil {
+		return nil, fmt.Errorf("%w: segment %d: %v", mkv.ErrFormat, n, err)
 	}
-	for a, s := range got {
-		if out.Audio[a], err = fragment(uint32(n+1), s); err != nil {
-			return nil, err
+	for _, a := range audio {
+		s := got[a]
+		for k := 0; k+1 < len(s); k++ {
+			s[k].dur = s[k+1].dts - s[k].dts
+		}
+		t := &ix.Audio[a]
+		if out.Audio[a], err = fragment(uint32(n+1), s, ix.segmentStart(n, t.Timescale)+t.Base); err != nil {
+			return nil, fmt.Errorf("%w: segment %d, audio %d: %v", mkv.ErrFormat, n, a, err)
 		}
 	}
 	return out, nil
+}
+
+// segmentStart is where segment n's presentation starts, in ticks of
+// timescale from the origin.
+func (ix *Index) segmentStart(n int, timescale uint32) int64 {
+	if n <= 0 || ix.Video.Timescale == 0 {
+		return 0
+	}
+	pts, vts := ix.Keyframes[ix.Spans()[n].First].PTS, int64(ix.Video.Timescale)
+	return nsToTicks(pts/vts*1e9+pts%vts*1e9/vts, timescale)
 }
 
 // videoSamples lays a segment's video frames (in decode order) on the

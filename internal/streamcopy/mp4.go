@@ -12,6 +12,8 @@ import (
 	"github.com/Eyevinn/mp4ff/avc"
 	"github.com/Eyevinn/mp4ff/hevc"
 	"github.com/Eyevinn/mp4ff/mp4"
+
+	"github.com/zaentrum/chino-stream/internal/mkv"
 )
 
 // An MP4 original. Its index is its sample tables (a fragmented file's
@@ -26,6 +28,8 @@ import (
 type mp4Source struct {
 	video *mp4Track
 	audio []*mp4Track // by place among the audio tracks; nil: not copied
+	// audioBytes is every copied audio track's bytes, in all.
+	audioBytes float64
 }
 
 // mp4Track is one track's samples, laid on the copy's timeline: a sample's
@@ -98,7 +102,13 @@ func IndexMP4(r io.ReaderAt, size int64, o Options) (*Index, error) {
 	if !ok {
 		return nil, unsupported("video sample entry %s", entry.Type())
 	}
-	codecs, err := videoCodecs(vse)
+	// The entry without its Dolby Vision boxes, of its base layer's type
+	// (dvh1 is hvc1 there): every other client's, and its CODECS.
+	plain, dv := splitDV(vse)
+	if dv == nil && dvEntries[vse.Type()] != "" {
+		return nil, unsupported("a %s sample entry without its Dolby Vision configuration", vse.Type())
+	}
+	codecs, err := videoCodecs(plain)
 	if err != nil {
 		if !errors.Is(err, errUnsupported) {
 			err = fmt.Errorf("%w: %v", errUnsupported, err)
@@ -107,16 +117,22 @@ func IndexMP4(r io.ReaderAt, size int64, o Options) (*Index, error) {
 	}
 	ix.Video = VideoTrack{Number: uint64(vt.Tkhd.TrackID), Codec: codecs, Timescale: vtrack.timescale, Shift: vtrack.mediaTime,
 		Width: int(vse.Width), Height: int(vse.Height)}
-	plain, dv := splitDV(vse)
 	lang := vt.Mdia.Mdhd.GetLanguage()
 	if ix.Video.Init, err = trackInit(vt, plain, vtrack.timescale, vtrack.mediaTime, "video", lang); err != nil {
 		return nil, err
 	}
 	if dv != nil {
 		ix.Video.DVProfile, ix.Video.DVCompatibility = dv.profile, dv.compatibility
-		ix.Video.CodecDV = codecs
-		if dv.compatibility == 0 {
+		// The original's entry for a client that plays Dolby Vision: a
+		// Dolby Vision type's CODECS names it (dvh1.08.06), an hvc1 entry
+		// with a record its base layer's.
+		switch {
+		case dvEntries[vse.Type()] != "":
+			ix.Video.CodecDV = dv.codecsFor(vse.Type())
+		case dv.compatibility == 0:
 			ix.Video.CodecDV = dv.codecs()
+		default:
+			ix.Video.CodecDV = codecs
 		}
 		if ix.Video.InitDV, err = trackInit(vt, vse, vtrack.timescale, vtrack.mediaTime, "video", lang); err != nil {
 			return nil, err
@@ -147,6 +163,9 @@ func IndexMP4(r io.ReaderAt, size int64, o Options) (*Index, error) {
 		}
 		ix.Audio = append(ix.Audio, a)
 		ix.mp4.audio = append(ix.mp4.audio, track)
+		for _, smp := range track.samples {
+			ix.mp4.audioBytes += float64(smp.size)
+		}
 	}
 	return ix, nil
 }
@@ -250,11 +269,19 @@ func mp4TrackOf(mf *mp4.File, trak *mp4.TrakBox, originNs int64, movieTS uint32)
 	return t, nil
 }
 
-// splitDV is a visual sample entry without its Dolby Vision boxes (the
-// entry as it is when it has none), and its Dolby Vision record.
-func splitDV(vse *mp4.VisualSampleEntryBox) (mp4.Box, *dvRecord) {
+// dvEntries are the Dolby Vision sample entry types and the type of their
+// base layer's entry (ETSI GS CCM 001).
+var dvEntries = map[string]string{"dvh1": "hvc1", "dvhe": "hev1", "dav1": "av01", "dva1": "avc1", "dvav": "avc3"}
+
+// splitDV is a visual sample entry without its Dolby Vision boxes, of its
+// base layer's type (the entry as it is when it has no Dolby Vision record),
+// and its Dolby Vision record.
+func splitDV(vse *mp4.VisualSampleEntryBox) (*mp4.VisualSampleEntryBox, *dvRecord) {
 	var dv *dvRecord
 	plain := *vse
+	if base := dvEntries[vse.Type()]; base != "" {
+		plain.SetType(base)
+	}
 	plain.Children = nil
 	for _, c := range vse.Children {
 		switch c.Type() {
@@ -468,7 +495,7 @@ func (ix *Index) produceMP4(r io.ReaderAt, n int, audio []int) (*Output, error) 
 		v1 = int(ix.Keyframes[sp.Next].Pos)
 	}
 	out := &Output{Audio: map[int][]byte{}}
-	read, err := mp4Fragment(r, v, v.samples[v0:v1], uint32(n+1), &out.Video)
+	read, err := mp4Fragment(r, v, v.samples[v0:v1], uint32(n+1), 0, &out.Video)
 	if err != nil {
 		return nil, err
 	}
@@ -501,8 +528,10 @@ func (ix *Index) produceMP4(r io.ReaderAt, n int, audio []int) (*Output, error) 
 		mid := func(i int) int64 { return 2*t.pts(i) + int64(t.samples[i].dur) }
 		a0 := sort.Search(len(t.samples), func(i int) bool { return mid(i) >= lo })
 		a1 := sort.Search(len(t.samples), func(i int) bool { return mid(i) >= hi })
+		// A track with no sample in the span: a fragment of none, at the
+		// span's start (decode time is presentation plus its edit's).
 		var b []byte
-		read, err := mp4Fragment(r, t, t.samples[a0:a1], uint32(n+1), &b)
+		read, err := mp4Fragment(r, t, t.samples[a0:a1], uint32(n+1), ix.segmentStart(n, t.timescale)+t.mediaTime, &b)
 		if err != nil {
 			return nil, err
 		}
@@ -511,9 +540,11 @@ func (ix *Index) produceMP4(r io.ReaderAt, n int, audio []int) (*Output, error) 
 	return out, nil
 }
 
-// mp4Fragment writes samples of track t as fragment seq into *dst, their data
-// read from r by byte range; it returns the bytes read.
-func mp4Fragment(r io.ReaderAt, t *mp4Track, samples []mp4Sample, seq uint32, dst *[]byte) (int64, error) {
+// mp4Fragment writes samples of track t as fragment seq into *dst (none: a
+// fragment of none at the decode time start), their data read from r by byte
+// range; it returns the bytes read. A failed read is the storage's, anything
+// else the file's.
+func mp4Fragment(r io.ReaderAt, t *mp4Track, samples []mp4Sample, seq uint32, start int64, dst *[]byte) (int64, error) {
 	data, read, err := readRanges(r, samples)
 	if err != nil {
 		return read, err
@@ -523,9 +554,12 @@ func mp4Fragment(r io.ReaderAt, t *mp4Track, samples []mp4Sample, seq uint32, ds
 		dts := s.dts + t.base
 		fs[i] = fragmentSample{dts: dts, pts: dts + int64(s.cto), dur: int64(s.dur), sync: s.sync, data: data[i]}
 	}
-	b, err := fragment(seq, fs)
+	b, err := fragment(seq, fs, start)
+	if err != nil {
+		return read, fmt.Errorf("%w: %v", mkv.ErrFormat, err)
+	}
 	*dst = b
-	return read, err
+	return read, nil
 }
 
 // readRanges reads the samples' data by byte range: one read per run of
