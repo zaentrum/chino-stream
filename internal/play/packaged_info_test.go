@@ -58,8 +58,10 @@ func qualityNames(qs []map[string]any) []string {
 
 // /play/info offers a ladder package's quality choice: Auto, then the
 // rungs the client decodes at its heights, tallest first, across codec
-// families (a pick loads that rung's own master). Its video fields are the
-// rung the client starts on; default_quality is auto.
+// families (a pick loads that rung's own master). The test packages' top
+// rung is the source's HEVC stream copied (encoder "copy"): "Original".
+// Its video fields are the rung the client starts on; default_quality is
+// auto.
 func TestPlayInfoListsTheRungsAClientMayPick(t *testing.T) {
 	packages := usePackages(t, filepath.Join("testdata", "packages"))
 	cases := []struct {
@@ -71,15 +73,15 @@ func TestPlayInfoListsTheRungsAClientMayPick(t *testing.T) {
 		{"H.264 browser", pkgLadder, "?caps=avc,aac",
 			[]string{"auto Auto", "v1 Medium (720p)", "v2 Low (480p)"}, "avc1.64001f", 1280, 720},
 		{"HEVC browser: its ladder is the HEVC rung, the H.264 ones are picks", pkgLadder, "?caps=avc,hvc,aac",
-			[]string{"auto Auto", "v0 High (1080p)", "v1 Medium (720p)", "v2 Low (480p)"}, "hvc1.1.6.L120.90", 1920, 1080},
+			[]string{"auto Auto", "v0 Original", "v1 Medium (720p)", "v2 Low (480p)"}, "hvc1.1.6.L120.90", 1920, 1080},
 		{"a pick: the video fields are the rung picked", pkgLadder, "?caps=avc,hvc,aac&q=v2",
-			[]string{"auto Auto", "v0 High (1080p)", "v1 Medium (720p)", "v2 Low (480p)"}, "avc1.64001e", 854, 480},
+			[]string{"auto Auto", "v0 Original", "v1 Medium (720p)", "v2 Low (480p)"}, "avc1.64001e", 854, 480},
 		{"4K over a 1080 HEVC cap", pkgUHD, "?caps=avc:1080,hvc:1080,aac",
 			[]string{"auto Auto", "v1 High (1080p)", "v2 Medium (720p)"}, "avc1.640028", 1920, 1080},
 		{"4K TV", pkgUHD, "?caps=avc:2160,hvc:2160,aac,eac3",
-			[]string{"auto Auto", "v0 Ultra (2160p)", "v1 High (1080p)", "v2 Medium (720p)"}, "hvc1.1.6.L150.90", 3840, 2160},
+			[]string{"auto Auto", "v0 Original", "v1 High (1080p)", "v2 Medium (720p)"}, "hvc1.1.6.L150.90", 3840, 2160},
 		{"two HEVC rungs", pkgHEVCLadder, "?caps=hvc,avc,aac",
-			[]string{"auto Auto", "v0 High (1080p)", "v1 Medium (720p)", "v2 Low (480p)"}, "hvc1.1.6.L120.90", 1920, 1080},
+			[]string{"auto Auto", "v0 Original", "v1 Medium (720p)", "v2 Low (480p)"}, "hvc1.1.6.L120.90", 1920, 1080},
 		{"one rung it may pick: no choice", pkgHEVCLadder, "?caps=avc,aac",
 			nil, "avc1.64001e", 854, 480},
 	}
@@ -111,7 +113,7 @@ func TestPlayInfoQualityEntries(t *testing.T) {
 	info, _ := getInfo(t, packages, pkgLadder, "?caps=avc,hvc,aac")
 	want := []map[string]any{
 		{"name": "auto", "label": "Auto"},
-		{"name": "v0", "id": "v0", "label": "High (1080p)", "width": 1920.0, "height": 1080.0,
+		{"name": "v0", "id": "v0", "label": "Original", "width": 1920.0, "height": 1080.0,
 			"codec": "hvc1.1.6.L120.90", "bitrate": 7436924.0, "video_range": "SDR"},
 		{"name": "v1", "id": "v1", "label": "Medium (720p)", "width": 1280.0, "height": 720.0,
 			"codec": "avc1.64001f", "bitrate": 1505267.0, "video_range": "SDR"},
@@ -146,11 +148,11 @@ func TestPlayInfoOneEntryPerSize(t *testing.T) {
 		"#EXT-X-STREAM-INF:BANDWIDTH=6000000,CODECS=\"hvc1.1.6.L120.90,mp4a.40.2\",RESOLUTION=1920x1080\nv0/playlist.m3u8\n" +
 		"#EXT-X-STREAM-INF:BANDWIDTH=8000000,CODECS=\"avc1.640028,mp4a.40.2\",RESOLUTION=1920x1080\nv1/playlist.m3u8\n" +
 		"#EXT-X-STREAM-INF:BANDWIDTH=3000000,CODECS=\"avc1.64001f,mp4a.40.2\",RESOLUTION=1280x720\nv2/playlist.m3u8\n"
-	if got := qualityNames(packagedQualities(body, ParseCaps("avc,hvc,aac"))); !reflect.DeepEqual(got,
+	if got := qualityNames(packagedQualities(body, ParseCaps("avc,hvc,aac"), nil)); !reflect.DeepEqual(got,
 		[]string{"auto Auto", "v0 High (1080p)", "v2 Medium (720p)"}) {
 		t.Errorf("HEVC client: %v", got)
 	}
-	if got := qualityNames(packagedQualities(body, ParseCaps("avc,aac"))); !reflect.DeepEqual(got,
+	if got := qualityNames(packagedQualities(body, ParseCaps("avc,aac"), nil)); !reflect.DeepEqual(got,
 		[]string{"auto Auto", "v1 High (1080p)", "v2 Medium (720p)"}) {
 		t.Errorf("H.264 client: %v", got)
 	}
@@ -160,7 +162,7 @@ func TestPlayInfoOneEntryPerSize(t *testing.T) {
 		"#EXT-X-STREAM-INF:BANDWIDTH=8000000,CODECS=\"avc1.640028\",RESOLUTION=1920x1080\nv0/playlist.m3u8\n" +
 		"#EXT-X-STREAM-INF:BANDWIDTH=6000000,CODECS=\"hvc1.1.6.L120.90\",RESOLUTION=1920x1080\nv1/playlist.m3u8\n" +
 		"#EXT-X-STREAM-INF:BANDWIDTH=3000000,CODECS=\"avc1.64001f\",RESOLUTION=1280x720\nv2/playlist.m3u8\n"
-	if got := qualityNames(packagedQualities(h264First, ParseCaps("avc,hvc"))); !reflect.DeepEqual(got,
+	if got := qualityNames(packagedQualities(h264First, ParseCaps("avc,hvc"), nil)); !reflect.DeepEqual(got,
 		[]string{"auto Auto", "v1 High (1080p)", "v2 Medium (720p)"}) {
 		t.Errorf("H.264 listed first, HEVC client: %v", got)
 	}
@@ -168,33 +170,74 @@ func TestPlayInfoOneEntryPerSize(t *testing.T) {
 	reordered := "#EXTM3U\n" +
 		"#EXT-X-STREAM-INF:BANDWIDTH=3000000,CODECS=\"avc1.64001f\",RESOLUTION=1280x720\nv2/playlist.m3u8\n" +
 		"#EXT-X-STREAM-INF:BANDWIDTH=8000000,CODECS=\"avc1.640028\",RESOLUTION=1920x1080\nv1/playlist.m3u8\n"
-	if got := qualityNames(packagedQualities(reordered, ParseCaps("avc"))); !reflect.DeepEqual(got,
+	if got := qualityNames(packagedQualities(reordered, ParseCaps("avc"), nil)); !reflect.DeepEqual(got,
 		[]string{"auto Auto", "v1 High (1080p)", "v2 Medium (720p)"}) {
 		t.Errorf("reordered: %v", got)
 	}
 }
 
-// Two rungs of a 2.39:1 film a few rows apart - the source's HEVC copy at
-// 1920x800, the transcoder's H.264 encode into the 1080p box at 1920x804 -
-// are one name, "High (1080p)": one entry, the client family's.
+// Two rungs of a 2.39:1 film a few rows apart - an HEVC rung at 1920x800,
+// the transcoder's H.264 encode into the 1080p box at 1920x804 - of a
+// package that does not record which is a copy are one name, "High
+// (1080p)": one entry, the client family's.
 func TestPlayInfoOneEntryPerName(t *testing.T) {
 	body := "#EXTM3U\n" +
 		"#EXT-X-STREAM-INF:BANDWIDTH=6000000,CODECS=\"hvc1.1.6.L120.90\",RESOLUTION=1920x800\nv0/playlist.m3u8\n" +
 		"#EXT-X-STREAM-INF:BANDWIDTH=5000000,CODECS=\"avc1.640028\",RESOLUTION=1920x804\nv1/playlist.m3u8\n" +
 		"#EXT-X-STREAM-INF:BANDWIDTH=2000000,CODECS=\"avc1.64001f\",RESOLUTION=1280x536\nv2/playlist.m3u8\n"
-	if got := qualityNames(packagedQualities(body, ParseCaps("avc,hvc"))); !reflect.DeepEqual(got,
+	if got := qualityNames(packagedQualities(body, ParseCaps("avc,hvc"), nil)); !reflect.DeepEqual(got,
 		[]string{"auto Auto", "v0 High (1080p)", "v2 Medium (720p)"}) {
 		t.Errorf("HEVC client: %v", got)
 	}
-	if got := qualityNames(packagedQualities(body, ParseCaps("avc"))); !reflect.DeepEqual(got,
+	if got := qualityNames(packagedQualities(body, ParseCaps("avc"), nil)); !reflect.DeepEqual(got,
 		[]string{"auto Auto", "v1 High (1080p)", "v2 Medium (720p)"}) {
 		t.Errorf("H.264 client: %v", got)
 	}
 }
 
+// A rung the package records as the original's own stream copied is
+// "Original", listed first, before a taller encode; the H.264 encode at its
+// size is a re-encode and keeps its table name, an entry of its own. A
+// client that does not decode the copy is offered the encodes, as before.
+func TestPlayInfoNamesTheCopiedRungOriginal(t *testing.T) {
+	body := "#EXTM3U\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=6000000,CODECS=\"hvc1.1.6.L120.90\",RESOLUTION=1920x800\nv0/playlist.m3u8\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=5000000,CODECS=\"avc1.640028\",RESOLUTION=1920x804\nv1/playlist.m3u8\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=2000000,CODECS=\"avc1.64001f\",RESOLUTION=1280x536\nv2/playlist.m3u8\n"
+	originals := map[string]bool{"v0": true}
+	if got := qualityNames(packagedQualities(body, ParseCaps("avc,hvc"), originals)); !reflect.DeepEqual(got,
+		[]string{"auto Auto", "v0 Original", "v1 High (1080p)", "v2 Medium (720p)"}) {
+		t.Errorf("HEVC client: %v", got)
+	}
+	if got := qualityNames(packagedQualities(body, ParseCaps("avc"), originals)); !reflect.DeepEqual(got,
+		[]string{"auto Auto", "v1 High (1080p)", "v2 Medium (720p)"}) {
+		t.Errorf("H.264 client: %v", got)
+	}
+	// The same size, re-encoded: a 1920x818 HEVC copy and the H.264 encode of
+	// it at 1920x818.
+	same := "#EXTM3U\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=6000000,CODECS=\"hvc1.1.6.L120.90\",RESOLUTION=1920x818\nv0/playlist.m3u8\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=8000000,CODECS=\"avc1.640028\",RESOLUTION=1920x818\nv1/playlist.m3u8\n"
+	if got := qualityNames(packagedQualities(same, ParseCaps("avc,hvc"), originals)); !reflect.DeepEqual(got,
+		[]string{"auto Auto", "v0 Original", "v1 High (1080p)"}) {
+		t.Errorf("the same size: %v", got)
+	}
+	// With no record the two are one name, today's: one entry, nothing to
+	// choose.
+	if got := packagedQualities(same, ParseCaps("avc,hvc"), nil); got != nil {
+		t.Errorf("the same size, no record: %v", qualityNames(got))
+	}
+}
+
 // A packaged rung is named by its frame, by the fixed table, as the master
-// names its variant; one whose master gives it no size by its id.
+// names its variant; one whose master gives it no size by its id. The
+// original's own stream copied is "Original", whatever its frame.
 func TestRungName(t *testing.T) {
+	for _, r := range []ladderRung{{id: "v0", width: 1920, height: 818}, {id: "v0", width: 3840, height: 2160}, {id: "v0"}} {
+		if got := rungName(r, true); got != "Original" {
+			t.Errorf("the copy at %dx%d: %s", r.width, r.height, got)
+		}
+	}
 	cases := []struct {
 		w, h int
 		want string
@@ -210,7 +253,7 @@ func TestRungName(t *testing.T) {
 		{0, 1080, "High (1080p)"}, {0, 0, "v3"}, {1920, 0, "v3"},
 	}
 	for _, tc := range cases {
-		if got := rungName(ladderRung{id: "v3", width: tc.w, height: tc.h}); got != tc.want {
+		if got := rungName(ladderRung{id: "v3", width: tc.w, height: tc.h}, false); got != tc.want {
 			t.Errorf("%dx%d: %s, want %s", tc.w, tc.h, got, tc.want)
 		}
 	}

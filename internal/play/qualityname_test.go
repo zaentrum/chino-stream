@@ -1,6 +1,7 @@
 package play
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/zaentrum/chino-stream/internal/pkgmanifest"
 	"github.com/zaentrum/chino-stream/internal/streamcopy"
 )
 
@@ -232,11 +234,178 @@ func TestNameVariants(t *testing.T) {
 		"#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=854x480,CODECS=\"avc1.64001e\",NAME=\"Low (480p)\"\r\nv2/playlist.m3u8\r\n" +
 		"#EXT-X-STREAM-INF:BANDWIDTH=500000,CODECS=\"avc1.64001e\"\nv3/playlist.m3u8\n" +
 		"#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=40000,RESOLUTION=1280x720,URI=\"v1/iframes.m3u8\"\n"
-	if got := nameVariants(body); got != want {
+	if got := nameVariants(body, nil); got != want {
 		t.Errorf("named:\n%s\nwant:\n%s", got, want)
 	}
-	if got := nameVariants(want); got != want {
+	if got := nameVariants(want, nil); got != want {
 		t.Errorf("named twice:\n%s", got)
+	}
+}
+
+// A variant of a rung in originals - the original's own stream, copied into
+// the package - is "Original", in every audio group, its RESOLUTION known or
+// not and a NAME it had set; a re-encode of the same size keeps its table
+// name, and with no record (nil) every variant keeps today's name.
+func TestNameVariantsOfACopiedRung(t *testing.T) {
+	body := "#EXTM3U\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=6000000,CODECS=\"hvc1.1.6.L120.90,mp4a.40.2\",RESOLUTION=1920x818,AUDIO=\"audio\"\nv0/playlist.m3u8?caps=avc,hvc\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=6400000,CODECS=\"hvc1.1.6.L120.90,ec-3\",RESOLUTION=1920x818,AUDIO=\"audio-surround\",NAME=\"source\"\r\nv0/playlist.m3u8?caps=avc,hvc\r\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=8000000,CODECS=\"avc1.640028,mp4a.40.2\",RESOLUTION=1920x818,AUDIO=\"audio\"\nv1/playlist.m3u8?caps=avc,hvc\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=3000000,CODECS=\"avc1.64001f,mp4a.40.2\",AUDIO=\"audio\"\nv2/playlist.m3u8?caps=avc,hvc\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=2000000,CODECS=\"hvc1.1.6.L120.90,mp4a.40.2\",AUDIO=\"audio\"\nv3/playlist.m3u8?caps=avc,hvc\n" +
+		"#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=40000,RESOLUTION=1920x818,URI=\"v0/iframes.m3u8\"\n"
+	cases := []struct {
+		name      string
+		originals map[string]bool
+		want      map[string]string
+	}{
+		{"v0 copied", map[string]bool{"v0": true},
+			map[string]string{"v0": "Original", "v1": "High (1080p)", "v2": "", "v3": ""}},
+		{"v0 and a rung with no RESOLUTION copied", map[string]bool{"v0": true, "v3": true},
+			map[string]string{"v0": "Original", "v1": "High (1080p)", "v2": "", "v3": "Original"}},
+		{"no record", nil,
+			map[string]string{"v0": "High (1080p)", "v1": "High (1080p)", "v2": "", "v3": ""}},
+	}
+	for _, tc := range cases {
+		got := nameVariants(body, tc.originals)
+		if names := variantNames(t, got); !reflect.DeepEqual(names, tc.want) {
+			t.Errorf("%s: %v, want %v:\n%s", tc.name, names, tc.want, got)
+		}
+		if !strings.Contains(got, "NAME=\""+tc.want["v0"]+"\"\r\nv0/") {
+			t.Errorf("%s: the CRLF line:\n%q", tc.name, got)
+		}
+		if strings.Contains(got, "URI=\"v0/iframes.m3u8\",NAME") {
+			t.Errorf("%s: an I-frame playlist named:\n%s", tc.name, got)
+		}
+		if again := nameVariants(got, tc.originals); again != got {
+			t.Errorf("%s: named twice:\n%s", tc.name, again)
+		}
+	}
+}
+
+// originalRungs are the rungs a package's record says were made by "copy"
+// (the original's own stream), by the folder its master names them by; any
+// other encoder, or none recorded, is not one.
+func TestOriginalRungs(t *testing.T) {
+	mf := &pkgmanifest.Manifest{Renditions: pkgmanifest.Renditions{Video: []pkgmanifest.VideoRendition{
+		{ID: "v0", Dir: "hls/v0", Encoder: "copy", Label: "source"},
+		{ID: "v1", Dir: "hls/v1", Encoder: "hevc_nvenc", Label: "source"},
+		{ID: "v2", Dir: "hls/v2", Encoder: "libx264", Label: "720p"},
+		{ID: "v3", Dir: "hls/v3"},
+		{ID: "v4", Encoder: "copy"},
+		{ID: "x", Dir: "hls/v5", Encoder: "copy"},
+		{ID: "v6", Dir: "hls/v6", Encoder: "transcoder"},
+		{ID: "v7", Dir: "hls/v7", Encoder: "Copy"},
+	}}}
+	if got, want := originalRungs(mf), map[string]bool{"v0": true, "v4": true, "v5": true}; !reflect.DeepEqual(got, want) {
+		t.Errorf("%v, want %v", got, want)
+	}
+	if got := originalRungs(&pkgmanifest.Manifest{Renditions: pkgmanifest.Renditions{Video: []pkgmanifest.VideoRendition{
+		{ID: "v0", Dir: "hls/v0", Codec: "hvc1.1.6.L120.90", Width: 1920, Height: 818, Label: "source"}}}}); got != nil {
+		t.Errorf("no record: %v", got)
+	}
+	if got := originalRungs(nil); got != nil {
+		t.Errorf("no manifest: %v", got)
+	}
+}
+
+// The finding: a package of one rung, a 1920x818 HEVC original copied into
+// it without a re-encode, said "High (1080p)" in its master. Its record says
+// the rung is a copy, so the master names it "Original", for every client and
+// pick; the same rung recorded as a re-encode, or with no record, keeps its
+// table name.
+func TestPackagedCopyOfTheOriginalIsTheOriginal(t *testing.T) {
+	for _, tc := range []struct {
+		encoder string // "" leaves the record out
+		want    string
+	}{
+		{"copy", "Original"},
+		{"libx265", "High (1080p)"},
+		{"", "High (1080p)"},
+	} {
+		dir, packages := copyPackage(t, pkgSingle, func(m map[string]any) {
+			v := m["renditions"].(map[string]any)["video"].([]any)[0].(map[string]any)
+			v["width"], v["height"] = 1920, 818
+			delete(v, "encoder")
+			if tc.encoder != "" {
+				v["encoder"] = tc.encoder
+			}
+		})
+		master := filepath.Join(dir, "hls", "master.m3u8")
+		b, err := os.ReadFile(master)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(master, []byte(strings.ReplaceAll(string(b), "RESOLUTION=1920x1080", "RESOLUTION=1920x818")), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		h := &HLSHandler{Packages: packages}
+		for _, query := range []string{"?caps=avc,hvc,aac", "?caps=hvc:1080,avc:1080,aac,aacmc,ac3,eac3&q=v0"} {
+			w := get(h, "/api/play/"+pkgSingle+"/master.m3u8"+query)
+			if w.Code != 200 {
+				t.Fatalf("encoder %q%s: %d %q", tc.encoder, query, w.Code, w.Body)
+			}
+			if got := variantNames(t, w.Body.String()); !reflect.DeepEqual(got, map[string]string{"v0": tc.want}) {
+				t.Errorf("encoder %q%s: %v, want %q:\n%s", tc.encoder, query, got, tc.want, w.Body)
+			}
+		}
+	}
+}
+
+// A ladder package whose top rung is recorded as a re-encode at the
+// original's size (an HEVC encode of an H.264 original, the transcoder's
+// "source" rung) keeps its table name in the master and /play/info; the
+// lower rungs are named as before.
+func TestPackagedReencodeAtTheOriginalsSizeKeepsItsName(t *testing.T) {
+	_, packages := copyPackage(t, pkgLadder, func(m map[string]any) {
+		m["renditions"].(map[string]any)["video"].([]any)[0].(map[string]any)["encoder"] = "hevc_nvenc"
+	})
+	h := &HLSHandler{Packages: packages}
+	w := get(h, "/api/play/"+pkgLadder+"/master.m3u8?caps=avc,hvc,aac")
+	if got, want := variantNames(t, w.Body.String()), map[string]string{"v0": "High (1080p)"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("master: %v, want %v:\n%s", got, want, w.Body)
+	}
+	info, _ := getInfo(t, packages, pkgLadder, "?caps=avc,hvc,aac")
+	if got, want := qualityNames(info.Qualities), []string{"auto Auto", "v0 High (1080p)", "v1 Medium (720p)", "v2 Low (480p)"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("/play/info: %v, want %v", got, want)
+	}
+}
+
+// A library version's package.json records its rungs as the packager writes
+// it: the current version's one rung, a copy, is "Original"; the previous
+// one's copied top rung too, its H.264 encodes by their frames, in its
+// master and /play/info alike.
+func TestALibraryVersionNamesItsCopiedRungOriginal(t *testing.T) {
+	l := stageLibrary(t)
+	h := &HLSHandler{Packages: l.packages}
+	for _, tc := range []struct {
+		query string
+		want  map[string]string
+	}{
+		{"?caps=avc,hvc,aac", map[string]string{"v0": "Original"}},
+		{"?caps=avc,hvc,aac&v=" + libOld, map[string]string{"v0": "Original"}},
+		{"?caps=avc,hvc,aac&q=v1&v=" + libOld, map[string]string{"v1": "Medium (720p)"}},
+		{"?caps=avc,aac&v=" + libOld, map[string]string{"v1": "Medium (720p)", "v2": "Low (480p)"}},
+	} {
+		w := get(h, "/api/play/"+libItem+"/master.m3u8"+tc.query)
+		if w.Code != 200 {
+			t.Fatalf("%s: %d %q", tc.query, w.Code, w.Body)
+		}
+		if got := variantNames(t, w.Body.String()); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: %v, want %v:\n%s", tc.query, got, tc.want, w.Body)
+		}
+	}
+	p, mf, _, err := l.packages.itemPackageManifest(context.Background(), libItem, libOld)
+	if err != nil || p == nil || mf == nil {
+		t.Fatalf("the previous version: %v %v %v", p, mf, err)
+	}
+	master, err := readPackagedMaster(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := qualityNames(packagedQualities(master, ParseCaps("avc,hvc,aac"), originalRungs(mf))),
+		[]string{"auto Auto", "v0 Original", "v1 Medium (720p)", "v2 Low (480p)"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("/play/info's qualities: %v, want %v", got, want)
 	}
 }
 
@@ -263,16 +432,19 @@ func variantNames(t *testing.T, body string) map[string]string {
 	return out
 }
 
-// A packaged master names every variant it serves by its rung's frame, for
-// every client and pick - the stereo group's variants and the 5.1 group's,
-// the union's, a native player's mirror, a single-rendition package's - as
-// /play/info's qualities label that rung. The I-frame playlists are no
-// quality and stay unnamed.
+// A packaged master names every variant it serves, for every client and
+// pick - the stereo group's variants and the 5.1 group's, the union's, a
+// native player's mirror, a single-rendition package's - as /play/info's
+// qualities label that rung: the top rung, which the test ladders record as
+// the source's stream copied, "Original", the encodes by their frames, and
+// every rung of a package from before renditions.json, which records
+// neither, by its frame. The I-frame playlists are no quality and stay
+// unnamed.
 func TestPackagedMasterNamesEveryVariant(t *testing.T) {
 	packages := usePackages(t, filepath.Join("testdata", "packages"))
 	h := &HLSHandler{Packages: packages}
-	ladder := map[string]string{"v0": "High (1080p)", "v1": "Medium (720p)", "v2": "Low (480p)"}
-	uhd := map[string]string{"v0": "Ultra (2160p)", "v1": "High (1080p)", "v2": "Medium (720p)"}
+	ladder := map[string]string{"v0": "Original", "v1": "Medium (720p)", "v2": "Low (480p)"}
+	uhd := map[string]string{"v0": "Original", "v1": "High (1080p)", "v2": "Medium (720p)"}
 	cases := []struct {
 		pkg, query string
 		want       map[string]string

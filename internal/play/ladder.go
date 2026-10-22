@@ -793,15 +793,16 @@ func containsFold(list []string, s string) bool {
 // packagedQualities is the quality choice /play/info offers for a packaged
 // master: {"name": "auto", "label": "Auto"} — the client's ladder,
 // adaptive — then one entry per quality name the client may pick, the
-// tallest first: name and id the rung id for ?q=, label the rung's name
-// (rungName: "High (1080p)"), width, height, codec (its CODECS video
+// original (a rung in originals, originalRungs) first, then the tallest
+// first: name and id the rung id for ?q=, label the rung's name (rungName:
+// "Original", "High (1080p)"), width, height, codec (its CODECS video
 // entry), bitrate (its variant's BANDWIDTH, the stereo group's),
 // video_range. Of two rungs of one name (an HEVC 1080p next to an H.264
 // one) the one in the family its ladder is in is listed. nil when the
 // client may pick fewer than two rungs: nothing to choose (every package
 // before renditions.json). Every entry has name and label, the two fields
 // the clients' quality menus read.
-func packagedQualities(body string, caps Caps) []map[string]any {
+func packagedQualities(body string, caps Caps, originals map[string]bool) []map[string]any {
 	rungs := parseMaster(body).rungs()
 	fam := ladderFamily(rungs, caps)
 	var picks []ladderRung
@@ -810,7 +811,7 @@ func packagedQualities(body string, caps Caps) []map[string]any {
 		if !rungPlayable(r, caps) {
 			continue
 		}
-		label := rungName(r)
+		label := rungName(r, originals[r.id])
 		if i, ok := byLabel[label]; ok {
 			if picks[i].family != fam && r.family == fam {
 				picks[i] = r
@@ -823,10 +824,15 @@ func packagedQualities(body string, caps Caps) []map[string]any {
 	if len(picks) < 2 {
 		return nil
 	}
-	sort.SliceStable(picks, func(i, j int) bool { return picks[i].height > picks[j].height })
+	sort.SliceStable(picks, func(i, j int) bool {
+		if a, b := originals[picks[i].id], originals[picks[j].id]; a != b {
+			return a
+		}
+		return picks[i].height > picks[j].height
+	})
 	out := []map[string]any{{"name": "auto", "label": "Auto"}}
 	for _, r := range picks {
-		e := map[string]any{"name": r.id, "id": r.id, "label": rungName(r), "width": r.width,
+		e := map[string]any{"name": r.id, "id": r.id, "label": rungName(r, originals[r.id]), "width": r.width,
 			"height": r.height, "codec": r.codec, "bitrate": r.bandwidth}
 		if r.videoRange != "" {
 			e["video_range"] = r.videoRange
@@ -836,14 +842,15 @@ func packagedQualities(body string, caps Caps) []map[string]any {
 	return out
 }
 
-// rungName is what a packaged rung is called: qualityName of its frame, as
-// its variants are named in the master the client is served (nameVariants)
-// - a 2.39:1 film's 1280x536 rung "Medium (720p)", its 3840x1606 top rung
-// "Ultra (2160p)", as the transcoder's LADDER calls them 720p and 2160p. A
-// rung whose master gives it no size, which has no name, is listed by its
-// id.
-func rungName(r ladderRung) string {
-	if name := qualityName(r.width, r.height, false); name != "" {
+// rungName is what a packaged rung is called, as its variants are named in
+// the master the client is served (nameVariants): "Original" for the
+// original's own stream copied into the package (original, originalRungs),
+// else qualityName of its frame - a 2.39:1 film's 1280x536 rung "Medium
+// (720p)", its 3840x1606 top rung "Ultra (2160p)", as the transcoder's
+// LADDER calls them 720p and 2160p. A rung whose master gives it no size,
+// which has no name, is listed by its id.
+func rungName(r ladderRung, original bool) string {
+	if name := qualityName(r.width, r.height, original); name != "" {
 		return name
 	}
 	return r.id

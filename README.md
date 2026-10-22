@@ -273,7 +273,17 @@ standard frame cropped at the sides (1916x800 is `High (1080p)`, 3836x1600
   it at that height, and has no name on ffmpeg, which encodes it at the
   original's unknown size: an empty `label`, no `NAME`. A client names an
   empty label by itself.
-- **A package's rungs** by their frames (the variant's `RESOLUTION`).
+- **A package's rungs**: `Original` for a rung that is the original's own
+  video stream copied into the package without a re-encode, as the
+  package's record says (its video rendition's `encoder` is `copy`, in
+  `package.json` and `manifest.json` alike; the packager writes it since
+  renditions.json: `copy` for the transcoder's copy rung or an original
+  packaged with no handoff, the encoder's name for an encode). Every other
+  rung by its frame (the variant's `RESOLUTION`), a re-encode at the
+  original's size too (`encoder` `hevc_nvenc` at 1920x818 is `High
+  (1080p)`). A package from before renditions.json records neither, and
+  every rung of it is named by its frame, as before: nothing is guessed
+  from a rung's codec, size or bit rate.
 
 The name is `label` in `/play/info`'s `qualities` and `NAME` on every
 `EXT-X-STREAM-INF` of a master (hls.js reads it as a level's `name`); the
@@ -448,9 +458,10 @@ starts on and what it may pick:
 - `video_codec`, `width`, `height`: the rung the client starts on (its
   ladder's first variant, or the one `q` picked).
 - `qualities`: `Auto` first, then one entry per quality name the client
-  decodes at its heights, tallest first, across families (a pick loads that
-  rung's own master). `label` is the rung's [name](#quality-names)
-  (`1280x536` is `Medium (720p)`), the `NAME` of its variant in the master;
+  decodes at its heights, `Original` first, then tallest first, across
+  families (a pick loads that rung's own master). `label` is the rung's
+  [name](#quality-names) (`Original` for the original's stream copied,
+  `1280x536` is `Medium (720p)`), the `NAME` of its variant in the master;
   `bitrate` is the variant's `BANDWIDTH`. Of two rungs of one name the one
   in the client's family is listed. `null` when there are fewer than two to
   pick from — every package before the ladder.

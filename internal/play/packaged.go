@@ -231,8 +231,10 @@ func servePlaylistCachedTransform(w http.ResponseWriter, r *http.Request, path, 
 // (pinnedQuery), which pins the session to that version: a newer one
 // superseding it meanwhile, the session ends on the bytes it started on. A
 // master with one video rendition and one audio group is served as
-// packaged. Every variant served is named (NAME) by its rung's frame, as
-// /play/info's qualities name the rungs (nameVariants).
+// packaged. Every variant served is named (NAME) as /play/info's qualities
+// name the rungs: "Original" for a rung the package's record says is the
+// original's own stream copied (originalRungs), else by its rung's frame
+// (nameVariants).
 //
 // Off the request path it warms the variant the client starts on (the
 // served master's first variant and its audio rendition): their media
@@ -258,7 +260,7 @@ func (h *HLSHandler) servePackagedMaster(w http.ResponseWriter, r *http.Request,
 		if videoRange != nil {
 			body = videoRange(body)
 		}
-		return nameVariants(serveLadder(body, caps, q, twinsOf(mf)).body)
+		return nameVariants(serveLadder(body, caps, q, twinsOf(mf)).body, originalRungs(mf))
 	})
 	if served == nil {
 		return
@@ -1190,7 +1192,7 @@ func writePackagedInfo(w http.ResponseWriter, p *pkgDir, mf *pkgmanifest.Manifes
 				video = v
 			}
 		}
-		qualities = packagedQualities(master, caps)
+		qualities = packagedQualities(master, caps, originalRungs(mf))
 		if tracks := unionAudioTracks(served.body, master, mf); tracks != nil {
 			audioTracks, audioCodec = tracks, startCodec(tracks)
 		} else if caps.Native {

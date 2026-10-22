@@ -1,8 +1,11 @@
 package play
 
 import (
+	"path"
 	"strconv"
 	"strings"
+
+	"github.com/zaentrum/chino-stream/internal/pkgmanifest"
 )
 
 // What a quality step is called: the one name a client is given for it, as
@@ -22,9 +25,11 @@ import (
 // A height between two steps takes the lower step's word with its own height
 // ("Medium (900p)"), and so do the heights past either end of the table
 // ("Ultra (4320p)", "Lowest (240p)"). The original played as it is - the
-// stream copy, passthrough - is "Original". A re-encode at the original's
-// size is named by its height like any other step. The apps show a name as
-// it is given; the step-down notices say it.
+// stream copy, passthrough, and a package's rung its record says is the
+// original's own video stream copied into it (originalRungs) - is
+// "Original". A re-encode at the original's size is named by its height
+// like any other step. The apps show a name as it is given; the step-down
+// notices say it.
 
 // qualitySteps are the table's steps, the tallest first: a height takes the
 // word of the first step it reaches.
@@ -171,20 +176,58 @@ func nameAttr(name string) string {
 	return ",NAME=" + strconv.Quote(name)
 }
 
-// nameVariants is a packaged master with each variant (EXT-X-STREAM-INF)
-// named by the frame of its rung (RESOLUTION): NAME set, or added at the end
-// of the line. A variant whose RESOLUTION is not known stays as it is.
-// Nothing else changes: the I-frame playlists are no quality to pick.
-func nameVariants(body string) string {
-	lines := strings.Split(body, "\n")
-	for i, line := range lines {
-		if !strings.HasPrefix(line, "#EXT-X-STREAM-INF:") {
+// originalRungs are the rungs of the package mf that are the original played
+// as it is - its own video stream, copied into the package without a
+// re-encode - by the rung id the master's variant URIs name them by ("v0",
+// the folder hls/v0): those whose record says what made them was "copy".
+// The packager writes that record, encoder, for every video rendition of a
+// package since renditions.json - "copy" for the original's stream (the
+// transcoder's copy rung, or the original packaged with no handoff at all),
+// the encoder's name for an encode - in manifest.json and package.json
+// alike (pkgmanifest.VideoRendition.Encoder). A rung with another encoder is
+// a re-encode and keeps its table name, whatever its size or codec. nil when
+// mf is nil or records no copy: a package from before renditions.json has no
+// record of either, and its rungs keep their table names - no guess from the
+// codec, size or bit rate.
+func originalRungs(mf *pkgmanifest.Manifest) map[string]bool {
+	if mf == nil {
+		return nil
+	}
+	var out map[string]bool
+	for _, v := range mf.Renditions.Video {
+		if v.Encoder != "copy" {
 			continue
 		}
-		w, h := parseResolution(hlsAttributes(line)["RESOLUTION"])
-		if name := qualityName(w, h, false); name != "" {
-			lines[i] = setQuotedHLSAttribute(line, "NAME", name)
+		if out == nil {
+			out = map[string]bool{}
+		}
+		out[videoRenditionID(v)] = true
+	}
+	return out
+}
+
+// videoRenditionID is a video rendition's id in its master - the folder its
+// variants' URIs name, "v0" for hls/v0 - the manifest's id when it names no
+// folder.
+func videoRenditionID(v pkgmanifest.VideoRendition) string {
+	if v.Dir != "" {
+		return path.Base(v.Dir)
+	}
+	return v.ID
+}
+
+// nameVariants is a packaged master with each variant (EXT-X-STREAM-INF)
+// named: "Original" for a variant of a rung in originals (originalRungs, by
+// the first path segment of its URI), else by the frame of its rung
+// (RESOLUTION); NAME set, or added at the end of the line. A variant of
+// another rung whose RESOLUTION is not known stays as it is. Nothing else
+// changes: the I-frame playlists are no quality to pick.
+func nameVariants(body string, originals map[string]bool) string {
+	m := parseMaster(body)
+	for _, v := range m.variants {
+		if name := qualityName(v.width, v.height, originals[v.rung]); name != "" {
+			m.lines[v.inf] = setQuotedHLSAttribute(m.lines[v.inf], "NAME", name)
 		}
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(m.lines, "\n")
 }
