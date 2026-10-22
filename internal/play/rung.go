@@ -41,8 +41,9 @@ type rungGeometry struct {
 // H.264 frame than it can play — otherwise the source-resolution "high" rung
 // re-serves the same 4K frame the device couldn't HW-decode in the first
 // place (the reason it fell through from packaged to transcode). The width
-// companion (16:9 of the box height) keeps us inside Level 4.0's pixel
-// budget. A rung's own height is tightened to the ceiling the same way.
+// companion (16:9 of the box height, made even: boxWidth) keeps us inside
+// Level 4.0's pixel budget. A rung's own height is tightened to the ceiling
+// the same way.
 func transcodeGeometry(ql Quality, srcW, srcH, maxHeight int) rungGeometry {
 	if rungH := scaleTargetHeight(ql.Scale); rungH > 0 {
 		if maxHeight > 0 && rungH > maxHeight {
@@ -63,7 +64,7 @@ func transcodeGeometry(ql Quality, srcW, srcH, maxHeight int) rungGeometry {
 	if maxHeight > 0 && maxHeight < capH {
 		capH = maxHeight
 	}
-	capW := capH * 16 / 9 // 16:9 companion of the box height
+	capW := boxWidth(capH) // 16:9 companion of the box height
 	if srcW <= 0 || srcH <= 0 || (srcW <= capW && srcH <= capH) {
 		return rungGeometry{w: srcW, h: srcH} // source size, as it comes
 	}
@@ -83,6 +84,12 @@ func transcodeGeometry(ql Quality, srcW, srcH, maxHeight int) rungGeometry {
 	}
 	g.w, g.h = g.fitW, g.fitH
 	return g
+}
+
+// boxWidth is the width of the 16:9 box h high, made even as h264 and
+// scale_cuda need: 1280 for 720, 854 for 480 (853.3), 1366 for 768.
+func boxWidth(h int) int {
+	return (h*16/9 + 1) &^ 1
 }
 
 // evenScaledWidth is the width ffmpeg's scale=-2:h gives a srcW×srcH frame:

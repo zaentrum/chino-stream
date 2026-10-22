@@ -25,6 +25,13 @@ func TestTranscodeGeometry(t *testing.T) {
 		{"high fits ultrawide by width", high, 3840, 1606, 0, 1920, 804, 0, 1920, 804},
 		{"high fits 2560x1080", high, 2560, 1080, 0, 1920, 810, 0, 1920, 810},
 		{"high under a 720 HW cap", high, 3840, 2160, 720, 1280, 720, 0, 1280, 720},
+		// The box of a cap whose 16:9 width is no whole even number (853.3
+		// for 480, 1365.3 for 768) is made even: h264 and scale_cuda reject
+		// an odd width.
+		{"high under a 480 HW cap", high, 1920, 1080, 480, 854, 480, 0, 854, 480},
+		{"high of a scope film under a 480 HW cap", high, 1920, 800, 480, 854, 356, 0, 854, 356},
+		{"a 480 cap's box takes 854x480 as it is", high, 854, 480, 480, 854, 480, 0, 0, 0},
+		{"high under a 768 HW cap", high, 1920, 1080, 768, 1366, 768, 0, 1366, 768},
 		{"a 1080 cap leaves 1080p", high, 1920, 1080, 1080, 1920, 1080, 0, 0, 0},
 		{"medium scales 1080p to 720", medium, 1920, 1080, 0, 1280, 720, 720, 0, 0},
 		{"medium keeps the ultrawide aspect", medium, 3840, 1606, 0, 1722, 720, 720, 0, 0},
@@ -57,6 +64,7 @@ func TestVideoEncoderArgsScaleToTheGeometry(t *testing.T) {
 		{"medium", 1920, 1080, 0, "scale=-2:720,format=yuv420p", "scale_cuda=-2:720:format=nv12"},
 		{"medium", 640, 360, 0, "scale=-2:360,format=yuv420p", "scale_cuda=-2:360:format=nv12"},
 		{"low", 1280, 720, 360, "scale=-2:360,format=yuv420p", "scale_cuda=-2:360:format=nv12"},
+		{"high", 1920, 1080, 480, "scale=854:480,format=yuv420p", "scale_cuda=854:480:format=nv12"},
 	}
 	for _, tc := range cases {
 		ql := QualityLadder[tc.rung]
@@ -219,6 +227,7 @@ func TestAdvertisedResolutionIsWhatFFmpegEncodes(t *testing.T) {
 		{"wide.mkv", "high", 0},
 		{"wide.mkv", "medium", 0},
 		{"wide.mkv", "high", 720},
+		{"wide.mkv", "high", 480}, // its box made even: 854x360, not 853x360
 	}
 	for _, tc := range cases {
 		size := sources[tc.src]
