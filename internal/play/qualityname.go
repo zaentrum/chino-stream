@@ -108,18 +108,23 @@ func namedHeight(w, h int) int {
 }
 
 // onTheFlyName is the name of rung ql of the on-the-fly ladder of source p,
-// for a device whose HW decoder tops out at maxHeight (0: no cap): by the
-// frame the rung encodes from p (transcodeGeometry), which ffmpeg and the
-// live worker both encode, and with p's size not known by the height the
-// live worker then encodes (rungHeight).
+// for a device whose HW decoder tops out at maxHeight (0: no cap), on the
+// live worker (live) or ffmpeg: by the frame the rung encodes from p
+// (transcodeGeometry), which ffmpeg and the live worker both encode.
 //
 // A rung scaled to a height (medium, low: scale=-2:720 under the cap) is
 // named by that height, the lines it produces, whatever the source's shape:
 // a 2.39:1 film's 1728x720 medium is "Medium (720p)" as a 16:9 film's
 // 1280x720 is, not the 16:9 frame as wide (972p). One the source is shorter
 // than encodes the source's own frame, high's, and is named as that is
-// (a 1280x536 source's medium is "Medium (720p)", as its high is).
-func onTheFlyName(p *Probe, ql Quality, maxHeight int) string {
+// (a 1280x536 source's medium is "Medium (720p)", as its high is). With p's
+// size not known both pipelines encode that height.
+//
+// The high rung of a source whose size is not known is named by the height
+// the live worker then encodes (rungHeight); ffmpeg encodes it at the
+// source's own size, which is not known: no name ("") rather than a wrong
+// one.
+func onTheFlyName(p *Probe, ql Quality, maxHeight int, live bool) string {
 	var w, h int
 	if p != nil {
 		w, h = p.Width, p.Height
@@ -129,6 +134,9 @@ func onTheFlyName(p *Probe, ql Quality, maxHeight int) string {
 		return qualityName(0, t, false)
 	}
 	if g.h <= 0 {
+		if !live {
+			return ""
+		}
 		g.w, g.h = 0, rungHeight(ql, maxHeight)
 	}
 	return qualityName(g.w, g.h, false)
@@ -139,17 +147,17 @@ func onTheFlyName(p *Probe, ql Quality, maxHeight int) string {
 var onTheFlyRungs = []string{"high", "medium", "low"}
 
 // onTheFlyQualities is the quality choice /play/info offers for the
-// on-the-fly transcode of source p on a device capped at maxHeight: every
-// rung of the ladder, the best first, each {"name": its q value, "label":
-// onTheFlyName}. Two rungs that encode one frame - a 720p source's high and
-// medium - carry one name, and both are listed: the apps step down from high
-// to medium and low by those q values and look a q's label up here, so a q
-// left out would play with no name. A menu shows one row per name, the
-// first's (the better encode).
-func onTheFlyQualities(p *Probe, maxHeight int) []map[string]string {
+// on-the-fly transcode of source p on a device capped at maxHeight, on the
+// live worker (live) or ffmpeg: every rung of the ladder, the best first,
+// each {"name": its q value, "label": onTheFlyName}. Two rungs that encode
+// one frame - a 720p source's high and medium - carry one name, and both are
+// listed: the apps step down from high to medium and low by those q values
+// and look a q's label up here, so a q left out would play with no name. A
+// menu shows one row per name, the first's (the better encode).
+func onTheFlyQualities(p *Probe, maxHeight int, live bool) []map[string]string {
 	out := make([]map[string]string, 0, len(onTheFlyRungs))
 	for _, q := range onTheFlyRungs {
-		out = append(out, map[string]string{"name": q, "label": onTheFlyName(p, QualityLadder[q], maxHeight)})
+		out = append(out, map[string]string{"name": q, "label": onTheFlyName(p, QualityLadder[q], maxHeight, live)})
 	}
 	return out
 }

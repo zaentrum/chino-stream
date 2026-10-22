@@ -740,6 +740,9 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 // lists the audio tracks the client is served instead of the probe's
 // (onTheFlyInfoTracks), audio_codec the one it starts on. maxHeight is the
 // client's HW decoder cap (?caps=), which the ladder's frames keep under.
+// The ladder is named for the live worker when LIVE_WORKER_MODE is on, as
+// the master sends a new session there (a worker not ready sends it to
+// ffmpeg, which names the rungs alike but for a source of unknown size).
 func (h *Handler) writeSourceInfo(w http.ResponseWriter, filename string, probe *Probe, mode, reason string, audio []map[string]any, maxHeight int) {
 	// Surface the available quality rungs so the client can render a
 	// picker, each named by the frame it encodes for this source and
@@ -750,7 +753,11 @@ func (h *Handler) writeSourceInfo(w http.ResponseWriter, filename string, probe 
 	// stream-copy video eventually (see Master).
 	var ladder []map[string]string
 	if mode == "transcode" {
-		ladder = onTheFlyQualities(probe, maxHeight)
+		lw := h.Live
+		if h.HLS != nil {
+			lw = h.HLS.Live
+		}
+		ladder = onTheFlyQualities(probe, maxHeight, lw.On())
 	}
 	// Encoder hint for the Playback info dialog. Meaningful for the
 	// transcode and remux paths (both run the video encoder on HLS);

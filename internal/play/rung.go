@@ -143,9 +143,9 @@ func resolutionAttr(w, h int) string {
 // single variant: the stream copy (useCopy) at the source's size and
 // bitrate, named "Original", or rung ql of the transcode ladder at the size
 // it really encodes (maxHeight is the device cap from ?caps=), named by that
-// frame (onTheFlyName). audioGroup names the EXT-X-MEDIA audio group of a
-// transcode variant ("" = none).
-func fallbackStreamInf(p *Probe, ql Quality, maxHeight int, useCopy bool, audioGroup string) string {
+// frame (onTheFlyName; live: the session is the live worker's). audioGroup
+// names the EXT-X-MEDIA audio group of a transcode variant ("" = none).
+func fallbackStreamInf(p *Probe, ql Quality, maxHeight int, useCopy, live bool, audioGroup string) string {
 	if useCopy {
 		// CODECS switches between avc1 (H.264 source) and hvc1 (HEVC
 		// source); permissive profile/level values, since the actual
@@ -172,7 +172,7 @@ func fallbackStreamInf(p *Probe, ql Quality, maxHeight int, useCopy bool, audioG
 	}
 	return fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d%s,CODECS=\"avc1.640028,mp4a.40.2\",VIDEO-RANGE=SDR%s%s",
 		transcodeBandwidth(ql.Name, g.w, g.h, audioGroup != ""), resolutionAttr(g.w, g.h), audioAttr,
-		nameAttr(onTheFlyName(p, ql, maxHeight)))
+		nameAttr(onTheFlyName(p, ql, maxHeight, live)))
 }
 
 // choicesStreamInf is the #EXT-X-STREAM-INF line of the on-the-fly master's
@@ -181,8 +181,9 @@ func fallbackStreamInf(p *Probe, ql Quality, maxHeight int, useCopy bool, audioG
 // the H.264 and every audio codec of the group (RFC 8216), the companions'
 // before the stereo transcodes' as a packaged union variant lists them
 // (serveUnion), BANDWIDTH the rung's video plus the group's largest audio
-// rendition, named by its frame (onTheFlyName).
-func choicesStreamInf(p *Probe, ql Quality, maxHeight int, audioGroup string, choices []audioChoice) string {
+// rendition, named by its frame (onTheFlyName; live: the session is the live
+// worker's).
+func choicesStreamInf(p *Probe, ql Quality, maxHeight int, live bool, audioGroup string, choices []audioChoice) string {
 	g := transcodeGeometry(ql, p.Width, p.Height, maxHeight)
 	codecs := []string{"avc1.640028"}
 	for _, companions := range []bool{true, false} {
@@ -198,5 +199,5 @@ func choicesStreamInf(p *Probe, ql Quality, maxHeight int, audioGroup string, ch
 	}
 	return fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d%s,CODECS=%q,VIDEO-RANGE=SDR,AUDIO=%q%s",
 		transcodeBandwidth(ql.Name, g.w, g.h, false)+audioBps, resolutionAttr(g.w, g.h), strings.Join(codecs, ","), audioGroup,
-		nameAttr(onTheFlyName(p, ql, maxHeight)))
+		nameAttr(onTheFlyName(p, ql, maxHeight, live)))
 }

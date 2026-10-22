@@ -99,28 +99,31 @@ func TestFallbackStreamInf(t *testing.T) {
 		rung    string
 		cap     int
 		useCopy bool
+		live    bool
 		group   string
 		want    string
 	}{
-		{"copy at the source's size and bitrate", sdr720, "high", 0, true, "",
+		{"copy at the source's size and bitrate", sdr720, "high", 0, true, false, "",
 			`#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720,CODECS="avc1.640028,mp4a.40.2",VIDEO-RANGE=SDR,NAME="Original"`},
-		{"copy of a 4K HDR HEVC without a known bitrate", hdr4K, "high", 0, true, "",
+		{"copy of a 4K HDR HEVC without a known bitrate", hdr4K, "high", 0, true, false, "",
 			`#EXT-X-STREAM-INF:BANDWIDTH=6500000,RESOLUTION=3840x2160,CODECS="hvc1.1.6.L120.B0,mp4a.40.2",VIDEO-RANGE=PQ,NAME="Original"`},
-		{"high rung of a 720p source: a re-encode at its size, named by its height", sdr720, "high", 0, false, "aud",
+		{"high rung of a 720p source: a re-encode at its size, named by its height", sdr720, "high", 0, false, false, "aud",
 			`#EXT-X-STREAM-INF:BANDWIDTH=3048888,RESOLUTION=1280x720,CODECS="avc1.640028,mp4a.40.2",VIDEO-RANGE=SDR,AUDIO="aud",NAME="Medium (720p)"`},
-		{"high rung of 4K: fitted into the 1080p box", hdr4K, "high", 0, false, "aud",
+		{"high rung of 4K: fitted into the 1080p box", hdr4K, "high", 0, false, false, "aud",
 			`#EXT-X-STREAM-INF:BANDWIDTH=6660000,RESOLUTION=1920x1080,CODECS="avc1.640028,mp4a.40.2",VIDEO-RANGE=SDR,AUDIO="aud",NAME="High (1080p)"`},
-		{"medium rung of 4K", hdr4K, "medium", 0, false, "aud",
+		{"medium rung of 4K", hdr4K, "medium", 0, false, false, "aud",
 			`#EXT-X-STREAM-INF:BANDWIDTH=3160000,RESOLUTION=1280x720,CODECS="avc1.640028,mp4a.40.2",VIDEO-RANGE=SDR,AUDIO="aud",NAME="Medium (720p)"`},
-		{"high rung of 4K under a 720 HW cap, no audio", hdr4K, "high", 720, false, "",
+		{"high rung of 4K under a 720 HW cap, no audio", hdr4K, "high", 720, false, false, "",
 			`#EXT-X-STREAM-INF:BANDWIDTH=2888888,RESOLUTION=1280x720,CODECS="avc1.640028,mp4a.40.2",VIDEO-RANGE=SDR,NAME="Medium (720p)"`},
-		{"unknown size: no RESOLUTION, the rung's height", &Probe{VideoCodec: "mpeg2video"}, "medium", 0, false, "aud",
+		{"unknown size: no RESOLUTION, the rung's height", &Probe{VideoCodec: "mpeg2video"}, "medium", 0, false, false, "aud",
 			`#EXT-X-STREAM-INF:BANDWIDTH=3160000,CODECS="avc1.640028,mp4a.40.2",VIDEO-RANGE=SDR,AUDIO="aud",NAME="Medium (720p)"`},
-		{"unknown size on high: the height the live worker encodes", &Probe{VideoCodec: "mpeg2video"}, "high", 0, false, "aud",
+		{"unknown size on high, ffmpeg: the source's own size, no name", &Probe{VideoCodec: "mpeg2video"}, "high", 0, false, false, "aud",
+			`#EXT-X-STREAM-INF:BANDWIDTH=6660000,CODECS="avc1.640028,mp4a.40.2",VIDEO-RANGE=SDR,AUDIO="aud"`},
+		{"unknown size on high, the live worker: the height it encodes", &Probe{VideoCodec: "mpeg2video"}, "high", 0, false, true, "aud",
 			`#EXT-X-STREAM-INF:BANDWIDTH=6660000,CODECS="avc1.640028,mp4a.40.2",VIDEO-RANGE=SDR,AUDIO="aud",NAME="High (1080p)"`},
 	}
 	for _, tc := range cases {
-		if got := fallbackStreamInf(tc.p, QualityLadder[tc.rung], tc.cap, tc.useCopy, tc.group); got != tc.want {
+		if got := fallbackStreamInf(tc.p, QualityLadder[tc.rung], tc.cap, tc.useCopy, tc.live, tc.group); got != tc.want {
 			t.Errorf("%s:\n got %s\nwant %s", tc.name, got, tc.want)
 		}
 	}

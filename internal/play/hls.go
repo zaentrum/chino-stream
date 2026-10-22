@@ -712,7 +712,7 @@ func (h *HLSHandler) serveOnTheFlyMaster(w http.ResponseWriter, r *http.Request,
 	// the source's size and bitrate, a transcode rung at the size it
 	// encodes (rung.go — the encoder uses the same geometry).
 	if useCopy {
-		sb.WriteString(fallbackStreamInf(probe, ql, 0, true, "") + "\n")
+		sb.WriteString(fallbackStreamInf(probe, ql, 0, true, live, "") + "\n")
 		sb.WriteString(fmt.Sprintf("copy/index.m3u8%s\n", q))
 	} else {
 		// Transcode variant — single rung matching ?q=.
@@ -722,13 +722,13 @@ func (h *HLSHandler) serveOnTheFlyMaster(w http.ResponseWriter, r *http.Request,
 		}
 		uri := fmt.Sprintf("%s/index.m3u8%s\n", ql.Name, q)
 		if union != nil {
-			sb.WriteString(choicesStreamInf(probe, ql, caps.MaxVideoHeight(), audioGroup, union) + "\n" + uri)
+			sb.WriteString(choicesStreamInf(probe, ql, caps.MaxVideoHeight(), live, audioGroup, union) + "\n" + uri)
 		} else {
-			sb.WriteString(fallbackStreamInf(probe, ql, caps.MaxVideoHeight(), false, group) + "\n" + uri)
+			sb.WriteString(fallbackStreamInf(probe, ql, caps.MaxVideoHeight(), false, live, group) + "\n" + uri)
 		}
 		if mirror != nil {
 			// Apple's shape: the rung once more, with the 5.1 group.
-			sb.WriteString(choicesStreamInf(probe, ql, caps.MaxVideoHeight(), onTheFlySurroundGroup, mirror) + "\n" + uri)
+			sb.WriteString(choicesStreamInf(probe, ql, caps.MaxVideoHeight(), live, onTheFlySurroundGroup, mirror) + "\n" + uri)
 		}
 	}
 	// Pre-warm: kick off the first window's transcode / first-segment plan

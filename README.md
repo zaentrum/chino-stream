@@ -267,7 +267,12 @@ standard frame cropped at the sides (1916x800 is `High (1080p)`, 3836x1600
   encode); a step-down goes to the next entry with another name (`high` to
   `medium` re-encodes that original's frame once more), never to a `q` the
   list does not have, so the notice can say the step's name. Every `q` still
-  plays what it did.
+  plays what it did. Of an original whose size ffprobe does not give,
+  `medium` and `low` are named by their heights; `high` is `High (1080p)`
+  (or the cap's) when `LIVE_WORKER_MODE` is `on`, as the live worker encodes
+  it at that height, and has no name on ffmpeg, which encodes it at the
+  original's unknown size: an empty `label`, no `NAME`. A client names an
+  empty label by itself.
 - **A package's rungs** by their frames (the variant's `RESOLUTION`).
 
 The name is `label` in `/play/info`'s `qualities` and `NAME` on every
