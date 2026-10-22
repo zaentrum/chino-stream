@@ -139,21 +139,17 @@ func onTheFlyName(p *Probe, ql Quality, maxHeight int) string {
 var onTheFlyRungs = []string{"high", "medium", "low"}
 
 // onTheFlyQualities is the quality choice /play/info offers for the
-// on-the-fly transcode of source p on a device capped at maxHeight: the
-// ladder's rungs, the best first, each {"name": its q value, "label":
-// onTheFlyName}. A rung that would be named what a rung above it is - the
-// same frame, as a 720p source's high and medium are - is left out: one entry
-// per name, the better encode's.
+// on-the-fly transcode of source p on a device capped at maxHeight: every
+// rung of the ladder, the best first, each {"name": its q value, "label":
+// onTheFlyName}. Two rungs that encode one frame - a 720p source's high and
+// medium - carry one name, and both are listed: the apps step down from high
+// to medium and low by those q values and look a q's label up here, so a q
+// left out would play with no name. A menu shows one row per name, the
+// first's (the better encode).
 func onTheFlyQualities(p *Probe, maxHeight int) []map[string]string {
-	var out []map[string]string
-	seen := map[string]bool{}
+	out := make([]map[string]string, 0, len(onTheFlyRungs))
 	for _, q := range onTheFlyRungs {
-		label := onTheFlyName(p, QualityLadder[q], maxHeight)
-		if seen[label] {
-			continue
-		}
-		seen[label] = true
-		out = append(out, map[string]string{"name": q, "label": label})
+		out = append(out, map[string]string{"name": q, "label": onTheFlyName(p, QualityLadder[q], maxHeight)})
 	}
 	return out
 }

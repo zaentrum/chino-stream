@@ -159,16 +159,19 @@ func TestOnTheFlyNames(t *testing.T) {
 	}
 }
 
-// /play/info's on-the-fly choice: each name once, the better encode's.
+// /play/info's on-the-fly choice: every q of the ladder, named, also where
+// two encode one frame and so carry one name - a client steps down to medium
+// and low by q and looks its name up in the list.
 func TestOnTheFlyQualities(t *testing.T) {
 	cases := []struct {
 		w, h, cap int
 		want      []string
 	}{
 		{1920, 1080, 0, []string{"high High (1080p)", "medium Medium (720p)", "low Low (480p)"}},
-		{1280, 720, 0, []string{"high Medium (720p)", "low Low (480p)"}},
-		{3840, 2160, 720, []string{"high Medium (720p)", "low Low (480p)"}},
-		{640, 360, 0, []string{"high Lowest (360p)"}},
+		{1280, 720, 0, []string{"high Medium (720p)", "medium Medium (720p)", "low Low (480p)"}},
+		{3840, 2160, 720, []string{"high Medium (720p)", "medium Medium (720p)", "low Low (480p)"}},
+		{720, 576, 0, []string{"high Low (576p)", "medium Low (576p)", "low Low (480p)"}},
+		{640, 360, 0, []string{"high Lowest (360p)", "medium Lowest (360p)", "low Lowest (360p)"}},
 	}
 	for _, tc := range cases {
 		var got []string
@@ -308,11 +311,10 @@ func onTheFlyHandlers(t *testing.T, file, probe string) (*HLSHandler, *Handler) 
 }
 
 // On the fly, /play/info's qualities are the ladder's rungs by the frame
-// each encodes for this source and client - each name once - and the master
-// a client asks with an entry's name names its variant that entry's label,
-// a rung the list leaves out (it plays what one above it does) named as the
-// one above. A stream copy (passthrough) offers no choice, as before, and its
-// variant is "Original".
+// each encodes for this source and client - every q, two that encode one
+// frame under one name - and the master a client asks with an entry's name
+// names its variant that entry's label. A stream copy (passthrough) offers no
+// choice, as before, and its variant is "Original".
 func TestOnTheFlyInfoAndMasterNameTheRungs(t *testing.T) {
 	captureLog(t)
 	const mkv = "matroska,webm"
@@ -325,15 +327,15 @@ func TestOnTheFlyInfoAndMasterNameTheRungs(t *testing.T) {
 		{"a 1080p transcode", probeJSON(mkv, "hevc", 1920, 1080, "aac", 2, 8_000_000), "avc,aac", "transcode",
 			[]string{"high High (1080p)", "medium Medium (720p)", "low Low (480p)"}, "Medium (720p)"},
 		{"a 720p transcode: high at its size", probeJSON(mkv, "hevc", 1280, 720, "aac", 2, 4_000_000), "avc,aac", "transcode",
-			[]string{"high Medium (720p)", "low Low (480p)"}, "Medium (720p)"},
+			[]string{"high Medium (720p)", "medium Medium (720p)", "low Low (480p)"}, "Medium (720p)"},
 		{"4K on a 720p HW cap", probeJSON(mkv, "hevc", 3840, 2160, "aac", 2, 20_000_000), "avc:720,aac", "transcode",
-			[]string{"high Medium (720p)", "low Low (480p)"}, "Medium (720p)"},
+			[]string{"high Medium (720p)", "medium Medium (720p)", "low Low (480p)"}, "Medium (720p)"},
 		{"a 2.39:1 transcode", probeJSON(mkv, "hevc", 1920, 800, "aac", 2, 6_000_000), "avc,aac", "transcode",
 			[]string{"high High (1080p)", "medium Medium (720p)", "low Low (480p)"}, "Medium (720p)"},
 		{"a 2.39:1 transcode on a 720p HW cap", probeJSON(mkv, "hevc", 1920, 800, "aac", 2, 6_000_000), "avc:720,aac", "transcode",
-			[]string{"high Medium (720p)", "low Low (480p)"}, "Medium (720p)"},
+			[]string{"high Medium (720p)", "medium Medium (720p)", "low Low (480p)"}, "Medium (720p)"},
 		{"a 360p transcode", probeJSON(mkv, "hevc", 640, 360, "aac", 2, 900_000), "avc,aac", "transcode",
-			[]string{"high Lowest (360p)"}, "Lowest (360p)"},
+			[]string{"high Lowest (360p)", "medium Lowest (360p)", "low Lowest (360p)"}, "Lowest (360p)"},
 		{"a stream copy", probeJSON("mov,mp4,m4a,3gp,3g2,mj2", "h264", 1920, 1080, "aac", 2, 8_000_000), "avc,aac", "passthrough",
 			nil, "Medium (720p)"},
 	}

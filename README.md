@@ -260,9 +260,14 @@ standard frame cropped at the sides (1916x800 is `High (1080p)`, 3836x1600
   height (720 and 480, under the cap) and are named by it, whatever the
   original's shape: a 2.39:1 film's `medium` (1728x720) is `Medium (720p)`,
   as a 16:9 film's is; where the original is shorter they encode its own
-  frame and are named as `high` is. `/play/info` lists each name
-  once, the better encode's (a 720p original offers `high` and `low`); every
-  `q` still plays what it did.
+  frame and are named as `high` is. `/play/info` lists every `q`, as
+  before, each with its name: two rungs that encode one frame carry one name
+  (a 720p original's `high` and `medium` are both `Medium (720p)`). A
+  client's menu shows one row per name, the first entry's (the better
+  encode); a step-down goes to the next entry with another name (`high` to
+  `medium` re-encodes that original's frame once more), never to a `q` the
+  list does not have, so the notice can say the step's name. Every `q` still
+  plays what it did.
 - **A package's rungs** by their frames (the variant's `RESOLUTION`).
 
 The name is `label` in `/play/info`'s `qualities` and `NAME` on every
