@@ -428,7 +428,7 @@ func TestOnTheFlyFromAPackageServesItsCompanions(t *testing.T) {
 				`#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="English · Commentary",LANGUAGE="eng",DEFAULT=NO,AUTOSELECT=YES,CHANNELS="2",URI="audio/0/index.m3u8?caps=avc,aac,eac3` + pin + `"` + "\n" +
 				`#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="English 5.1",LANGUAGE="eng",DEFAULT=YES,AUTOSELECT=YES,CHANNELS="6",URI="a2/playlist.m3u8?caps=avc,aac,eac3` + pin + `"` + "\n" +
 				`#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="English",LANGUAGE="eng",DEFAULT=NO,AUTOSELECT=YES,CHANNELS="2",URI="audio/1/index.m3u8?caps=avc,aac,eac3` + pin + `"` + "\n" +
-				`#EXT-X-STREAM-INF:BANDWIDTH=6948000,RESOLUTION=1920x1080,CODECS="avc1.640028,ec-3,mp4a.40.2",VIDEO-RANGE=SDR,AUDIO="aud"` + "\n" +
+				`#EXT-X-STREAM-INF:BANDWIDTH=6948000,RESOLUTION=1920x1080,CODECS="avc1.640028,ec-3,mp4a.40.2",VIDEO-RANGE=SDR,AUDIO="aud",NAME="High (1080p)"` + "\n" +
 				"high/index.m3u8?caps=avc,aac,eac3" + pin + "\n"
 			if w.Code != 200 || w.Body.String() != want {
 				t.Errorf("master %d:\n%s\nwant\n%s", w.Code, w.Body, want)

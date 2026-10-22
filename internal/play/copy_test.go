@@ -239,7 +239,7 @@ func TestStreamCopyForATVThatDecodesItAll(t *testing.T) {
 	if len(variants) != 1 || !strings.HasPrefix(variants[0]["uri"], "video/index.m3u8"+caps+"&c=") ||
 		!strings.HasPrefix(variants[0]["CODECS"], "hvc1.") || !strings.Contains(variants[0]["CODECS"], "ec-3") ||
 		!strings.Contains(variants[0]["CODECS"], "mp4a.40.2") || variants[0]["VIDEO-RANGE"] != "SDR" || variants[0]["RESOLUTION"] != "320x180" ||
-		strings.Contains(m.Body.String(), "lw=") {
+		variants[0]["NAME"] != "Original" || strings.Contains(m.Body.String(), "lw=") {
 		t.Fatalf("master:\n%s", m.Body)
 	}
 	if len(media) != 2 || !strings.HasPrefix(media[0]["URI"], "audiocopy0/index.m3u8") || media[0]["DEFAULT"] != "YES" ||

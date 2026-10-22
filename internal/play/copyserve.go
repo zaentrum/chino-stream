@@ -394,7 +394,8 @@ const (
 // the audio group of choices: BANDWIDTH the copy's peak (a Matroska file's
 // segments hold its audio as well) and the group's largest converted
 // rendition, CODECS the video's (its Dolby Vision form for a client that
-// plays it) and every audio codec of the group, VIDEO-RANGE the source's.
+// plays it) and every audio codec of the group, VIDEO-RANGE the source's. It
+// is named "Original": the video is the original's as it is.
 func copyStreamInf(ix *streamcopy.Index, p *Probe, caps Caps, groupID string, choices []audioChoice) string {
 	peak, avg := ix.Bitrates()
 	video := ix.Video.Codec
@@ -415,8 +416,9 @@ func copyStreamInf(ix *streamcopy.Index, p *Probe, caps Caps, groupID string, ch
 	if len(choices) > 0 {
 		group = fmt.Sprintf(",AUDIO=%q", groupID) // a file without audio has no group
 	}
-	return fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,AVERAGE-BANDWIDTH=%d%s,CODECS=%q,VIDEO-RANGE=%s%s",
-		peak+extra, avg+extra, resolutionAttr(ix.Video.Width, ix.Video.Height), strings.Join(codecs, ","), videoRange(p), group)
+	return fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,AVERAGE-BANDWIDTH=%d%s,CODECS=%q,VIDEO-RANGE=%s%s%s",
+		peak+extra, avg+extra, resolutionAttr(ix.Video.Width, ix.Video.Height), strings.Join(codecs, ","), videoRange(p), group,
+		nameAttr(qualityName(0, 0, true)))
 }
 
 // copyFingerprintOf is the fingerprint of the file the index ix of src is of.

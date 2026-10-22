@@ -687,7 +687,7 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		h.writeSourceInfo(w, title, src.probe, mode, reason, audio)
+		h.writeSourceInfo(w, title, src.probe, mode, reason, audio, infoCaps.MaxVideoHeight())
 	}
 	path, err := h.Catalog.PrimaryAssetPath(r.Context(), itemID, bearerFrom(r))
 	if err != nil {
@@ -732,25 +732,25 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 	// so the master and the first segment find it made.
 	src := &source{key: itemID, file: clean, probe: &probe}
 	plan := planner.planOnTheFly(r.Context(), src, infoCaps, r.URL.Query().Get("q"))
-	h.writeSourceInfo(w, filepath.Base(clean), &probe, plan.mode, plan.reason, nil)
+	h.writeSourceInfo(w, filepath.Base(clean), &probe, plan.mode, plan.reason, nil, infoCaps.MaxVideoHeight())
 }
 
 // writeSourceInfo answers /play/info for an on-the-fly source: its file
 // name (a package's title), its probe, the mode and why. audio, when set,
 // lists the audio tracks the client is served instead of the probe's
-// (onTheFlyInfoTracks), audio_codec the one it starts on.
-func (h *Handler) writeSourceInfo(w http.ResponseWriter, filename string, probe *Probe, mode, reason string, audio []map[string]any) {
+// (onTheFlyInfoTracks), audio_codec the one it starts on. maxHeight is the
+// client's HW decoder cap (?caps=), which the ladder's frames keep under.
+func (h *Handler) writeSourceInfo(w http.ResponseWriter, filename string, probe *Probe, mode, reason string, audio []map[string]any, maxHeight int) {
 	// Surface the available quality rungs so the client can render a
-	// picker. Passthrough ignores the q parameter. Remux honours it on
-	// the HLS path (it runs the same ladder) but is not offered the
-	// picker: that would change what clients show for these titles,
-	// and remux should stream-copy video eventually (see Master).
+	// picker, each named by the frame it encodes for this source and
+	// client (onTheFlyQualities), as its master names its variant.
+	// Passthrough ignores the q parameter. Remux honours it on the HLS
+	// path (it runs the same ladder) but is not offered the picker: that
+	// would change what clients show for these titles, and remux should
+	// stream-copy video eventually (see Master).
 	var ladder []map[string]string
 	if mode == "transcode" {
-		for _, name := range []string{"high", "medium", "low"} {
-			ql := QualityLadder[name]
-			ladder = append(ladder, map[string]string{"name": ql.Name, "label": ql.Label})
-		}
+		ladder = onTheFlyQualities(probe, maxHeight)
 	}
 	// Encoder hint for the Playback info dialog. Meaningful for the
 	// transcode and remux paths (both run the video encoder on HLS);

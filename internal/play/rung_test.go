@@ -103,17 +103,21 @@ func TestFallbackStreamInf(t *testing.T) {
 		want    string
 	}{
 		{"copy at the source's size and bitrate", sdr720, "high", 0, true, "",
-			`#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720,CODECS="avc1.640028,mp4a.40.2",VIDEO-RANGE=SDR`},
+			`#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720,CODECS="avc1.640028,mp4a.40.2",VIDEO-RANGE=SDR,NAME="Original"`},
 		{"copy of a 4K HDR HEVC without a known bitrate", hdr4K, "high", 0, true, "",
-			`#EXT-X-STREAM-INF:BANDWIDTH=6500000,RESOLUTION=3840x2160,CODECS="hvc1.1.6.L120.B0,mp4a.40.2",VIDEO-RANGE=PQ`},
-		{"high rung of a 720p source", sdr720, "high", 0, false, "aud",
-			`#EXT-X-STREAM-INF:BANDWIDTH=3048888,RESOLUTION=1280x720,CODECS="avc1.640028,mp4a.40.2",VIDEO-RANGE=SDR,AUDIO="aud"`},
+			`#EXT-X-STREAM-INF:BANDWIDTH=6500000,RESOLUTION=3840x2160,CODECS="hvc1.1.6.L120.B0,mp4a.40.2",VIDEO-RANGE=PQ,NAME="Original"`},
+		{"high rung of a 720p source: a re-encode at its size, named by its height", sdr720, "high", 0, false, "aud",
+			`#EXT-X-STREAM-INF:BANDWIDTH=3048888,RESOLUTION=1280x720,CODECS="avc1.640028,mp4a.40.2",VIDEO-RANGE=SDR,AUDIO="aud",NAME="Medium (720p)"`},
+		{"high rung of 4K: fitted into the 1080p box", hdr4K, "high", 0, false, "aud",
+			`#EXT-X-STREAM-INF:BANDWIDTH=6660000,RESOLUTION=1920x1080,CODECS="avc1.640028,mp4a.40.2",VIDEO-RANGE=SDR,AUDIO="aud",NAME="High (1080p)"`},
 		{"medium rung of 4K", hdr4K, "medium", 0, false, "aud",
-			`#EXT-X-STREAM-INF:BANDWIDTH=3160000,RESOLUTION=1280x720,CODECS="avc1.640028,mp4a.40.2",VIDEO-RANGE=SDR,AUDIO="aud"`},
+			`#EXT-X-STREAM-INF:BANDWIDTH=3160000,RESOLUTION=1280x720,CODECS="avc1.640028,mp4a.40.2",VIDEO-RANGE=SDR,AUDIO="aud",NAME="Medium (720p)"`},
 		{"high rung of 4K under a 720 HW cap, no audio", hdr4K, "high", 720, false, "",
-			`#EXT-X-STREAM-INF:BANDWIDTH=2888888,RESOLUTION=1280x720,CODECS="avc1.640028,mp4a.40.2",VIDEO-RANGE=SDR`},
-		{"unknown size: no RESOLUTION", &Probe{VideoCodec: "mpeg2video"}, "medium", 0, false, "aud",
-			`#EXT-X-STREAM-INF:BANDWIDTH=3160000,CODECS="avc1.640028,mp4a.40.2",VIDEO-RANGE=SDR,AUDIO="aud"`},
+			`#EXT-X-STREAM-INF:BANDWIDTH=2888888,RESOLUTION=1280x720,CODECS="avc1.640028,mp4a.40.2",VIDEO-RANGE=SDR,NAME="Medium (720p)"`},
+		{"unknown size: no RESOLUTION, the rung's height", &Probe{VideoCodec: "mpeg2video"}, "medium", 0, false, "aud",
+			`#EXT-X-STREAM-INF:BANDWIDTH=3160000,CODECS="avc1.640028,mp4a.40.2",VIDEO-RANGE=SDR,AUDIO="aud",NAME="Medium (720p)"`},
+		{"unknown size on high: the height the live worker encodes", &Probe{VideoCodec: "mpeg2video"}, "high", 0, false, "aud",
+			`#EXT-X-STREAM-INF:BANDWIDTH=6660000,CODECS="avc1.640028,mp4a.40.2",VIDEO-RANGE=SDR,AUDIO="aud",NAME="High (1080p)"`},
 	}
 	for _, tc := range cases {
 		if got := fallbackStreamInf(tc.p, QualityLadder[tc.rung], tc.cap, tc.useCopy, tc.group); got != tc.want {
@@ -142,16 +146,16 @@ func TestMasterAdvertisesWhatTheVariantIs(t *testing.T) {
 	}{
 		{"remux of a 720p source runs the high rung at 720p",
 			probeJSON(mp4, "h264", 1280, 720, "ac3", 6, 4_000_000), "",
-			[]string{"BANDWIDTH=3048888,RESOLUTION=1280x720,", "\nhigh/index.m3u8\n"}},
+			[]string{"BANDWIDTH=3048888,RESOLUTION=1280x720,", `,NAME="Medium (720p)"` + "\nhigh/index.m3u8\n"}},
 		{"stream copy at the source's size and bitrate",
 			probeJSON(mp4, "h264", 1280, 720, "aac", 2, 2_500_000), "",
-			[]string{"BANDWIDTH=2500000,RESOLUTION=1280x720,", "\ncopy/index.m3u8\n"}},
+			[]string{"BANDWIDTH=2500000,RESOLUTION=1280x720,", `,NAME="Original"` + "\ncopy/index.m3u8\n"}},
 		{"the medium rung does not upscale a 360p source",
 			probeJSON("matroska,webm", "hevc", 640, 360, "aac", 2, 900_000), "?q=medium",
-			[]string{"BANDWIDTH=910000,RESOLUTION=640x360,", "\nmedium/index.m3u8?q=medium\n"}},
+			[]string{"BANDWIDTH=910000,RESOLUTION=640x360,", `,NAME="Lowest (360p)"` + "\nmedium/index.m3u8?q=medium\n"}},
 		{"a device's 720p HW cap",
 			probeJSON("matroska,webm", "hevc", 1920, 1080, "aac", 2, 8_000_000), "?caps=avc:720,aac",
-			[]string{"BANDWIDTH=3048888,RESOLUTION=1280x720,", "\nhigh/index.m3u8?caps=avc:720,aac\n"}},
+			[]string{"BANDWIDTH=3048888,RESOLUTION=1280x720,", `,NAME="Medium (720p)"` + "\nhigh/index.m3u8?caps=avc:720,aac\n"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

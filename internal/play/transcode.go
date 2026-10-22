@@ -11,19 +11,20 @@ import (
 
 // Quality describes one rung of the adaptive ladder. The HLS fallback runs it
 // for transcode and remux alike; only the progressive stream copies remux
-// video at source bitrate.
+// video at source bitrate. Name is the q value a client asks for the rung
+// with; what the rung is called is the frame it encodes from a given source,
+// named by the fixed table (onTheFlyName, qualityname.go).
 type Quality struct {
 	Name  string // "high" | "medium" | "low"
 	CRF   string // x264 quality (lower = better)
 	Audio string // AAC bitrate
 	Scale string // -vf scale expression, empty = no resize
-	Label string // human label for UI
 }
 
 var QualityLadder = map[string]Quality{
-	"high":   {Name: "high", CRF: "23", Audio: "192k", Scale: "", Label: "High (source resolution)"},
-	"medium": {Name: "medium", CRF: "26", Audio: "128k", Scale: "scale=-2:720", Label: "Medium (720p)"},
-	"low":    {Name: "low", CRF: "28", Audio: "96k", Scale: "scale=-2:480", Label: "Low (480p)"},
+	"high":   {Name: "high", CRF: "23", Audio: "192k", Scale: ""},
+	"medium": {Name: "medium", CRF: "26", Audio: "128k", Scale: "scale=-2:720"},
+	"low":    {Name: "low", CRF: "28", Audio: "96k", Scale: "scale=-2:480"},
 }
 
 func ResolveQuality(q string) Quality {

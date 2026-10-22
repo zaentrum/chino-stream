@@ -219,9 +219,50 @@ The stream copy (`internal/streamcopy`, `internal/mkv`):
 
 `/play/info`'s `mode` is `passthrough` for the muxed copy, `remux` for the
 stream copy (no quality menu, as before), `transcode` for the ladder (high,
-medium, low); its `reason` says what happens and why, as the player shows
-it: "The video plays as it is in the file. The audio is converted to stereo
-AAC, because this device does not play E-AC-3."
+medium, low, each by its [name](#quality-names)); its `reason` says what
+happens and why, as the player shows it: "The video plays as it is in the
+file. The audio is converted to stereo AAC, because this device does not
+play E-AC-3."
+
+## Quality names
+
+chino-stream names every quality step by one fixed table of heights, so a
+name means the same height on every title and every installation
+(`internal/play/qualityname.go`, `qualityName`, the only source of them;
+the product spec is `docs/chino/playback.md` in zaentrum/zaentrum):
+
+| Height | Name |
+|---|---|
+| 2160p and up | `Ultra (2160p)` |
+| 1080p | `High (1080p)` |
+| 720p | `Medium (720p)` |
+| 480p | `Low (480p)` |
+| below 480p | `Lowest (360p)` |
+| the original, played as it is | `Original` |
+
+A height between two steps takes the lower step's word with its own height
+(`Medium (900p)`), as do the heights past either end (`Ultra (4320p)`,
+`Lowest (240p)`). A frame's height is that of the 16:9 frame it fills, as
+the transcoder's `LADDER` names its rungs: its own, or for a frame wider
+than 16:9 the height of the 16:9 frame as wide — a 2.39:1 film's 1920x800 is
+`High (1080p)`, its 3840x1606 `Ultra (2160p)`, a 1.85:1 film's 1920x1038
+`High (1080p)`; up to 10% wider than a standard frame counts as that frame
+(DCI 4096x2160 is `Ultra (2160p)`).
+
+- **The stream copy** (`copy/`, and the `remux` copy's `video/`): `Original`.
+- **The on-the-fly ladder**, on ffmpeg and on the live worker alike: each
+  rung by the frame it encodes for that title and client (`caps`' height
+  cap included). A re-encode at the original's size is named by its height
+  like any other step: a 720p original's `high` is `Medium (720p)`, a 4K
+  one's (fitted into 1080p) `High (1080p)`. `/play/info` lists each name
+  once, the better encode's (a 720p original offers `high` and `low`); every
+  `q` still plays what it did.
+- **A package's rungs** by their frames (the variant's `RESOLUTION`).
+
+The name is `label` in `/play/info`'s `qualities` and `NAME` on every
+`EXT-X-STREAM-INF` of a master (hls.js reads it as a level's `name`); the
+I-frame playlists are not named. Clients show it as given; the step-down
+notices say it. The `q` values and every URL are as they were.
 
 ## The live worker
 
@@ -379,9 +420,9 @@ starts on and what it may pick:
   "default_quality": "auto",
   "qualities": [
     {"name": "auto", "label": "Auto"},
-    {"name": "v1", "id": "v1", "label": "720p", "width": 1280, "height": 720,
+    {"name": "v1", "id": "v1", "label": "Medium (720p)", "width": 1280, "height": 720,
      "codec": "avc1.64001f", "bitrate": 1505267, "video_range": "SDR"},
-    {"name": "v2", "id": "v2", "label": "480p", "width": 854, "height": 480,
+    {"name": "v2", "id": "v2", "label": "Low (480p)", "width": 854, "height": 480,
      "codec": "avc1.64001e", "bitrate": 706649, "video_range": "SDR"}
   ],
   "audio_tracks": [ … ], "subtitle_tracks": [ … ]
@@ -390,12 +431,13 @@ starts on and what it may pick:
 
 - `video_codec`, `width`, `height`: the rung the client starts on (its
   ladder's first variant, or the one `q` picked).
-- `qualities`: `Auto` first, then one entry per picture size the client
+- `qualities`: `Auto` first, then one entry per quality name the client
   decodes at its heights, tallest first, across families (a pick loads that
-  rung's own master). `label` names the 16:9 box the frame fits
-  (`1280x536` is `720p`), `bitrate` is the variant's `BANDWIDTH`. Of two
-  rungs of one size the one in the client's family is listed. `null` when
-  there are fewer than two to pick from — every package before the ladder.
+  rung's own master). `label` is the rung's [name](#quality-names)
+  (`1280x536` is `Medium (720p)`), the `NAME` of its variant in the master;
+  `bitrate` is the variant's `BANDWIDTH`. Of two rungs of one name the one
+  in the client's family is listed. `null` when there are fewer than two to
+  pick from — every package before the ladder.
 - `default_quality`: `auto`.
 - `audio_tracks` lists the stereo tracks; `subtitle_tracks` the sidecars,
   each WebVTT one with its HLS rendition dir (`hls`) when it has one: the

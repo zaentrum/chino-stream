@@ -158,7 +158,7 @@ func (h *HLSHandler) ExtraMaster(w http.ResponseWriter, r *http.Request) {
 	path, retry := h.extraRetry(r, p, "hls", "master.m3u8")
 	q := r.URL.Query().Get("q")
 	servePlaylistCachedTransform(w, r, path, r.URL.RawQuery, retry, func(body string) string {
-		return serveLadder(body, caps, q, twinsOf(mf)).body
+		return nameVariants(serveLadder(body, caps, q, twinsOf(mf)).body)
 	})
 }
 

@@ -91,9 +91,10 @@ func golden(t *testing.T, name, got string) {
 // A package with one video rendition and one audio group — every package
 // on disk today — is served exactly as it is packaged, whatever the client
 // says it decodes and whichever quality it asks for: its master with each
-// URI carrying the request's query, and VIDEO-RANGE stamped on an HDR
-// package whose master lacks it. The golden files are what chino-stream
-// served for these packages before the ladder work.
+// URI carrying the request's query, VIDEO-RANGE stamped on an HDR package
+// whose master lacks it, and its variant named by its frame (NAME="High
+// (1080p)", nameVariants). The golden files are what chino-stream served for
+// these packages before the ladder work, with that NAME added.
 func TestGoldenSingleRenditionMasterIsServedAsPackaged(t *testing.T) {
 	h := &HLSHandler{Packages: usePackages(t, filepath.Join("testdata", "packages"))}
 	packages := map[string]string{

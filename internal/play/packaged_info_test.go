@@ -69,17 +69,17 @@ func TestPlayInfoListsTheRungsAClientMayPick(t *testing.T) {
 		w, h             int
 	}{
 		{"H.264 browser", pkgLadder, "?caps=avc,aac",
-			[]string{"auto Auto", "v1 720p", "v2 480p"}, "avc1.64001f", 1280, 720},
+			[]string{"auto Auto", "v1 Medium (720p)", "v2 Low (480p)"}, "avc1.64001f", 1280, 720},
 		{"HEVC browser: its ladder is the HEVC rung, the H.264 ones are picks", pkgLadder, "?caps=avc,hvc,aac",
-			[]string{"auto Auto", "v0 1080p", "v1 720p", "v2 480p"}, "hvc1.1.6.L120.90", 1920, 1080},
+			[]string{"auto Auto", "v0 High (1080p)", "v1 Medium (720p)", "v2 Low (480p)"}, "hvc1.1.6.L120.90", 1920, 1080},
 		{"a pick: the video fields are the rung picked", pkgLadder, "?caps=avc,hvc,aac&q=v2",
-			[]string{"auto Auto", "v0 1080p", "v1 720p", "v2 480p"}, "avc1.64001e", 854, 480},
+			[]string{"auto Auto", "v0 High (1080p)", "v1 Medium (720p)", "v2 Low (480p)"}, "avc1.64001e", 854, 480},
 		{"4K over a 1080 HEVC cap", pkgUHD, "?caps=avc:1080,hvc:1080,aac",
-			[]string{"auto Auto", "v1 1080p", "v2 720p"}, "avc1.640028", 1920, 1080},
+			[]string{"auto Auto", "v1 High (1080p)", "v2 Medium (720p)"}, "avc1.640028", 1920, 1080},
 		{"4K TV", pkgUHD, "?caps=avc:2160,hvc:2160,aac,eac3",
-			[]string{"auto Auto", "v0 2160p", "v1 1080p", "v2 720p"}, "hvc1.1.6.L150.90", 3840, 2160},
+			[]string{"auto Auto", "v0 Ultra (2160p)", "v1 High (1080p)", "v2 Medium (720p)"}, "hvc1.1.6.L150.90", 3840, 2160},
 		{"two HEVC rungs", pkgHEVCLadder, "?caps=hvc,avc,aac",
-			[]string{"auto Auto", "v0 1080p", "v1 720p", "v2 480p"}, "hvc1.1.6.L120.90", 1920, 1080},
+			[]string{"auto Auto", "v0 High (1080p)", "v1 Medium (720p)", "v2 Low (480p)"}, "hvc1.1.6.L120.90", 1920, 1080},
 		{"one rung it may pick: no choice", pkgHEVCLadder, "?caps=avc,aac",
 			nil, "avc1.64001e", 854, 480},
 	}
@@ -111,11 +111,11 @@ func TestPlayInfoQualityEntries(t *testing.T) {
 	info, _ := getInfo(t, packages, pkgLadder, "?caps=avc,hvc,aac")
 	want := []map[string]any{
 		{"name": "auto", "label": "Auto"},
-		{"name": "v0", "id": "v0", "label": "1080p", "width": 1920.0, "height": 1080.0,
+		{"name": "v0", "id": "v0", "label": "High (1080p)", "width": 1920.0, "height": 1080.0,
 			"codec": "hvc1.1.6.L120.90", "bitrate": 7436924.0, "video_range": "SDR"},
-		{"name": "v1", "id": "v1", "label": "720p", "width": 1280.0, "height": 720.0,
+		{"name": "v1", "id": "v1", "label": "Medium (720p)", "width": 1280.0, "height": 720.0,
 			"codec": "avc1.64001f", "bitrate": 1505267.0, "video_range": "SDR"},
-		{"name": "v2", "id": "v2", "label": "480p", "width": 854.0, "height": 480.0,
+		{"name": "v2", "id": "v2", "label": "Low (480p)", "width": 854.0, "height": 480.0,
 			"codec": "avc1.64001e", "bitrate": 706649.0, "video_range": "SDR"},
 	}
 	if !reflect.DeepEqual(info.Qualities, want) {
@@ -147,11 +147,11 @@ func TestPlayInfoOneEntryPerSize(t *testing.T) {
 		"#EXT-X-STREAM-INF:BANDWIDTH=8000000,CODECS=\"avc1.640028,mp4a.40.2\",RESOLUTION=1920x1080\nv1/playlist.m3u8\n" +
 		"#EXT-X-STREAM-INF:BANDWIDTH=3000000,CODECS=\"avc1.64001f,mp4a.40.2\",RESOLUTION=1280x720\nv2/playlist.m3u8\n"
 	if got := qualityNames(packagedQualities(body, ParseCaps("avc,hvc,aac"))); !reflect.DeepEqual(got,
-		[]string{"auto Auto", "v0 1080p", "v2 720p"}) {
+		[]string{"auto Auto", "v0 High (1080p)", "v2 Medium (720p)"}) {
 		t.Errorf("HEVC client: %v", got)
 	}
 	if got := qualityNames(packagedQualities(body, ParseCaps("avc,aac"))); !reflect.DeepEqual(got,
-		[]string{"auto Auto", "v1 1080p", "v2 720p"}) {
+		[]string{"auto Auto", "v1 High (1080p)", "v2 Medium (720p)"}) {
 		t.Errorf("H.264 client: %v", got)
 	}
 	// Whatever the master's order: an H.264 1080p listed before the HEVC
@@ -161,7 +161,7 @@ func TestPlayInfoOneEntryPerSize(t *testing.T) {
 		"#EXT-X-STREAM-INF:BANDWIDTH=6000000,CODECS=\"hvc1.1.6.L120.90\",RESOLUTION=1920x1080\nv1/playlist.m3u8\n" +
 		"#EXT-X-STREAM-INF:BANDWIDTH=3000000,CODECS=\"avc1.64001f\",RESOLUTION=1280x720\nv2/playlist.m3u8\n"
 	if got := qualityNames(packagedQualities(h264First, ParseCaps("avc,hvc"))); !reflect.DeepEqual(got,
-		[]string{"auto Auto", "v1 1080p", "v2 720p"}) {
+		[]string{"auto Auto", "v1 High (1080p)", "v2 Medium (720p)"}) {
 		t.Errorf("H.264 listed first, HEVC client: %v", got)
 	}
 	// Listed tallest first whatever the master's order.
@@ -169,28 +169,47 @@ func TestPlayInfoOneEntryPerSize(t *testing.T) {
 		"#EXT-X-STREAM-INF:BANDWIDTH=3000000,CODECS=\"avc1.64001f\",RESOLUTION=1280x720\nv2/playlist.m3u8\n" +
 		"#EXT-X-STREAM-INF:BANDWIDTH=8000000,CODECS=\"avc1.640028\",RESOLUTION=1920x1080\nv1/playlist.m3u8\n"
 	if got := qualityNames(packagedQualities(reordered, ParseCaps("avc"))); !reflect.DeepEqual(got,
-		[]string{"auto Auto", "v1 1080p", "v2 720p"}) {
+		[]string{"auto Auto", "v1 High (1080p)", "v2 Medium (720p)"}) {
 		t.Errorf("reordered: %v", got)
 	}
 }
 
-// A rung is named for its picture size the way the ladder names rungs:
-// the smallest 16:9 box that holds it.
-func TestRungLabel(t *testing.T) {
+// Two rungs of a 2.39:1 film a few rows apart - the source's HEVC copy at
+// 1920x800, the transcoder's H.264 encode into the 1080p box at 1920x804 -
+// are one name, "High (1080p)": one entry, the client family's.
+func TestPlayInfoOneEntryPerName(t *testing.T) {
+	body := "#EXTM3U\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=6000000,CODECS=\"hvc1.1.6.L120.90\",RESOLUTION=1920x800\nv0/playlist.m3u8\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=5000000,CODECS=\"avc1.640028\",RESOLUTION=1920x804\nv1/playlist.m3u8\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=2000000,CODECS=\"avc1.64001f\",RESOLUTION=1280x536\nv2/playlist.m3u8\n"
+	if got := qualityNames(packagedQualities(body, ParseCaps("avc,hvc"))); !reflect.DeepEqual(got,
+		[]string{"auto Auto", "v0 High (1080p)", "v2 Medium (720p)"}) {
+		t.Errorf("HEVC client: %v", got)
+	}
+	if got := qualityNames(packagedQualities(body, ParseCaps("avc"))); !reflect.DeepEqual(got,
+		[]string{"auto Auto", "v1 High (1080p)", "v2 Medium (720p)"}) {
+		t.Errorf("H.264 client: %v", got)
+	}
+}
+
+// A packaged rung is named by its frame, by the fixed table, as the master
+// names its variant; one whose master gives it no size by its id.
+func TestRungName(t *testing.T) {
 	cases := []struct {
 		w, h int
 		want string
 	}{
-		{1920, 1080, "1080p"}, {1280, 720, "720p"}, {854, 480, "480p"}, {640, 360, "360p"},
-		{426, 240, "240p"}, {3840, 2160, "2160p"},
-		{3840, 1606, "2160p"}, {1920, 804, "1080p"}, {1280, 536, "720p"}, // 2.39:1 rungs
-		{1440, 1080, "1080p"}, {720, 576, "576p"}, {720, 480, "480p"}, // 4:3, SD
-		{4096, 2160, "2160p"}, {2048, 858, "1080p"}, // DCI
-		{2560, 1080, "1440p"}, {7680, 4320, "4320p"}, {8192, 4320, "4320p"}, {9000, 5000, "5000p"},
-		{0, 1080, "1080p"}, {0, 0, "v3"},
+		{1920, 1080, "High (1080p)"}, {1280, 720, "Medium (720p)"}, {854, 480, "Low (480p)"},
+		{640, 360, "Lowest (360p)"}, {426, 240, "Lowest (240p)"}, {3840, 2160, "Ultra (2160p)"},
+		{3840, 1606, "Ultra (2160p)"}, {1920, 804, "High (1080p)"}, {1280, 536, "Medium (720p)"}, // 2.39:1 rungs
+		{1440, 1080, "High (1080p)"}, {720, 576, "Low (576p)"}, {720, 480, "Low (480p)"}, // 4:3, SD
+		{4096, 2160, "Ultra (2160p)"}, {2048, 858, "High (1080p)"}, // DCI
+		{2560, 1080, "High (1440p)"}, {7680, 4320, "Ultra (4320p)"}, {8192, 4320, "Ultra (4320p)"},
+		{9000, 5000, "Ultra (5000p)"},
+		{0, 1080, "High (1080p)"}, {0, 0, "v3"}, {1920, 0, "v3"},
 	}
 	for _, tc := range cases {
-		if got := rungLabel(ladderRung{id: "v3", width: tc.w, height: tc.h}); got != tc.want {
+		if got := rungName(ladderRung{id: "v3", width: tc.w, height: tc.h}); got != tc.want {
 			t.Errorf("%dx%d: %s, want %s", tc.w, tc.h, got, tc.want)
 		}
 	}
