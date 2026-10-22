@@ -59,7 +59,8 @@ func TestQualityNameOfTheOriginal(t *testing.T) {
 // A frame is named by the height of the 16:9 frame it fills: a frame wider
 // than 16:9 by the height of the 16:9 frame as wide, so a scope or a 1.85:1
 // film is named as a 16:9 film of its width is. Up to 10% wider than a
-// standard frame (DCI) counts as that frame. No height, no name.
+// standard frame (DCI) counts as that frame, and so does up to 3% narrower
+// (cropped at the sides). No height, no name.
 func TestQualityNameOfFramesNot16By9(t *testing.T) {
 	cases := []struct {
 		w, h int
@@ -73,6 +74,12 @@ func TestQualityNameOfFramesNot16By9(t *testing.T) {
 		// DCI.
 		{4096, 2160, "Ultra (2160p)"}, {4096, 1716, "Ultra (2160p)"}, {2048, 1080, "High (1080p)"},
 		{2048, 858, "High (1080p)"},
+		// A few pixels cropped off the sides: the standard frame.
+		{1916, 800, "High (1080p)"}, {1904, 800, "High (1080p)"}, {1912, 1036, "High (1080p)"},
+		{1918, 1040, "High (1080p)"}, {3836, 1600, "Ultra (2160p)"}, {3816, 1600, "Ultra (2160p)"},
+		{1278, 534, "Medium (720p)"}, {1276, 716, "Medium (720p)"},
+		// More than 3% narrower: its own height, or the 16:9 frame as wide.
+		{1856, 800, "Medium (1044p)"}, {1856, 1036, "Medium (1036p)"},
 		// 4:3 and SD: the height.
 		{1440, 1080, "High (1080p)"}, {960, 720, "Medium (720p)"}, {720, 576, "Low (576p)"},
 		{720, 480, "Low (480p)"}, {640, 480, "Low (480p)"},
@@ -121,6 +128,9 @@ func TestOnTheFlyNames(t *testing.T) {
 		{"2:1 1080p", 1920, 960, 0, "High (1080p)", "Medium (720p)", "Low (480p)"},
 		// medium is the source's own 1280x536 frame, named as high is.
 		{"2.39:1 720p", 1280, 536, 0, "Medium (720p)", "Medium (720p)", "Low (480p)"},
+		// A few pixels cropped off the sides: high named as the standard frame.
+		{"2.39:1 1080p cropped", 1916, 800, 0, "High (1080p)", "Medium (720p)", "Low (480p)"},
+		{"1.85:1 1080p cropped", 1912, 1036, 0, "High (1080p)", "Medium (720p)", "Low (480p)"},
 		{"4:3 SD", 720, 576, 0, "Low (576p)", "Low (576p)", "Low (480p)"},
 		{"size not known: the live worker's heights", 0, 0, 0, "High (1080p)", "Medium (720p)", "Low (480p)"},
 		{"size not known, a 720p cap", 0, 0, 720, "Medium (720p)", "Medium (720p)", "Low (480p)"},

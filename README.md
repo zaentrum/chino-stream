@@ -247,7 +247,9 @@ the transcoder's `LADDER` names its rungs: its own, or for a frame wider
 than 16:9 the height of the 16:9 frame as wide — a 2.39:1 film's 1920x800 is
 `High (1080p)`, its 3840x1606 `Ultra (2160p)`, a 1.85:1 film's 1920x1038
 `High (1080p)`; up to 10% wider than a standard frame counts as that frame
-(DCI 4096x2160 is `Ultra (2160p)`).
+(DCI 4096x2160 is `Ultra (2160p)`), and so does up to 3% narrower, a
+standard frame cropped at the sides (1916x800 is `High (1080p)`, 3836x1600
+`Ultra (2160p)`).
 
 - **The stream copy** (`copy/`, and the `remux` copy's `video/`): `Original`.
 - **The on-the-fly ladder**, on ffmpeg and on the live worker alike: each
