@@ -82,7 +82,9 @@ func TestParseCapsHeight(t *testing.T) {
 
 // TestVideoCacheQuality guards the on-disk transcode cache namespace: an
 // uncapped request MUST keep the bare rung name so existing caches stay valid;
-// a capped request gets a distinct "{rung}-h{cap}" key.
+// a capped request gets a distinct "{rung}-h{cap}" key, and one capped below
+// the 1080p box, whose rungs are fitted into 16:9 boxes, "{rung}-box{cap}",
+// none of the files made before it was.
 func TestVideoCacheQuality(t *testing.T) {
 	cases := []struct {
 		quality   string
@@ -91,7 +93,9 @@ func TestVideoCacheQuality(t *testing.T) {
 	}{
 		{"high", 0, "high"}, // uncapped: unchanged namespace (backward compat)
 		{"high", 1080, "high-h1080"},
-		{"medium", 480, "medium-h480"},
+		{"medium", 2160, "medium-h2160"},
+		{"medium", 720, "medium-box720"},
+		{"medium", 480, "medium-box480"},
 		{"low", 0, "low"},
 	}
 	for _, tc := range cases {

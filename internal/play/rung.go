@@ -44,11 +44,19 @@ type rungGeometry struct {
 // companion (16:9 of the box height, made even: boxWidth) keeps us inside
 // Level 4.0's pixel budget. A rung's own height is tightened to the ceiling
 // the same way.
+//
+// Under a cap below that box (boxedCap) a scaled rung is fitted into the
+// 16:9 box of its own height, as high is into the cap's, so medium and low
+// never encode a larger frame than high: a 2.39:1 1920x800 source on a 720
+// cap is 1280x534 on high and medium (not 1728x720 on medium, wider than
+// high's box at nearly twice its bit rate) and 854x356 on low. A source no
+// wider than that box scales to the height as without a cap.
 func transcodeGeometry(ql Quality, srcW, srcH, maxHeight int) rungGeometry {
 	if rungH := scaleTargetHeight(ql.Scale); rungH > 0 {
 		if maxHeight > 0 && rungH > maxHeight {
 			rungH = maxHeight
 		}
+		boxW := boxWidth(rungH) // the 16:9 box of the rung's height
 		if srcH > 0 && rungH > srcH {
 			// No upscaling: a 360p source on the 720p rung stays 360p
 			// (made even — h264 requires even dimensions).
@@ -57,11 +65,16 @@ func transcodeGeometry(ql Quality, srcW, srcH, maxHeight int) rungGeometry {
 		g := rungGeometry{scaleH: rungH, h: rungH}
 		if srcW > 0 && srcH > 0 {
 			g.w = evenScaledWidth(srcW, srcH, rungH)
+			if boxedCap(maxHeight) && g.w > boxW {
+				// Wider than the box: fitted into it by width.
+				g = rungGeometry{fitW: boxW, fitH: (srcH*boxW/srcW + 1) &^ 1}
+				g.w, g.h = g.fitW, g.fitH
+			}
 		}
 		return g
 	}
-	capH := 1080
-	if maxHeight > 0 && maxHeight < capH {
+	capH := levelBoxHeight
+	if boxedCap(maxHeight) {
 		capH = maxHeight
 	}
 	capW := boxWidth(capH) // 16:9 companion of the box height
@@ -84,6 +97,17 @@ func transcodeGeometry(ql Quality, srcW, srcH, maxHeight int) rungGeometry {
 	}
 	g.w, g.h = g.fitW, g.fitH
 	return g
+}
+
+// levelBoxHeight is the height of the box every transcode fits into, the
+// 1920x1080 frame of Level 4.0.
+const levelBoxHeight = 1080
+
+// boxedCap reports whether a device's HW cap maxHeight is below the level's
+// box: high is then fitted into the cap's 16:9 box, and a scaled rung into
+// that of its own height (transcodeGeometry).
+func boxedCap(maxHeight int) bool {
+	return maxHeight > 0 && maxHeight < levelBoxHeight
 }
 
 // boxWidth is the width of the 16:9 box h high, made even as h264 and

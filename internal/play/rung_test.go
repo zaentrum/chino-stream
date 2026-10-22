@@ -38,6 +38,31 @@ func TestTranscodeGeometry(t *testing.T) {
 		{"medium never upscales", medium, 640, 360, 0, 640, 360, 360, 0, 0},
 		{"medium on an odd source height", medium, 853, 481, 0, 852, 480, 480, 0, 0},
 		{"low under a 360 HW cap", low, 1280, 720, 360, 640, 360, 360, 0, 0},
+		// Under a cap below 1080 a scaled rung is fitted into the 16:9 box of
+		// its height, as high into the cap's: never a larger frame than
+		// high's. A 2.39:1 film on a 720 cap is 1280x534 on high and medium,
+		// 854x356 on low, not 1728x720 and 1152x480.
+		{"high of a scope film under a 720 HW cap", high, 1920, 800, 720, 1280, 534, 0, 1280, 534},
+		{"medium of a scope film under a 720 HW cap", medium, 1920, 800, 720, 1280, 534, 0, 1280, 534},
+		{"low of a scope film under a 720 HW cap", low, 1920, 800, 720, 854, 356, 0, 854, 356},
+		{"medium of a 4K scope film under a 720 HW cap", medium, 3840, 1600, 720, 1280, 534, 0, 1280, 534},
+		{"medium of a 1728x720 original under a 720 HW cap", medium, 1728, 720, 720, 1280, 534, 0, 1280, 534},
+		{"high of a scope film under a 540 HW cap", high, 1920, 800, 540, 960, 400, 0, 960, 400},
+		{"medium of a scope film under a 540 HW cap", medium, 1920, 800, 540, 960, 400, 0, 960, 400},
+		{"low of a scope film under a 540 HW cap", low, 1920, 800, 540, 854, 356, 0, 854, 356},
+		{"medium of a scope film under a 900 HW cap", medium, 1920, 800, 900, 1280, 534, 0, 1280, 534},
+		// A source no wider than the box scales to the height as without a
+		// cap, and a shorter one stays its own frame.
+		{"medium of 1080p under a 720 HW cap", medium, 1920, 1080, 720, 1280, 720, 720, 0, 0},
+		{"low of 1080p under a 720 HW cap", low, 1920, 1080, 720, 854, 480, 480, 0, 0},
+		{"medium of 4:3 under a 720 HW cap", medium, 1440, 1080, 720, 960, 720, 720, 0, 0},
+		{"medium of a 1152x480 original under a 720 HW cap", medium, 1152, 480, 720, 1152, 480, 480, 0, 0},
+		{"medium of a scope film, size unknown, under a 720 HW cap", medium, 0, 0, 720, 0, 720, 720, 0, 0},
+		// Without a cap below 1080, as before: the scope film's medium keeps
+		// its width.
+		{"medium of a scope film", medium, 1920, 800, 0, 1728, 720, 720, 0, 0},
+		{"medium of a scope film under a 1080 HW cap", medium, 1920, 800, 1080, 1728, 720, 720, 0, 0},
+		{"low of a scope film", low, 1920, 800, 0, 1152, 480, 480, 0, 0},
 		{"medium, source size unknown", medium, 0, 0, 0, 0, 720, 720, 0, 0},
 		{"high, source size unknown", high, 0, 0, 0, 0, 0, 0, 0, 0},
 		{"high, source height unknown", high, 3840, 0, 0, 3840, 0, 0, 0, 0},
@@ -65,6 +90,8 @@ func TestVideoEncoderArgsScaleToTheGeometry(t *testing.T) {
 		{"medium", 640, 360, 0, "scale=-2:360,format=yuv420p", "scale_cuda=-2:360:format=nv12"},
 		{"low", 1280, 720, 360, "scale=-2:360,format=yuv420p", "scale_cuda=-2:360:format=nv12"},
 		{"high", 1920, 1080, 480, "scale=854:480,format=yuv420p", "scale_cuda=854:480:format=nv12"},
+		{"medium", 1920, 800, 720, "scale=1280:534,format=yuv420p", "scale_cuda=1280:534:format=nv12"},
+		{"medium", 1920, 800, 0, "scale=-2:720,format=yuv420p", "scale_cuda=-2:720:format=nv12"},
 	}
 	for _, tc := range cases {
 		ql := QualityLadder[tc.rung]
@@ -227,7 +254,9 @@ func TestAdvertisedResolutionIsWhatFFmpegEncodes(t *testing.T) {
 		{"wide.mkv", "high", 0},
 		{"wide.mkv", "medium", 0},
 		{"wide.mkv", "high", 720},
-		{"wide.mkv", "high", 480}, // its box made even: 854x360, not 853x360
+		{"wide.mkv", "high", 480},   // its box made even: 854x360, not 853x360
+		{"wide.mkv", "medium", 720}, // fitted into 1280x720 as high is: 1280x540
+		{"wide.mkv", "low", 720},    // into 854x480: 854x360
 	}
 	for _, tc := range cases {
 		size := sources[tc.src]

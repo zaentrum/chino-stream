@@ -1041,10 +1041,16 @@ func (h *HLSHandler) ensureVideoWindow(ctx context.Context, src *source, quality
 // Without a HW height cap it's just the rung name (unchanged on-disk
 // layout, so legacy caches stay valid). With a cap it appends "-h<cap>"
 // so capped (downscaled) output never aliases uncapped output for the
-// same item+rung.
+// same item+rung. A cap below the level's box (boxedCap) appends
+// "-box<cap>": its scaled rungs are fitted into 16:9 boxes, a frame the
+// "-h<cap>" files made before were not, and a window of those next to one
+// of these would play two frame sizes on one init.
 func videoCacheQuality(quality string, maxHeight int) string {
 	if maxHeight <= 0 {
 		return quality
+	}
+	if boxedCap(maxHeight) {
+		return quality + "-box" + strconv.Itoa(maxHeight)
 	}
 	return quality + "-h" + strconv.Itoa(maxHeight)
 }
