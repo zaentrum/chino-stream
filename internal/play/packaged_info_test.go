@@ -249,7 +249,7 @@ func TestRungName(t *testing.T) {
 		{4096, 2160, "Ultra (2160p)"}, {2048, 858, "High (1080p)"}, // DCI
 		{3836, 1600, "Ultra (2160p)"}, {1916, 800, "High (1080p)"}, {1912, 1036, "High (1080p)"}, // cropped at the sides
 		{2560, 1080, "High (1440p)"}, {7680, 4320, "Ultra (4320p)"}, {8192, 4320, "Ultra (4320p)"},
-		{9000, 5000, "Ultra (5000p)"},
+		{9000, 5000, "Ultra (5063p)"}, {1666, 900, "Medium (937p)"}, {1600, 900, "Medium (900p)"}, // wider than 16:9, no standard frame
 		{0, 1080, "High (1080p)"}, {0, 0, "v3"}, {1920, 0, "v3"},
 	}
 	for _, tc := range cases {

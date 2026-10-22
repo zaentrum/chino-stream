@@ -240,16 +240,20 @@ the product spec is `docs/chino/playback.md` in zaentrum/zaentrum):
 | below 480p | `Lowest (360p)` |
 | the original, played as it is | `Original` |
 
-A height between two steps takes the lower step's word with its own height
-(`Medium (900p)`), as do the heights past either end (`Ultra (4320p)`,
-`Lowest (240p)`). A frame's height is that of the 16:9 frame it fills, as
-the transcoder's `LADDER` names its rungs: its own, or for a frame wider
-than 16:9 the height of the 16:9 frame as wide — a 2.39:1 film's 1920x800 is
-`High (1080p)`, its 3840x1606 `Ultra (2160p)`, a 1.85:1 film's 1920x1038
-`High (1080p)`; up to 10% wider than a standard frame counts as that frame
-(DCI 4096x2160 is `Ultra (2160p)`), and so does up to 3% narrower, a
-standard frame cropped at the sides (1916x800 is `High (1080p)`, 3836x1600
-`Ultra (2160p)`).
+A frame's height for naming is its step: its own height, or the height its
+width stands for at 16:9, whichever is larger — the 16:9 frame it fills, as
+the transcoder's `LADDER` names its rungs. A scope film's 1920x818 is
+`High (1080p)`, like a 16:9 film's 1920x1080, its 3840x1606 `Ultra
+(2160p)`, a 1.85:1 film's 1920x1038 `High (1080p)`. A frame wider than 16:9
+that is a little wider or a little narrower than a standard 16:9 frame is
+that frame: up to 10% wider (DCI 4096x2160 is `Ultra (2160p)`, 2048x858
+`High (1080p)`), or up to 3% narrower, a standard frame cropped at the
+sides (1916x800 is `High (1080p)`, 3836x1600 `Ultra (2160p)`). A step
+between two heights of the table takes the lower one's word with its own
+number: 1600x900 is `Medium (900p)`, and 1666x900, wider than 16:9 and no
+standard frame, `Medium (937p)`, by the height its width stands for, not by
+its own. So do the steps past either end (`Ultra (4320p)`, `Lowest
+(240p)`).
 
 - **The stream copy** (`copy/`, and the `remux` copy's `video/`): `Original`.
 - **The on-the-fly ladder**, on ffmpeg and on the live worker alike: each

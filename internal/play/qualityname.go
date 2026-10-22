@@ -22,14 +22,17 @@ import (
 //	480p           Low (480p)
 //	below 480p     Lowest (360p)
 //
-// A height between two steps takes the lower step's word with its own height
-// ("Medium (900p)"), and so do the heights past either end of the table
-// ("Ultra (4320p)", "Lowest (240p)"). The original played as it is - the
-// stream copy, passthrough, and a package's rung its record says is the
-// original's own video stream copied into it (originalRungs) - is
-// "Original". A re-encode at the original's size is named by its height
-// like any other step. The apps show a name as it is given; the step-down
-// notices say it.
+// A frame's height for naming is its step (namedHeight): its own height, or
+// the height its width stands for at 16:9, whichever is larger - a scope
+// film's 1920x818 is 1080p, as a 16:9 film's 1920x1080 is. A step between
+// two heights of the table takes the lower one's word with its own number
+// (1600x900 is "Medium (900p)", 1666x900 "Medium (937p)"), and so do the
+// steps past either end of the table ("Ultra (4320p)", "Lowest (240p)").
+// The original played as it is - the stream copy, passthrough, and a
+// package's rung its record says is the original's own video stream copied
+// into it (originalRungs) - is "Original". A re-encode at the original's
+// size is named by its step like any other. The apps show a name as it is
+// given; the step-down notices say it.
 
 // qualitySteps are the table's steps, the tallest first: a height takes the
 // word of the first step it reaches.
@@ -73,18 +76,20 @@ func qualityName(w, h int, original bool) string {
 // rungs and the boxes players and sources come in.
 var sizeClasses = []int{240, 360, 480, 540, 576, 720, 1080, 1440, 2160, 4320}
 
-// namedHeight is the height a w×h frame is named by: that of the 16:9 frame
-// it fills, as the ladder names its rungs ("720p" is the 1280x720 box). It is
-// the frame's own height, unless the frame is wider than 16:9: then the
-// height of the 16:9 frame as wide, so a 2.39:1 film's 1920x800 is 1080p and
-// its 3840x1606 2160p, as a 16:9 film's of that width are, and a 1.85:1
-// film's 1920x1038 1080p. A frame up to 10% wider than that counts as the
-// 16:9 frame of a standard height (sizeClasses) it is no taller than - DCI
-// 4096x2160 is 2160p, 2048x858 and 1998x1080 1080p - and so does one up to
-// 3% narrower, a standard frame cropped at the sides (1916x800 and 1912x1036
-// are 1080p, 3836x1600 2160p, 1278x534 720p); else it counts as the 16:9
-// frame of its own height (1666x900 is 900p). A width of 0 (not known)
-// leaves the height; 0 without a height.
+// namedHeight is the height a w×h frame is named by, its step: its own
+// height, or the height its width stands for at 16:9, whichever is larger -
+// the 16:9 frame it fills, as the ladder names its rungs ("720p" is the
+// 1280x720 box). So a frame wider than 16:9 is named by the 16:9 frame as
+// wide: a 2.39:1 film's 1920x800 is 1080p and its 3840x1606 2160p, as a
+// 16:9 film's of that width are, and a 1.85:1 film's 1920x1038 1080p. A
+// frame wider than 16:9 a little wider or a little narrower than a standard
+// 16:9 frame (sizeClasses) is that frame: up to 10% wider than the 16:9
+// frame of a standard height it is no taller than - DCI 4096x2160 is 2160p,
+// 2048x858 and 1998x1080 1080p - or up to 3% narrower, a standard frame
+// cropped at the sides (1916x800 and 1912x1036 are 1080p, 3836x1600 2160p,
+// 1278x534 720p). Any other frame wider than 16:9 is named by the height its
+// width stands for at 16:9, not by its own: 1666x900 is 937p, 1856x1036
+// 1044p. A width of 0 (not known) leaves the height; 0 without a height.
 func namedHeight(w, h int) int {
 	if h <= 0 {
 		return 0
@@ -105,9 +110,6 @@ func namedHeight(w, h int) int {
 		if c > full && full*100 >= c*97 {
 			return c
 		}
-	}
-	if full*10 <= h*11 {
-		return h
 	}
 	return full
 }

@@ -58,11 +58,13 @@ func TestQualityNameOfTheOriginal(t *testing.T) {
 	}
 }
 
-// A frame is named by the height of the 16:9 frame it fills: a frame wider
-// than 16:9 by the height of the 16:9 frame as wide, so a scope or a 1.85:1
-// film is named as a 16:9 film of its width is. Up to 10% wider than a
-// standard frame (DCI) counts as that frame, and so does up to 3% narrower
-// (cropped at the sides). No height, no name.
+// A frame is named by its step, the height of the 16:9 frame it fills: a
+// frame wider than 16:9 by the height its width stands for at 16:9, so a
+// scope or a 1.85:1 film is named as a 16:9 film of its width is. Up to 10%
+// wider than a standard frame (DCI) counts as that frame, and so does up to
+// 3% narrower (cropped at the sides); any other frame wider than 16:9 is
+// named by the height its width stands for, never by its own. No height, no
+// name.
 func TestQualityNameOfFramesNot16By9(t *testing.T) {
 	cases := []struct {
 		w, h int
@@ -80,14 +82,18 @@ func TestQualityNameOfFramesNot16By9(t *testing.T) {
 		{1916, 800, "High (1080p)"}, {1904, 800, "High (1080p)"}, {1912, 1036, "High (1080p)"},
 		{1918, 1040, "High (1080p)"}, {3836, 1600, "Ultra (2160p)"}, {3816, 1600, "Ultra (2160p)"},
 		{1278, 534, "Medium (720p)"}, {1276, 716, "Medium (720p)"},
-		// More than 3% narrower: its own height, or the 16:9 frame as wide.
-		{1856, 800, "Medium (1044p)"}, {1856, 1036, "Medium (1036p)"},
+		// More than 3% narrower: the 16:9 frame as wide, however close to its
+		// own height.
+		{1856, 800, "Medium (1044p)"}, {1856, 1036, "Medium (1044p)"},
 		// 4:3 and SD: the height.
 		{1440, 1080, "High (1080p)"}, {960, 720, "Medium (720p)"}, {720, 576, "Low (576p)"},
 		{720, 480, "Low (480p)"}, {640, 480, "Low (480p)"},
-		// 21:9 and wider, between the steps.
-		{2560, 1080, "High (1440p)"}, {1600, 900, "Medium (900p)"}, {1666, 900, "Medium (900p)"},
-		{1728, 720, "Medium (972p)"}, {1152, 480, "Low (648p)"},
+		// Between the steps: a 16:9 frame by its height, a frame wider than
+		// 16:9 that is no standard frame by the height its width stands for
+		// at 16:9 (the spec's 1600x900 and 1666x900), also where that is
+		// within a few rows of its own.
+		{1600, 900, "Medium (900p)"}, {1666, 900, "Medium (937p)"}, {1700, 900, "Medium (956p)"},
+		{2560, 1080, "High (1440p)"}, {1728, 720, "Medium (972p)"}, {1152, 480, "Low (648p)"},
 		// Past 2160p.
 		{7680, 4320, "Ultra (4320p)"}, {8192, 4320, "Ultra (4320p)"},
 		// No height.
@@ -121,6 +127,9 @@ func TestOnTheFlyNames(t *testing.T) {
 		{"2160p on a 720p HW cap", 3840, 2160, 720, "Medium (720p)", "Medium (720p)", "Low (480p)"},
 		{"1440p", 2560, 1440, 0, "High (1080p)", "Medium (720p)", "Low (480p)"},
 		{"900p: high at the source's size", 1600, 900, 0, "Medium (900p)", "Medium (720p)", "Low (480p)"},
+		// Wider than 16:9 and no standard frame: high at the source's size,
+		// by the height its width stands for.
+		{"1666x900: high at the source's size", 1666, 900, 0, "Medium (937p)", "Medium (720p)", "Low (480p)"},
 		{"1.85:1 1080p", 1920, 1038, 0, "High (1080p)", "Medium (720p)", "Low (480p)"},
 		// medium and low scale to a height: wider than a 16:9 frame of it
 		// (1728x720, 1152x480), named by it.
@@ -202,6 +211,7 @@ func TestOnTheFlyQualities(t *testing.T) {
 		{1280, 720, 0, []string{"high Medium (720p)", "medium Medium (720p)", "low Low (480p)"}},
 		{3840, 2160, 720, []string{"high Medium (720p)", "medium Medium (720p)", "low Low (480p)"}},
 		{720, 576, 0, []string{"high Low (576p)", "medium Low (576p)", "low Low (480p)"}},
+		{1666, 900, 0, []string{"high Medium (937p)", "medium Medium (720p)", "low Low (480p)"}},
 		{640, 360, 0, []string{"high Lowest (360p)", "medium Lowest (360p)", "low Lowest (360p)"}},
 	}
 	for _, tc := range cases {
@@ -239,6 +249,23 @@ func TestNameVariants(t *testing.T) {
 	}
 	if got := nameVariants(want, nil); got != want {
 		t.Errorf("named twice:\n%s", got)
+	}
+}
+
+// A packaged rung between the steps is named as the spec names its frame,
+// in the master and /play/info alike: 1600x900 "Medium (900p)", 1666x900
+// "Medium (937p)".
+func TestPackagedRungsBetweenTheSteps(t *testing.T) {
+	body := "#EXTM3U\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=4000000,CODECS=\"avc1.640028\",RESOLUTION=1666x900\nv0/playlist.m3u8\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=3500000,CODECS=\"avc1.640028\",RESOLUTION=1600x900\nv1/playlist.m3u8\n"
+	want := map[string]string{"v0": "Medium (937p)", "v1": "Medium (900p)"}
+	if got := variantNames(t, nameVariants(body, nil)); !reflect.DeepEqual(got, want) {
+		t.Errorf("master: %v, want %v", got, want)
+	}
+	if got := qualityNames(packagedQualities(body, ParseCaps("avc"), nil)); !reflect.DeepEqual(got,
+		[]string{"auto Auto", "v0 Medium (937p)", "v1 Medium (900p)"}) {
+		t.Errorf("/play/info: %v", got)
 	}
 }
 
