@@ -105,12 +105,22 @@ func namedHeight(w, h int) int {
 // frame the rung encodes from p (transcodeGeometry), which ffmpeg and the
 // live worker both encode, and with p's size not known by the height the
 // live worker then encodes (rungHeight).
+//
+// A rung scaled to a height (medium, low: scale=-2:720 under the cap) is
+// named by that height, the lines it produces, whatever the source's shape:
+// a 2.39:1 film's 1728x720 medium is "Medium (720p)" as a 16:9 film's
+// 1280x720 is, not the 16:9 frame as wide (972p). One the source is shorter
+// than encodes the source's own frame, high's, and is named as that is
+// (a 1280x536 source's medium is "Medium (720p)", as its high is).
 func onTheFlyName(p *Probe, ql Quality, maxHeight int) string {
 	var w, h int
 	if p != nil {
 		w, h = p.Width, p.Height
 	}
 	g := transcodeGeometry(ql, w, h, maxHeight)
+	if t := rungHeight(ql, maxHeight); g.scaleH > 0 && g.h >= t {
+		return qualityName(0, t, false)
+	}
 	if g.h <= 0 {
 		g.w, g.h = 0, rungHeight(ql, maxHeight)
 	}

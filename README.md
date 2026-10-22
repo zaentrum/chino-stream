@@ -254,7 +254,11 @@ than 16:9 the height of the 16:9 frame as wide — a 2.39:1 film's 1920x800 is
   rung by the frame it encodes for that title and client (`caps`' height
   cap included). A re-encode at the original's size is named by its height
   like any other step: a 720p original's `high` is `Medium (720p)`, a 4K
-  one's (fitted into 1080p) `High (1080p)`. `/play/info` lists each name
+  one's (fitted into 1080p) `High (1080p)`. `medium` and `low` scale to a
+  height (720 and 480, under the cap) and are named by it, whatever the
+  original's shape: a 2.39:1 film's `medium` (1728x720) is `Medium (720p)`,
+  as a 16:9 film's is; where the original is shorter they encode its own
+  frame and are named as `high` is. `/play/info` lists each name
   once, the better encode's (a 720p original offers `high` and `low`); every
   `q` still plays what it did.
 - **A package's rungs** by their frames (the variant's `RESOLUTION`).

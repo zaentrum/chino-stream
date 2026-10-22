@@ -94,8 +94,9 @@ func TestQualityNameOfFramesNot16By9(t *testing.T) {
 // The on-the-fly ladder's rungs are named by the frame each encodes from the
 // source, on ffmpeg and the live worker alike: high at the source's size (no
 // "source" in its name - a 720p source's high is "Medium (720p)"), fitted
-// into the 1080p box past it, under a device's HW cap; medium and low at
-// their heights, never above the source's.
+// into the 1080p box past it, under a device's HW cap; medium and low by the
+// height they scale to (the lines they produce, a scope film's as a 16:9
+// one's), and where the source is shorter at its frame, named as high is.
 func TestOnTheFlyNames(t *testing.T) {
 	cases := []struct {
 		name           string
@@ -111,8 +112,15 @@ func TestOnTheFlyNames(t *testing.T) {
 		{"1440p", 2560, 1440, 0, "High (1080p)", "Medium (720p)", "Low (480p)"},
 		{"900p: high at the source's size", 1600, 900, 0, "Medium (900p)", "Medium (720p)", "Low (480p)"},
 		{"1.85:1 1080p", 1920, 1038, 0, "High (1080p)", "Medium (720p)", "Low (480p)"},
-		// medium and low scale to a height, wider than a 16:9 frame of it.
-		{"2.39:1 1080p", 1920, 800, 0, "High (1080p)", "Medium (972p)", "Low (648p)"},
+		// medium and low scale to a height: wider than a 16:9 frame of it
+		// (1728x720, 1152x480), named by it.
+		{"2.39:1 1080p", 1920, 800, 0, "High (1080p)", "Medium (720p)", "Low (480p)"},
+		{"2.39:1 1080p on a 1080p HW cap", 1920, 800, 1080, "High (1080p)", "Medium (720p)", "Low (480p)"},
+		{"2.39:1 1080p on a 720p HW cap", 1920, 800, 720, "Medium (720p)", "Medium (720p)", "Low (480p)"},
+		{"2.39:1 2160p", 3840, 1606, 0, "High (1080p)", "Medium (720p)", "Low (480p)"},
+		{"2:1 1080p", 1920, 960, 0, "High (1080p)", "Medium (720p)", "Low (480p)"},
+		// medium is the source's own 1280x536 frame, named as high is.
+		{"2.39:1 720p", 1280, 536, 0, "Medium (720p)", "Medium (720p)", "Low (480p)"},
 		{"4:3 SD", 720, 576, 0, "Low (576p)", "Low (576p)", "Low (480p)"},
 		{"size not known: the live worker's heights", 0, 0, 0, "High (1080p)", "Medium (720p)", "Low (480p)"},
 		{"size not known, a 720p cap", 0, 0, 720, "Medium (720p)", "Medium (720p)", "Low (480p)"},
@@ -124,12 +132,18 @@ func TestOnTheFlyNames(t *testing.T) {
 		if want := []string{tc.high, tc.med, tc.low}; !reflect.DeepEqual(got, want) {
 			t.Errorf("%s: %q, want %q", tc.name, got, want)
 		}
-		// The name is the frame the live worker is asked for.
+		// The name is of the frame the live worker is asked for: the one
+		// ffmpeg encodes, with the size not known the rung's height.
 		for _, q := range onTheFlyRungs {
-			v := liveVideoRung(&source{probe: p}, QualityLadder[q], tc.cap)
-			if name := qualityName(v.Width, v.Height, false); name != onTheFlyName(p, QualityLadder[q], tc.cap) {
-				t.Errorf("%s %s: the live worker encodes %dx%d (%s), named %s", tc.name, q, v.Width, v.Height, name,
-					onTheFlyName(p, QualityLadder[q], tc.cap))
+			ql := QualityLadder[q]
+			v := liveVideoRung(&source{probe: p}, ql, tc.cap)
+			g := transcodeGeometry(ql, tc.w, tc.h, tc.cap)
+			want := [2]int{g.w, g.h}
+			if g.h <= 0 {
+				want = [2]int{0, rungHeight(ql, tc.cap)}
+			}
+			if got := [2]int{v.Width, v.Height}; got != want {
+				t.Errorf("%s %s: the live worker encodes %dx%d, ffmpeg %dx%d", tc.name, q, got[0], got[1], want[0], want[1])
 			}
 		}
 	}
@@ -305,7 +319,9 @@ func TestOnTheFlyInfoAndMasterNameTheRungs(t *testing.T) {
 		{"4K on a 720p HW cap", probeJSON(mkv, "hevc", 3840, 2160, "aac", 2, 20_000_000), "avc:720,aac", "transcode",
 			[]string{"high Medium (720p)", "low Low (480p)"}, "Medium (720p)"},
 		{"a 2.39:1 transcode", probeJSON(mkv, "hevc", 1920, 800, "aac", 2, 6_000_000), "avc,aac", "transcode",
-			[]string{"high High (1080p)", "medium Medium (972p)", "low Low (648p)"}, "Medium (972p)"},
+			[]string{"high High (1080p)", "medium Medium (720p)", "low Low (480p)"}, "Medium (720p)"},
+		{"a 2.39:1 transcode on a 720p HW cap", probeJSON(mkv, "hevc", 1920, 800, "aac", 2, 6_000_000), "avc:720,aac", "transcode",
+			[]string{"high Medium (720p)", "low Low (480p)"}, "Medium (720p)"},
 		{"a 360p transcode", probeJSON(mkv, "hevc", 640, 360, "aac", 2, 900_000), "avc,aac", "transcode",
 			[]string{"high Lowest (360p)"}, "Lowest (360p)"},
 		{"a stream copy", probeJSON("mov,mp4,m4a,3gp,3g2,mj2", "h264", 1920, 1080, "aac", 2, 8_000_000), "avc,aac", "passthrough",
