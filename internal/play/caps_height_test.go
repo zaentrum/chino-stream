@@ -104,3 +104,37 @@ func TestVideoCacheQuality(t *testing.T) {
 		}
 	}
 }
+
+// A scaled rung fitted into the level's 1920 box by width with no cap below
+// it - medium of a source wider than 8:3, which scaled to 720 before - lives
+// under "-fit" after its namespace, none of the files made at the wider frame
+// before; every other rung keeps videoCacheQuality's, the 1920x800 film's
+// medium (1728x720) and a source of unknown size too.
+func TestVideoCacheNamespace(t *testing.T) {
+	cases := []struct {
+		w, h      int
+		quality   string
+		maxHeight int
+		want      string
+	}{
+		{3840, 1390, "medium", 0, "medium-fit"},
+		{3840, 1390, "medium", 1080, "medium-h1080-fit"},
+		{2400, 500, "low", 0, "low-fit"},
+		{3840, 1390, "medium", 720, "medium-box720"},
+		{3840, 1390, "high", 0, "high"},
+		{3840, 1390, "low", 0, "low"},
+		{1920, 800, "medium", 0, "medium"},
+		{1920, 800, "medium", 720, "medium-box720"},
+		{3840, 2160, "high", 1080, "high-h1080"},
+		{0, 0, "medium", 0, "medium"},
+	}
+	for _, tc := range cases {
+		src := &source{key: "i1", probe: &Probe{Width: tc.w, Height: tc.h}}
+		if got := videoCacheNamespace(src, tc.quality, QualityLadder[tc.quality], tc.maxHeight); got != tc.want {
+			t.Errorf("%dx%d %s cap %d: %q, want %q", tc.w, tc.h, tc.quality, tc.maxHeight, got, tc.want)
+		}
+	}
+	if got := videoCacheNamespace(&source{key: "i1"}, "medium", QualityLadder["medium"], 0); got != "medium" {
+		t.Errorf("no probe: %q", got)
+	}
+}

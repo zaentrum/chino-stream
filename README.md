@@ -271,7 +271,12 @@ its own. So do the steps past either end (`Ultra (4320p)`, `Lowest
   is fitted into it, as `high` is into the cap's: a 1920x800 film on a 720
   cap is 1280x534 on `high` and `medium`, `Medium (720p)`, and 854x356 on
   `low`, `Low (480p)`; an original no wider than 16:9 scales to the height
-  as without a cap.
+  as without a cap. Without such a cap no rung is wider than `high`'s 1920
+  box: the `medium` of an original wider than 8:3 (and `low` of one wider
+  than 4:1) is fitted to it by width as `high` is, so a 3840x1390 film's
+  `medium` is `high`'s 1920x696, `High (1080p)`, not 1990x720; its files
+  live under `{rung}-fit` (`medium-h1080-fit` on a 1080 cap), none of those
+  made at the wider frame before.
   `/play/info` lists every `q`, as before, each with its name: two rungs
   that encode one frame carry one name (a 720p original's `high` and
   `medium` are both `Medium (720p)`, a 1728x720 one's `Medium (972p)`). A

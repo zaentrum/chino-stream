@@ -118,7 +118,7 @@ func (h *HLSHandler) shadowVideo(src *source, quality string, ql Quality, maxHei
 	if !ok {
 		return
 	}
-	ns := videoCacheQuality(quality, maxHeight)
+	ns := videoCacheNamespace(src, quality, ql, maxHeight)
 	ffInit, ffSeg := h.cachePath(src.key, ns, "init"), h.cachePath(src.key, ns, strconv.Itoa(seg))
 	h.Live.shadowOnce("video", j.key(), func(ctx context.Context) string {
 		return h.Live.shadowCheck(ctx, j, src.key+"|"+ns, ffInit, ffSeg, sameFrames("vide", 1))

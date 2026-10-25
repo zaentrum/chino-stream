@@ -194,7 +194,7 @@ func (j liveJob) ready() bool { return statOK(j.initPath) && (j.segPath == "" ||
 // liveVideoJob is the init (seg < 0) or segment seg of the rung quality of src
 // for a device capped at maxHeight; ok false past the grid's end.
 func (h *HLSHandler) liveVideoJob(src *source, quality string, ql Quality, maxHeight, seg int, priority string) (liveJob, bool) {
-	ns := videoCacheQuality(quality, maxHeight) + liveSuffix
+	ns := videoCacheNamespace(src, quality, ql, maxHeight) + liveSuffix
 	j := liveJob{kind: api.KindInit, initPath: h.cachePath(src.key, ns, "init"), req: api.Request{
 		Source: liveVideoSource(src), Track: api.TrackVideo, Video: liveVideoRung(src, ql, maxHeight), Priority: priority,
 	}}
@@ -430,7 +430,7 @@ func (h *HLSHandler) serveLiveVideo(w http.ResponseWriter, r *http.Request, src 
 		what = "init segment"
 	}
 	if err := h.ensureLive(r.Context(), j); err != nil {
-		log.Printf("live %s %s/%s/%d: %v", what, src.key, videoCacheQuality(quality, maxHeight), seg, err)
+		log.Printf("live %s %s/%s/%d: %v", what, src.key, videoCacheNamespace(src, quality, ql, maxHeight), seg, err)
 		liveError(w, err, what)
 		return
 	}

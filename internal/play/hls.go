@@ -944,7 +944,7 @@ func (h *HLSHandler) InitSegment(w http.ResponseWriter, r *http.Request) {
 		windowError(w, err, "init segment")
 		return
 	}
-	h.serveCached(w, r, h.cachePath(src.key, videoCacheQuality(quality, maxHeight), "init"), "video/mp4")
+	h.serveCached(w, r, h.cachePath(src.key, videoCacheNamespace(src, quality, ql, maxHeight), "init"), "video/mp4")
 }
 
 // Segment serves one HLS media segment. On a cache miss, the entire
@@ -987,7 +987,7 @@ func (h *HLSHandler) Segment(w http.ResponseWriter, r *http.Request) {
 		windowError(w, err, "segment")
 		return
 	}
-	cachePath := h.cachePath(src.key, videoCacheQuality(quality, maxHeight), strconv.Itoa(seg))
+	cachePath := h.cachePath(src.key, videoCacheNamespace(src, quality, ql, maxHeight), strconv.Itoa(seg))
 	if _, err := os.Stat(cachePath); err != nil {
 		// Produced and gone again (the sweeper raced us): let the client
 		// ABR-fall to a lower rung rather than blocking the player.
@@ -1024,7 +1024,7 @@ func (h *HLSHandler) ensureVideoWindow(ctx context.Context, src *source, quality
 	// device and an uncapped one collide on the same {item}/{quality}
 	// segments. The player URL path stays "{quality}"; only the cache dir
 	// is namespaced (each handler re-derives the same cap from ?caps=).
-	capQuality := videoCacheQuality(quality, maxHeight)
+	capQuality := videoCacheNamespace(src, quality, ql, maxHeight)
 	initPath := h.cachePath(src.key, capQuality, "init")
 	requestedSegPath := h.cachePath(src.key, capQuality, strconv.Itoa(requestedSeg))
 	windowKey := fmt.Sprintf("%s/%s/%d", src.key, capQuality, windowIdx)
@@ -1055,6 +1055,24 @@ func videoCacheQuality(quality string, maxHeight int) string {
 	return quality + "-h" + strconv.Itoa(maxHeight)
 }
 
+// videoCacheNamespace is the cache-dir namespace of rung quality (ql) of src
+// for a device capped at maxHeight: videoCacheQuality, with "-fit" after it
+// for a scaled rung fitted into the level's box by width with no cap below
+// it (transcodeGeometry: the medium of a 3840x1390 source, 1920x696). Such a
+// rung's files made before scaled to the height, wider than that box
+// (1990x720), and a window of those next to one of these would play two
+// frame sizes on one init. Every other rung keeps videoCacheQuality.
+func videoCacheNamespace(src *source, quality string, ql Quality, maxHeight int) string {
+	ns := videoCacheQuality(quality, maxHeight)
+	if scaleTargetHeight(ql.Scale) <= 0 || boxedCap(maxHeight) || src == nil || src.probe == nil {
+		return ns
+	}
+	if transcodeGeometry(ql, src.probe.Width, src.probe.Height, maxHeight).fitW > 0 {
+		return ns + "-fit"
+	}
+	return ns
+}
+
 // transcodeVideoWindow runs ffmpeg once for windowIdx and installs the
 // produced segments into the cache, returning the tail of ffmpeg's
 // stderr. Split out from ensureVideoWindow so the partial-install retry
@@ -1062,7 +1080,7 @@ func videoCacheQuality(quality string, maxHeight int) string {
 func (h *HLSHandler) transcodeVideoWindow(ctx context.Context, src *source, quality string, ql Quality, windowIdx, maxHeight int, installed func()) (string, error) {
 	probe := src.probe
 	isHDR := probe != nil && probe.IsHDR()
-	capQuality := videoCacheQuality(quality, maxHeight)
+	capQuality := videoCacheNamespace(src, quality, ql, maxHeight)
 	initPath := h.cachePath(src.key, capQuality, "init")
 	windowStartSec := windowIdx * windowSize * segmentSec
 	windowDurSec := windowSize * segmentSec

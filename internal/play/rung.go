@@ -50,13 +50,21 @@ type rungGeometry struct {
 // never encode a larger frame than high: a 2.39:1 1920x800 source on a 720
 // cap is 1280x534 on high and medium (not 1728x720 on medium, wider than
 // high's box at nearly twice its bit rate) and 854x356 on low. A source no
-// wider than that box scales to the height as without a cap.
+// wider than that box scales to the height as without a cap. Without such a
+// cap a scaled rung is never wider than high's box, the level's 1920: one
+// wider is fitted to it by width as high is (medium of a source wider than
+// 8:3, low of one wider than 4:1: a 3840x1390 source's medium is high's
+// 1920x696, not 1990x720); a scope film's 1728x720 medium is narrower and
+// stays.
 func transcodeGeometry(ql Quality, srcW, srcH, maxHeight int) rungGeometry {
 	if rungH := scaleTargetHeight(ql.Scale); rungH > 0 {
 		if maxHeight > 0 && rungH > maxHeight {
 			rungH = maxHeight
 		}
-		boxW := boxWidth(rungH) // the 16:9 box of the rung's height
+		boxW := boxWidth(levelBoxHeight) // high's box, the level's
+		if boxedCap(maxHeight) {
+			boxW = boxWidth(rungH) // the 16:9 box of the rung's height
+		}
 		if srcH > 0 && rungH > srcH {
 			// No upscaling: a 360p source on the 720p rung stays 360p
 			// (made even — h264 requires even dimensions).
@@ -65,7 +73,7 @@ func transcodeGeometry(ql Quality, srcW, srcH, maxHeight int) rungGeometry {
 		g := rungGeometry{scaleH: rungH, h: rungH}
 		if srcW > 0 && srcH > 0 {
 			g.w = evenScaledWidth(srcW, srcH, rungH)
-			if boxedCap(maxHeight) && g.w > boxW {
+			if g.w > boxW {
 				// Wider than the box: fitted into it by width.
 				g = rungGeometry{fitW: boxW, fitH: (srcH*boxW/srcW + 1) &^ 1}
 				g.w, g.h = g.fitW, g.fitH

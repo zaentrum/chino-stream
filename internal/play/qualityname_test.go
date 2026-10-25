@@ -142,6 +142,13 @@ func TestOnTheFlyNames(t *testing.T) {
 		{"2.39:1 1080p on a 1080p HW cap", 1920, 800, 1080, "High (1080p)", "Medium (972p)", "Low (648p)"},
 		{"2.39:1 2160p", 3840, 1606, 0, "High (1080p)", "Medium (969p)", "Low (646p)"},
 		{"2:1 1080p", 1920, 960, 0, "High (1080p)", "Medium (810p)", "Low (540p)"},
+		// Wider than 8:3 and wider than 1920 at 720: medium is fitted to
+		// high's 1920 box by width, high's 1920x696 frame and name, never a
+		// larger picture below it; low (1326x480, 1324x480) is narrower.
+		{"2.76:1 2160p", 3840, 1390, 0, "High (1080p)", "High (1080p)", "Medium (720p)"},
+		{"2.76:1 2160p on a 1080p HW cap", 3840, 1390, 1080, "High (1080p)", "High (1080p)", "Medium (720p)"},
+		{"2.76:1 1440p", 2560, 928, 0, "High (1080p)", "High (1080p)", "Medium (720p)"},
+		{"2.76:1 2160p on a 720p HW cap", 3840, 1390, 720, "Medium (720p)", "Medium (720p)", "Low (480p)"},
 		// An original at a scaled rung's frame: the rungs that encode it are
 		// one name.
 		{"1728x720", 1728, 720, 0, "Medium (972p)", "Medium (972p)", "Low (648p)"},

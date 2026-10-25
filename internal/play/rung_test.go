@@ -63,6 +63,19 @@ func TestTranscodeGeometry(t *testing.T) {
 		{"medium of a scope film", medium, 1920, 800, 0, 1728, 720, 720, 0, 0},
 		{"medium of a scope film under a 1080 HW cap", medium, 1920, 800, 1080, 1728, 720, 720, 0, 0},
 		{"low of a scope film", low, 1920, 800, 0, 1152, 480, 480, 0, 0},
+		// Without a cap below 1080 a scaled rung is never wider than high's
+		// box, the level's 1920: medium of a source wider than 8:3 (1990x720
+		// at its height) is fitted to it by width, high's 1920x696 frame.
+		{"high of a 2.76:1 UHD film", high, 3840, 1390, 0, 1920, 696, 0, 1920, 696},
+		{"medium of a 2.76:1 UHD film", medium, 3840, 1390, 0, 1920, 696, 0, 1920, 696},
+		{"medium of a 2.76:1 UHD film under a 1080 HW cap", medium, 3840, 1390, 1080, 1920, 696, 0, 1920, 696},
+		{"medium of a 2.76:1 UHD film under a 2160 HW cap", medium, 3840, 1390, 2160, 1920, 696, 0, 1920, 696},
+		{"low of a 2.76:1 UHD film: narrower than the box", low, 3840, 1390, 0, 1326, 480, 480, 0, 0},
+		{"medium of a 2560x928 film", medium, 2560, 928, 0, 1920, 696, 0, 1920, 696},
+		{"medium of a 4096x1484 film", medium, 4096, 1484, 0, 1920, 696, 0, 1920, 696},
+		{"low of a 4.8:1 film", low, 2400, 500, 0, 1920, 400, 0, 1920, 400},
+		{"medium of a wide film shorter than 720", medium, 2560, 600, 0, 1920, 450, 0, 1920, 450},
+		{"medium of a 2.76:1 UHD film under a 720 HW cap", medium, 3840, 1390, 720, 1280, 464, 0, 1280, 464},
 		{"medium, source size unknown", medium, 0, 0, 0, 0, 720, 720, 0, 0},
 		{"high, source size unknown", high, 0, 0, 0, 0, 0, 0, 0, 0},
 		{"high, source height unknown", high, 3840, 0, 0, 3840, 0, 0, 0, 0},
@@ -92,6 +105,7 @@ func TestVideoEncoderArgsScaleToTheGeometry(t *testing.T) {
 		{"high", 1920, 1080, 480, "scale=854:480,format=yuv420p", "scale_cuda=854:480:format=nv12"},
 		{"medium", 1920, 800, 720, "scale=1280:534,format=yuv420p", "scale_cuda=1280:534:format=nv12"},
 		{"medium", 1920, 800, 0, "scale=-2:720,format=yuv420p", "scale_cuda=-2:720:format=nv12"},
+		{"medium", 3840, 1390, 0, "scale=1920:696,format=yuv420p", "scale_cuda=1920:696:format=nv12"},
 	}
 	for _, tc := range cases {
 		ql := QualityLadder[tc.rung]
@@ -238,7 +252,7 @@ func TestAdvertisedResolutionIsWhatFFmpegEncodes(t *testing.T) {
 		t.Skip("this ffmpeg has no libx264")
 	}
 	root := t.TempDir()
-	sources := map[string][2]int{"small.mkv": {640, 360}, "wide.mkv": {2560, 1080}}
+	sources := map[string][2]int{"small.mkv": {640, 360}, "wide.mkv": {2560, 1080}, "ultrawide.mkv": {2400, 800}}
 	for name, size := range sources {
 		run(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi",
 			"-i", "testsrc2=size="+strconv.Itoa(size[0])+"x"+strconv.Itoa(size[1])+":rate=24:duration=2",
@@ -257,6 +271,10 @@ func TestAdvertisedResolutionIsWhatFFmpegEncodes(t *testing.T) {
 		{"wide.mkv", "high", 480},   // its box made even: 854x360, not 853x360
 		{"wide.mkv", "medium", 720}, // fitted into 1280x720 as high is: 1280x540
 		{"wide.mkv", "low", 720},    // into 854x480: 854x360
+		// 3:1, 2160x720 at medium's height: fitted to high's 1920 box,
+		// 1920x640, without a cap and on one of 1080.
+		{"ultrawide.mkv", "medium", 0},
+		{"ultrawide.mkv", "medium", 1080},
 	}
 	for _, tc := range cases {
 		size := sources[tc.src]
@@ -264,10 +282,11 @@ func TestAdvertisedResolutionIsWhatFFmpegEncodes(t *testing.T) {
 		h := &HLSHandler{FFmpegBin: ffmpeg, FFprobeBin: ffprobe, CacheDir: t.TempDir(), TranscodePreset: "ultrafast"}
 		ql := QualityLadder[tc.rung]
 		probe := &Probe{Width: size[0], Height: size[1], DurationMs: 2000}
-		if err := h.ensureVideoWindow(context.Background(), &source{key: "i1", file: src, probe: probe}, tc.rung, ql, 0, 0, tc.cap); err != nil {
+		s := &source{key: "i1", file: src, probe: probe}
+		if err := h.ensureVideoWindow(context.Background(), s, tc.rung, ql, 0, 0, tc.cap); err != nil {
 			t.Fatalf("%s %s: %v", tc.src, tc.rung, err)
 		}
-		q := videoCacheQuality(tc.rung, tc.cap)
+		q := videoCacheNamespace(s, tc.rung, ql, tc.cap)
 		var media []byte
 		for _, leaf := range []string{"init", "0"} {
 			b, err := os.ReadFile(h.cachePath("i1", q, leaf))
