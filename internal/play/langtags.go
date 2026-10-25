@@ -15,17 +15,18 @@ import (
 // Taiwan)" (docs/chino, subtitles.md). A title that names a script or a
 // region of the track's language that its tag does not names the track so,
 // and /play/info tags it so ("pt-BR"; a master's LANGUAGE stays the file's
-// code): a code of the language ("PT-BR", "pt_BR", "zh-Hans", "ES-419"), a
-// region's code in brackets after the language's name ("Português (BR)",
-// "Español (419)"), the region's or the script's name in brackets
-// ("Portuguese (Brazil)", "Chinese (Simplified)"; not the script the
-// language is written in anyway, "Spanish (Latin)", nor one named as a
-// language is, "English (Korean)"), a name of the regional
-// form ("Brazilian Portuguese", "Español latino"), a Chinese title's script
-// ("简体中文"). A title that
-// names another script or region than the tag's says something, and stays
-// ("Portuguese (Portugal) · PT-BR"); one that names the tag's own again
-// says nothing more ("PT-BR" on a pt-BR track).
+// code): a code of the language ("PT-BR", "pt_BR", "zh-Hans", "ES-419"),
+// alone or in brackets ("Commentary (PT-BR)"), one of its regions' codes in
+// brackets ("Português (BR)", "Español (419)", "SDH (US)"), the region's or
+// the script's name in brackets ("Portuguese (Brazil)", "Chinese
+// (Simplified)", "Mandarin (Simplified)"; not the script the language is
+// written in anyway, "Spanish (Latin)", nor one named as a language is,
+// "English (Korean)"), a name of the regional form ("Brazilian Portuguese",
+// "Español latino"), a Chinese title's script ("简体中文"). A bracket that
+// says no more than that goes wherever it stands, as in chino-web's
+// readParts. A title that names another script or region than the tag's
+// says something, and stays ("Portuguese (Portugal) · PT-BR"); one that
+// names the tag's own again says nothing more ("PT-BR" on a pt-BR track).
 
 // langTag is a language code read as BCP 47 (RFC 5646) reads it: its
 // language subtag, lower-cased, its script, title-cased, and its region,
@@ -284,7 +285,7 @@ func (r *titleReader) takes(script, region string) bool {
 }
 
 // names reports whether a piece of a title - all of it, what follows the
-// language's name at its start, a bracket after that (bracketed) - says
+// language's name at its start, a bracket in it (bracketed) - says
 // nothing but the track's language, and takes the script and the region
 // it names (takes): a code that names no language ("und"), or of the
 // track's language ("pt", "PT-BR", "zh-Hans"); in brackets a region's code
@@ -392,15 +393,37 @@ func (r *titleReader) afterHead(words string) (string, bool) {
 	return "", false
 }
 
-// afterBrackets is words without the brackets at their start that say
-// nothing but the language (names): "· Converted" of "(Simplified) ·
-// Converted" on a Chinese track, "" of "(BR)" on a Portuguese one.
-func (r *titleReader) afterBrackets(words string) string {
-	for {
-		inner, after, ok := leadingBracket(words)
-		if !ok || !r.names(inner, true) {
-			return words
+var (
+	// titleBrackets are the brackets in a title, the innermost: round,
+	// square, and the full-width round ones of a Chinese or Japanese title.
+	titleBrackets = regexp.MustCompile(`\([^()]*\)|\[[^\[\]]*\]|（[^（）]*）`)
+	// doubledSeparators are what a bracket taken from between two
+	// separators leaves ("Commentary - - Director").
+	doubledSeparators = regexp.MustCompile(`( [-–—:·,|/]+)(?: [-–—:·,|/]+)+ `)
+)
+
+// withoutBrackets is words without the brackets in them, wherever they
+// stand, that say nothing but the language (names, bracketed), as
+// chino-web's readParts reads every bracket of a title: "Commentary" of
+// "Commentary (PT-BR)" and "" of "[PT-BR]" on a Portuguese track, taking
+// "BR", "Converted" of "(Simplified) · Converted" and "Mandarin" of
+// "Mandarin (Simplified)" on a Chinese one, taking "Hans"; false where it
+// takes none.
+func (r *titleReader) withoutBrackets(words string) (string, bool) {
+	took := false
+	rest := titleBrackets.ReplaceAllStringFunc(words, func(b string) string {
+		_, open := utf8.DecodeRuneInString(b)
+		_, closing := utf8.DecodeLastRuneInString(b)
+		if !r.names(b[open:len(b)-closing], true) {
+			return b
 		}
-		words = strings.TrimSpace(strings.TrimLeft(after, separators))
+		took = true
+		return " "
+	})
+	if !took {
+		return words, false
 	}
+	rest = strings.Join(strings.Fields(emptyBrackets.ReplaceAllString(rest, "")), " ")
+	rest = doubledSeparators.ReplaceAllString(rest, "$1 ")
+	return strings.Trim(rest, separators), true
 }

@@ -117,9 +117,9 @@ const separators = " \t-–—:·,|/"
 // Songs"; none for no title, a format, a number, the track's language by its
 // name, its own name for it ("Deutsch") or a code of it, a code that names
 // no language - and the script and the region of its language it names that
-// the track's tag does not ("PT-BR", "Português (BR)", "Chinese
-// (Simplified)" on a "por" or a "chi" track: langtags.go), a format's
-// title too ("PT-BR AC3 5.1").
+// the track's tag does not ("PT-BR", "Português (BR)", "Commentary (PT-BR)",
+// "Chinese (Simplified)" on a "por" or a "chi" track: langtags.go), a
+// format's title too ("PT-BR AC3 5.1").
 func readTitle(title, language string) titleSays {
 	raw := strings.TrimSpace(title)
 	if raw == "" {
@@ -147,12 +147,21 @@ func readTitle(title, language string) titleSays {
 		return r.says("")
 	}
 	if r.one {
-		if rest, ok := r.afterHead(words); ok {
-			// The language's name, then brackets that say its script or
-			// region ("Português (BR)", "Chinese (Simplified) · Converted"),
-			// then what says the language again ("German · Deutsch") or
-			// more: "English (SDH)" is "SDH".
-			words = r.afterBrackets(rest)
+		// The language's name or a code of it at the start ("Português
+		// (BR)", "PT-BR (Forced)") and the brackets anywhere that say its
+		// script or region ("Chinese (Simplified) · Converted", "Commentary
+		// (PT-BR)", "[PT-BR]") go, then what says the language again
+		// ("German · Deutsch"); a bracket left alone is its words: "English
+		// (SDH)" is "SDH".
+		rest, read := r.afterHead(words)
+		if !read {
+			rest = words
+		}
+		if without, took := r.withoutBrackets(rest); took {
+			rest, read = without, true
+		}
+		if read {
+			words = rest
 			if r.names(words, false) {
 				words = ""
 			}

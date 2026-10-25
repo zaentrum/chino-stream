@@ -121,8 +121,28 @@ func TestATitlesScriptOrRegionStaysInTheName(t *testing.T) {
 		{"por", "PT-BR Commentary", "Portuguese (Brazil) · Commentary", "pt-BR"},
 		{"zh-Hans", "Chinese (Simplified) · Converted", "Chinese (Simplified) · Converted", "zh-Hans"},
 		{"zh-Hans", "AI", "Chinese (Simplified) · AI", "zh-Hans"},
+		// A bracket anywhere that says the script or the region goes,
+		// taking it, and the rest stays, as chino-web's readParts reads a
+		// title; one that says something else stays.
+		{"por", "[PT-BR]", "Portuguese (Brazil)", "pt-BR"},
+		{"por", "(BR)", "Portuguese (Brazil)", "pt-BR"},
+		{"por", "(Brazil)", "Portuguese (Brazil)", "pt-BR"},
+		{"por", "Forced (PT-BR)", "Portuguese (Brazil) · Forced", "pt-BR"},
+		{"por", "Commentary (PT-BR)", "Portuguese (Brazil) · Commentary", "pt-BR"},
+		{"por", "Commentary - (PT-BR) - Director", "Portuguese (Brazil) · Commentary - Director", "pt-BR"},
+		{"por", "[BR] Português", "Portuguese (Brazil)", "pt-BR"},
+		{"eng", "SDH (US)", "English (United States) · SDH", "en-US"},
+		{"chi", "Mandarin (Simplified)", "Chinese (Simplified) · Mandarin", "zh-Hans"},
+		{"fre", "VF (Canada)", "French (Canada) · VF", "fr-CA"},
+		{"chi", "Chinese (Converted) (Simplified)", "Chinese (Simplified) · Converted", "zh-Hans"},
+		{"eng", "English (BD) (US)", "English (United States) · BD", "en-US"},
+		{"eng", "Commentary (English)", "English · Commentary", "eng"},
+		{"eng", "Commentary (BD)", "English · Commentary (BD)", "eng"},
+		{"eng", "(BD)", "English · (BD)", "eng"},
+		{"eng", "[Japanese]", "English · [Japanese]", "eng"},
 		// A title that names the source's format: its words go, the script
 		// and the region it names stay.
+		{"por", "Commentary (PT-BR) AC3", "Portuguese (Brazil)", "pt-BR"},
 		{"por", "Português (Brasil) - Dolby Digital 5.1", "Portuguese (Brazil)", "pt-BR"},
 		{"por", "Português (Portugal) - Dolby Digital 5.1", "Portuguese (Portugal)", "pt-PT"},
 		{"por", "PT-BR AC3 5.1", "Portuguese (Brazil)", "pt-BR"},
