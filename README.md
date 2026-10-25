@@ -292,6 +292,10 @@ its own. So do the steps past either end (`Ultra (4320p)`, `Lowest
   step's name. The released phone, TV and Tizen apps do not merge yet: they
   show one row per entry, so such a name shows twice (three times for a
   360p original) until they do; deploy this naming after apps that merge.
+  An original that plays as it is offers no choice at `high` (`mode`
+  `passthrough` or `remux`); a client that steps down from it asks
+  `/play/info` with the lower `q`, and there `high` is `Original`, the
+  stream copy `q=high` serves, not the rung's re-encode (`High (1080p)`).
   Every `q` plays its rung, at the frame given above. Of an original whose
   size ffprobe does not give, each rung is named by its height when
   `LIVE_WORKER_MODE` is `on` (`high` `High (1080p)` or the cap's, `medium`

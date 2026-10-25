@@ -167,10 +167,17 @@ var onTheFlyRungs = []string{"high", "medium", "low"}
 // client is to merge them, one row per name, the first's (the better
 // encode), and step down to the next entry with another name; the released
 // apps do not yet and show such a name twice (README, "Quality names").
-func onTheFlyQualities(p *Probe, maxHeight int, live bool) []map[string]string {
+// highOriginal: q=high plays the original as it is, the stream copy a
+// client stepped down from (playsOriginal), and is "Original", as its master
+// names it.
+func onTheFlyQualities(p *Probe, maxHeight int, live, highOriginal bool) []map[string]string {
 	out := make([]map[string]string, 0, len(onTheFlyRungs))
 	for _, q := range onTheFlyRungs {
-		out = append(out, map[string]string{"name": q, "label": onTheFlyName(p, QualityLadder[q], maxHeight, live)})
+		label := onTheFlyName(p, QualityLadder[q], maxHeight, live)
+		if q == "high" && highOriginal {
+			label = qualityName(0, 0, true)
+		}
+		out = append(out, map[string]string{"name": q, "label": label})
 	}
 	return out
 }

@@ -687,7 +687,7 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		h.writeSourceInfo(w, title, src.probe, mode, reason, audio, infoCaps.MaxVideoHeight())
+		h.writeSourceInfo(w, title, src.probe, mode, reason, audio, infoCaps.MaxVideoHeight(), false)
 	}
 	path, err := h.Catalog.PrimaryAssetPath(r.Context(), itemID, bearerFrom(r))
 	if err != nil {
@@ -731,8 +731,13 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 	// (planOnTheFly): reading it warms the original's stream copy index,
 	// so the master and the first segment find it made.
 	src := &source{key: itemID, file: clean, probe: &probe}
-	plan := planner.planOnTheFly(r.Context(), src, infoCaps, r.URL.Query().Get("q"))
-	h.writeSourceInfo(w, filepath.Base(clean), &probe, plan.mode, plan.reason, nil, infoCaps.MaxVideoHeight())
+	q := r.URL.Query().Get("q")
+	plan := planner.planOnTheFly(r.Context(), src, infoCaps, q)
+	// Asked for a lower rung, the client has the ladder listed: q=high is
+	// "Original" where it plays the original as it is, as its master names
+	// it - the stream copy a client steps down from and back up to.
+	highOriginal := q != "" && q != "high" && planner.playsOriginal(src, planner.planOnTheFly(r.Context(), src, infoCaps, "high"))
+	h.writeSourceInfo(w, filepath.Base(clean), &probe, plan.mode, plan.reason, nil, infoCaps.MaxVideoHeight(), highOriginal)
 }
 
 // writeSourceInfo answers /play/info for an on-the-fly source: its file
@@ -743,7 +748,9 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 // The ladder is named for the live worker when LIVE_WORKER_MODE is on, as
 // the master sends a new session there (a worker not ready sends it to
 // ffmpeg, which names the rungs alike but for a source of unknown size).
-func (h *Handler) writeSourceInfo(w http.ResponseWriter, filename string, probe *Probe, mode, reason string, audio []map[string]any, maxHeight int) {
+// highOriginal names q=high "Original": it plays the original as it is
+// (playsOriginal), whatever rung was asked for.
+func (h *Handler) writeSourceInfo(w http.ResponseWriter, filename string, probe *Probe, mode, reason string, audio []map[string]any, maxHeight int, highOriginal bool) {
 	// Surface the available quality rungs so the client can render a
 	// picker, each named by the frame it encodes for this source and
 	// client (onTheFlyQualities), as its master names its variant.
@@ -757,7 +764,7 @@ func (h *Handler) writeSourceInfo(w http.ResponseWriter, filename string, probe 
 		if h.HLS != nil {
 			lw = h.HLS.Live
 		}
-		ladder = onTheFlyQualities(probe, maxHeight, lw.On())
+		ladder = onTheFlyQualities(probe, maxHeight, lw.On(), highOriginal)
 	}
 	// Encoder hint for the Playback info dialog. Meaningful for the
 	// transcode and remux paths (both run the video encoder on HLS);

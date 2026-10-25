@@ -564,6 +564,22 @@ func (h *HLSHandler) liveSession(ctx context.Context, src *source, useCopy bool)
 	return useCopy, false
 }
 
+// playsOriginal reports whether a session of src that plan plays (a plan of
+// q=high, planOnTheFly) plays the original as it is, its variant named
+// "Original": the stream copy of a remux plan (serveCopyMaster) always, the
+// muxed one of passthrough unless the live worker takes the session and
+// cannot copy the file (liveSession) - taken as so whenever the worker is
+// on, as /play/info names the ladder for it then.
+func (h *HLSHandler) playsOriginal(src *source, plan onTheFlyPlan) bool {
+	switch plan.mode {
+	case "remux":
+		return true
+	case "passthrough":
+		return !h.Live.On() || copyRemuxable(src)
+	}
+	return false
+}
+
 // warmLive warms the start of a live session off the request path: the
 // rung's init and its first segments from t, at prefetch priority, and the
 // audio it starts on — an original's track alike, a package's stereo

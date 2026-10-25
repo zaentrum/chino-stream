@@ -275,11 +275,20 @@ func TestOnTheFlyQualities(t *testing.T) {
 	}
 	for _, tc := range cases {
 		var got []string
-		for _, e := range onTheFlyQualities(&Probe{Width: tc.w, Height: tc.h}, tc.cap, false) {
+		for _, e := range onTheFlyQualities(&Probe{Width: tc.w, Height: tc.h}, tc.cap, false, false) {
 			got = append(got, e["name"]+" "+e["label"])
 		}
 		if !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("%dx%d cap %d: %q, want %q", tc.w, tc.h, tc.cap, got, tc.want)
+		}
+		// Where high plays the original as it is, high is "Original" and
+		// the rest as ever.
+		got = got[:0]
+		for _, e := range onTheFlyQualities(&Probe{Width: tc.w, Height: tc.h}, tc.cap, false, true) {
+			got = append(got, e["name"]+" "+e["label"])
+		}
+		if want := append([]string{"high Original"}, tc.want[1:]...); !reflect.DeepEqual(got, want) {
+			t.Errorf("%dx%d cap %d, high the original: %q, want %q", tc.w, tc.h, tc.cap, got, want)
 		}
 	}
 }
@@ -601,45 +610,58 @@ func onTheFlyHandlers(t *testing.T, file, probe string) (*HLSHandler, *Handler) 
 // each encodes for this source and client - every q, two that encode one
 // frame under one name - and the master a client asks with an entry's name
 // names its variant that entry's label. A stream copy (passthrough) offers no
-// choice, as before, and its variant is "Original".
+// choice, as before, and its variant is "Original"; stepped down from it, a
+// client asks /play/info with the lower q, and gets the ladder with q=high
+// "Original", the stream copy its master serves.
 func TestOnTheFlyInfoAndMasterNameTheRungs(t *testing.T) {
 	captureLog(t)
-	const mkv = "matroska,webm"
+	const mkv, mp4 = "matroska,webm", "mov,mp4,m4a,3gp,3g2,mj2"
 	cases := []struct {
 		name, probe, caps string
+		q                 string // what /play/info is asked with
 		mode              string
 		qualities         []string
 		medium            string // the NAME of q=medium's variant
 	}{
-		{"a 1080p transcode", probeJSON(mkv, "hevc", 1920, 1080, "aac", 2, 8_000_000), "avc,aac", "transcode",
+		{"a 1080p transcode", probeJSON(mkv, "hevc", 1920, 1080, "aac", 2, 8_000_000), "avc,aac", "", "transcode",
 			[]string{"high High (1080p)", "medium Medium (720p)", "low Low (480p)"}, "Medium (720p)"},
-		{"a 720p transcode: high at its size", probeJSON(mkv, "hevc", 1280, 720, "aac", 2, 4_000_000), "avc,aac", "transcode",
+		{"a 720p transcode: high at its size", probeJSON(mkv, "hevc", 1280, 720, "aac", 2, 4_000_000), "avc,aac", "", "transcode",
 			[]string{"high Medium (720p)", "medium Medium (720p)", "low Low (480p)"}, "Medium (720p)"},
-		{"4K on a 720p HW cap", probeJSON(mkv, "hevc", 3840, 2160, "aac", 2, 20_000_000), "avc:720,aac", "transcode",
+		{"4K on a 720p HW cap", probeJSON(mkv, "hevc", 3840, 2160, "aac", 2, 20_000_000), "avc:720,aac", "", "transcode",
 			[]string{"high Medium (720p)", "medium Medium (720p)", "low Low (480p)"}, "Medium (720p)"},
 		// medium 1728x720 and low 1152x480, by their steps as a package's
 		// rungs of those frames are.
-		{"a 2.39:1 transcode", probeJSON(mkv, "hevc", 1920, 800, "aac", 2, 6_000_000), "avc,aac", "transcode",
+		{"a 2.39:1 transcode", probeJSON(mkv, "hevc", 1920, 800, "aac", 2, 6_000_000), "avc,aac", "", "transcode",
 			[]string{"high High (1080p)", "medium Medium (972p)", "low Low (648p)"}, "Medium (972p)"},
-		{"a 2.39:1 transcode on a 720p HW cap", probeJSON(mkv, "hevc", 1920, 800, "aac", 2, 6_000_000), "avc:720,aac", "transcode",
+		{"a 2.39:1 transcode on a 720p HW cap", probeJSON(mkv, "hevc", 1920, 800, "aac", 2, 6_000_000), "avc:720,aac", "", "transcode",
 			[]string{"high Medium (720p)", "medium Medium (720p)", "low Low (480p)"}, "Medium (720p)"},
 		// ffmpeg encodes high at that size and medium and low in its shape:
 		// no frame known, no name.
-		{"a transcode of a size not known: no names", probeJSON(mkv, "mpeg2video", 0, 0, "aac", 2, 0), "avc,aac", "transcode",
+		{"a transcode of a size not known: no names", probeJSON(mkv, "mpeg2video", 0, 0, "aac", 2, 0), "avc,aac", "", "transcode",
 			[]string{"high ", "medium ", "low "}, ""},
-		{"a 360p transcode", probeJSON(mkv, "hevc", 640, 360, "aac", 2, 900_000), "avc,aac", "transcode",
+		{"a 360p transcode", probeJSON(mkv, "hevc", 640, 360, "aac", 2, 900_000), "avc,aac", "", "transcode",
 			[]string{"high Lowest (360p)", "medium Lowest (360p)", "low Lowest (360p)"}, "Lowest (360p)"},
-		{"a stream copy", probeJSON("mov,mp4,m4a,3gp,3g2,mj2", "h264", 1920, 1080, "aac", 2, 8_000_000), "avc,aac", "passthrough",
+		{"a stream copy", probeJSON(mp4, "h264", 1920, 1080, "aac", 2, 8_000_000), "avc,aac", "", "passthrough",
 			nil, "Medium (720p)"},
+		// Stepped down from the stream copy: high plays it again, "Original"
+		// as the master names it, not "High (1080p)".
+		{"a stream copy stepped down to medium", probeJSON(mp4, "h264", 1920, 1080, "aac", 2, 8_000_000), "avc,aac", "medium", "transcode",
+			[]string{"high Original", "medium Medium (720p)", "low Low (480p)"}, "Medium (720p)"},
+		{"a stream copy stepped down to low", probeJSON(mp4, "h264", 1280, 720, "aac", 2, 4_000_000), "avc,aac", "low", "transcode",
+			[]string{"high Original", "medium Medium (720p)", "low Low (480p)"}, "Medium (720p)"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			file := "film.mkv"
-			if tc.mode == "passthrough" {
+			if strings.Contains(tc.probe, mp4) {
 				file = "film.mp4"
 			}
 			h, ph := onTheFlyHandlers(t, file, tc.probe)
-			w := getPlay(ph, "/api/play/i1/info?caps="+tc.caps)
+			query := "?caps=" + tc.caps
+			if tc.q != "" {
+				query += "&q=" + tc.q
+			}
+			w := getPlay(ph, "/api/play/i1/info"+query)
 			var info struct {
 				Mode      string              `json:"mode"`
 				Qualities []map[string]string `json:"qualities"`
@@ -657,7 +679,11 @@ func TestOnTheFlyInfoAndMasterNameTheRungs(t *testing.T) {
 			}
 			for _, e := range info.Qualities {
 				m := get(h, "/api/play/i1/master.m3u8?caps="+tc.caps+"&q="+e["name"])
-				if names := variantNames(t, m.Body.String()); names[e["name"]] != e["label"] || len(names) != 1 {
+				variant := e["name"]
+				if e["label"] == originalQuality {
+					variant = "copy" // the stream copy, not the rung
+				}
+				if names := variantNames(t, m.Body.String()); names[variant] != e["label"] || len(names) != 1 {
 					t.Errorf("q=%s: the master names %v, /play/info %q:\n%s", e["name"], names, e["label"], m.Body)
 				}
 			}
@@ -672,6 +698,32 @@ func TestOnTheFlyInfoAndMasterNameTheRungs(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// q=high plays the original as it is where its plan is the stream copy: a
+// remux plan's always, passthrough's unless the live worker takes the
+// session and cannot copy the file; never an encode.
+func TestPlaysOriginal(t *testing.T) {
+	src := &source{key: "i1", file: filepath.Join(t.TempDir(), "film.mp4"), probe: &Probe{Container: "mov,mp4,m4a,3gp,3g2,mj2"}}
+	off := &HLSHandler{}
+	on := &HLSHandler{Live: &LiveWorker{mode: LiveWorkerOn}}
+	for _, tc := range []struct {
+		h    *HLSHandler
+		mode string
+		want bool
+	}{
+		{off, "remux", true},
+		{on, "remux", true},
+		{off, "passthrough", true},
+		// The live worker encodes an MP4 it cannot read (no file here).
+		{on, "passthrough", false},
+		{off, "transcode", false},
+		{on, "transcode", false},
+	} {
+		if got := tc.h.playsOriginal(src, onTheFlyPlan{mode: tc.mode}); got != tc.want {
+			t.Errorf("%s, live %v: %v, want %v", tc.mode, tc.h.Live.On(), got, tc.want)
+		}
 	}
 }
 
