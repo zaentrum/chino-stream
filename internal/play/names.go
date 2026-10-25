@@ -88,7 +88,9 @@ func subtitleDisplayName(language, title string, forced bool) string {
 var (
 	// formatWords mark a title that describes the source's audio format -
 	// a codec, a bitrate, a sample rate or depth ("AC3 5.1 @ 640 Kbps",
-	// "DTS-HD MA 5.1"). It says nothing of the track.
+	// "DTS-HD MA 5.1"). Its words say nothing of the track but the script
+	// and the region of its language that it names besides ("Português
+	// (Brasil) - Dolby Digital 5.1").
 	formatWords = regexp.MustCompile(`(?i)(^|[^a-z0-9])(dts(-hd)?|truehd|atmos|dolby|e?-?ac-?3|ddp?\+?|aac|flac|l?pcm|opus|mp3|vorbis|lossless|master audio|\d+ ?k?hz|\d* ?[km]bps|kb/s|\d+[- ]?bit)($|[^a-z0-9])`)
 	// layoutWords are a channel layout, which goes from a title that says
 	// more ("Commentary 5.1" is "Commentary"): the rendition is stereo.
@@ -116,11 +118,23 @@ const separators = " \t-–—:·,|/"
 // name, its own name for it ("Deutsch") or a code of it, a code that names
 // no language - and the script and the region of its language it names that
 // the track's tag does not ("PT-BR", "Português (BR)", "Chinese
-// (Simplified)" on a "por" or a "chi" track: langtags.go).
+// (Simplified)" on a "por" or a "chi" track: langtags.go), a format's
+// title too ("PT-BR AC3 5.1").
 func readTitle(title, language string) titleSays {
 	raw := strings.TrimSpace(title)
-	if raw == "" || formatWords.MatchString(raw) {
+	if raw == "" {
 		return titleSays{}
+	}
+	if formatWords.MatchString(raw) {
+		// The format's words go, and what the title says besides with
+		// them; the script and the region the rest names stay.
+		words := raw
+		for formatWords.MatchString(words) {
+			words = formatWords.ReplaceAllString(words, "${1} ${4}")
+		}
+		said := readTitle(words, language)
+		said.words = ""
+		return said
 	}
 	words := raw
 	for layoutWords.MatchString(words) {

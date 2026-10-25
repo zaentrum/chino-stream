@@ -112,6 +112,16 @@ func TestATitlesScriptOrRegionStaysInTheName(t *testing.T) {
 		{"por", "PT-BR Commentary", "Portuguese (Brazil) · Commentary", "pt-BR"},
 		{"zh-Hans", "Chinese (Simplified) · Converted", "Chinese (Simplified) · Converted", "zh-Hans"},
 		{"zh-Hans", "AI", "Chinese (Simplified) · AI", "zh-Hans"},
+		// A title that names the source's format: its words go, the script
+		// and the region it names stay.
+		{"por", "Português (Brasil) - Dolby Digital 5.1", "Portuguese (Brazil)", "pt-BR"},
+		{"por", "Português (Portugal) - Dolby Digital 5.1", "Portuguese (Portugal)", "pt-PT"},
+		{"por", "PT-BR AC3 5.1", "Portuguese (Brazil)", "pt-BR"},
+		{"spa", "Español Latino AC3 5.1", "Spanish (Latin America)", "es-419"},
+		{"spa", "Spanish (Latin America) DD 5.1", "Spanish (Latin America)", "es-419"},
+		{"chi", "简体中文 AAC", "Chinese (Simplified)", "zh-Hans"},
+		{"por", "Commentary AC3", "Portuguese", "por"},
+		{"eng", "DTS-HD MA 5.1", "English", "eng"},
 		// The tag's own script or region again says nothing more.
 		{"pt-BR", "PT-BR", "Portuguese (Brazil)", "pt-BR"},
 		{"pt-br", "Português", "Portuguese (Brazil)", "pt-br"},
@@ -162,6 +172,14 @@ func TestTwoRegionsOfALanguageAreTwoNames(t *testing.T) {
 		{Index: 3, Language: "spa"},
 	})
 	if want := []string{"Portuguese (Brazil)", "Portuguese (Portugal)", "Spanish (Latin America)", "Spanish"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("NAMEs %q, want %q", got, want)
+	}
+	// Titled with the source's format besides.
+	got = audioRenditionNames([]TrackInfo{
+		{Index: 0, Language: "por", Title: "Português (Brasil) - Dolby Digital 5.1"},
+		{Index: 1, Language: "por", Title: "Português (Portugal) - Dolby Digital 5.1"},
+	})
+	if want := []string{"Portuguese (Brazil)", "Portuguese (Portugal)"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("NAMEs %q, want %q", got, want)
 	}
 }
