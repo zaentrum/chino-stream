@@ -18,7 +18,9 @@ import (
 // code): a code of the language ("PT-BR", "pt_BR", "zh-Hans", "ES-419"), a
 // region's code in brackets after the language's name ("Português (BR)",
 // "Español (419)"), the region's or the script's name in brackets
-// ("Portuguese (Brazil)", "Chinese (Simplified)"), a name of the regional
+// ("Portuguese (Brazil)", "Chinese (Simplified)"; not the script the
+// language is written in anyway, "Spanish (Latin)", nor one named as a
+// language is, "English (Korean)"), a name of the regional
 // form ("Brazilian Portuguese", "Español latino"), a Chinese title's script
 // ("简体中文"). A title that
 // names another script or region than the tag's says something, and stays
@@ -317,7 +319,7 @@ func (r *titleReader) names(piece string, bracketed bool) bool {
 		return true
 	}
 	f := folded(t)
-	if script, region, ok := qualifierSays(f, bracketed); ok {
+	if script, region, ok := qualifierSays(f, bracketed, r.tag); ok {
 		return r.takes(script, region)
 	}
 	if script := chineseScripts[f]; script != "" && languageNames[r.tag.lang] == "Chinese" {
@@ -329,11 +331,14 @@ func (r *titleReader) names(piece string, bracketed bool) bool {
 	return false
 }
 
-// qualifierSays reads words (folded) as a language's name says a script
-// and a region in brackets after it: a region's name ("brazil", "latin
-// america", "uk"), a script's and a region's ("traditional, taiwan"), and in
-// brackets a script's alone ("simplified"; "Korean" alone is a language).
-func qualifierSays(words string, bracketed bool) (script, region string, ok bool) {
+// qualifierSays reads words (folded) as the name of tag's language says a
+// script and a region in brackets after it: a region's name ("brazil",
+// "latin america", "uk"), a script's and a region's ("traditional,
+// taiwan"), and in brackets a script's alone ("simplified"; "Korean" alone
+// is a language) - not, unless tag names it, a script that CLDR names as it
+// names a language ("korean", "greek": languageNamedScripts), nor the one
+// the language is written in anyway ("latin" after Spanish: usualScripts).
+func qualifierSays(words string, bracketed bool, tag langTag) (script, region string, ok bool) {
 	if s, g, two := strings.Cut(words, ","); two {
 		script, region = scriptsByName[strings.TrimSpace(s)], regionsByName[strings.TrimSpace(g)]
 		return script, region, script != "" && region != ""
@@ -341,7 +346,8 @@ func qualifierSays(words string, bracketed bool) (script, region string, ok bool
 	if region = regionsByName[words]; region != "" {
 		return "", region, true
 	}
-	if script = scriptsByName[words]; bracketed && script != "" {
+	if script = scriptsByName[words]; bracketed && script != "" &&
+		(script == tag.script || !languageNamedScripts[script] && script != usualScripts[iso6391(tag.lang)]) {
 		return script, "", true
 	}
 	return "", "", false

@@ -536,7 +536,10 @@ starts on and what it may pick:
   brackets after its name where it is one of the language's regions
   ("Português (BR)", "Español (419)"; "Svenska (SV)" is "Swedish"), the
   region's or the script's name ("Portuguese (Brazil)", "Português
-  (Brasil)", "Chinese (Simplified)"), the regional form's ("Brazilian
+  (Brasil)", "Chinese (Simplified)"; a script's only where the language is
+  not written in it anyway and CLDR does not name a language so: "Spanish
+  (Latin)" is "Spanish · Latin", "English (Korean)" "English · Korean",
+  "Hindi (Latin)" `hi-Latn`), the regional form's ("Brazilian
   Portuguese", "Español latino", "Flemish"), a Chinese title's script
   ("简体中文", "CHS") — and the track's `language` says them too where its
   code does not (`pt-BR` for a `por` track titled "PT-BR"; the master's

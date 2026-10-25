@@ -89,6 +89,28 @@ var scriptNames = map[string]string{
 	"Telu": "Telugu", "Thaa": "Thaana", "Thai": "Thai", "Tibt": "Tibetan",
 }
 
+// usualScripts are, by a language's ISO 639-1 code, the script it is
+// written in unless a tag names another: the IANA language subtag
+// registry's Suppress-Script, which a tag is not to name (RFC 5646, 3.1.9:
+// "es", not "es-Latn"). A title that names it in brackets names no script:
+// "Spanish (Latin)" means Latin American Spanish, and stays a word, as
+// chino-web reads it.
+var usualScripts = map[string]string{
+	"ar": "Arab", "cs": "Latn", "da": "Latn", "de": "Latn", "el": "Grek", "en": "Latn", "es": "Latn",
+	"fi": "Latn", "fr": "Latn", "gsw": "Latn", "he": "Hebr", "hi": "Deva", "hu": "Latn", "it": "Latn",
+	"ja": "Jpan", "ko": "Kore", "nl": "Latn", "no": "Latn", "pl": "Latn", "pt": "Latn", "ro": "Latn",
+	"ru": "Cyrl", "sv": "Latn", "th": "Thai", "tr": "Latn", "uk": "Cyrl", "vi": "Latn",
+}
+
+// languageNamedScripts are the scripts CLDR names as it names a language
+// ("Korean", "Greek", "Tamil"). Such a name in a title's brackets is the
+// language, not a script: "English (Korean)" is no en-Kore.
+var languageNamedScripts = map[string]bool{
+	"Arab": true, "Armn": true, "Beng": true, "Geor": true, "Grek": true, "Gujr": true, "Hebr": true,
+	"Jpan": true, "Khmr": true, "Knda": true, "Kore": true, "Laoo": true, "Mlym": true, "Mong": true,
+	"Orya": true, "Sinh": true, "Taml": true, "Telu": true, "Thai": true, "Tibt": true,
+}
+
 // languageRegions are, by a language's ISO 639-1 code, the regions it is
 // that region's own language in: where it is the language the region speaks
 // most (CLDR's likely subtags: "BR" and "PT" for "pt"), and where CLDR names

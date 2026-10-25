@@ -89,6 +89,15 @@ func TestATitlesScriptOrRegionStaysInTheName(t *testing.T) {
 		{"spa", "Español (España)", "Spanish (Spain)", "es-ES"},
 		{"ger", "Deutsch (Österreich)", "German (Austria)", "de-AT"},
 		{"spa", "Latinoamerica", "Spanish (Latin America)", "es-419"},
+		// The script the language is written in anyway, or one CLDR names
+		// as a language, is a word, as chino-web reads it; another script
+		// is the script.
+		{"spa", "Spanish (Latin)", "Spanish · Latin", "spa"},
+		{"spa", "Español (Latin)", "Spanish · Latin", "spa"},
+		{"eng", "English (Latin)", "English · Latin", "eng"},
+		{"eng", "English (Korean)", "English · Korean", "eng"},
+		{"hin", "Hindi (Latin)", "Hindi (Latin)", "hi-Latn"},
+		{"jpn", "Japanese (Latin)", "Japanese (Latin)", "ja-Latn"},
 		// A name of the regional form, or its adjective.
 		{"por", "Brazilian Portuguese", "Portuguese (Brazil)", "pt-BR"},
 		{"por", "European Portuguese", "Portuguese (Portugal)", "pt-PT"},
@@ -128,6 +137,8 @@ func TestATitlesScriptOrRegionStaysInTheName(t *testing.T) {
 		{"zh-Hans", "Chinese (Simplified) · 中文", "Chinese (Simplified)", "zh-Hans"},
 		{"en-GB", "English", "English (United Kingdom)", "en-GB"},
 		{"es-419", "Español (Latinoamérica)", "Spanish (Latin America)", "es-419"},
+		{"es-Latn", "Spanish (Latin)", "Spanish (Latin)", "es-Latn"},
+		{"en-Kore", "English (Korean)", "English (Korean)", "en-Kore"},
 		// A code of the language alone is the language.
 		{"por", "pt", "Portuguese", "por"},
 		{"eng", "eng", "English", "eng"},
