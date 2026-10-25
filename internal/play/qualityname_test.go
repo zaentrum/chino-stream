@@ -106,6 +106,30 @@ func TestQualityNameOfFramesNot16By9(t *testing.T) {
 	}
 }
 
+// The product spec's own examples (docs/chino, playback.md, "Quality names"),
+// word for word, so the spec and the server say the same of every frame it
+// names. A change here is a change of the spec.
+func TestQualityNamesOfTheSpec(t *testing.T) {
+	cases := []struct {
+		w, h int
+		want string
+	}{
+		{1920, 818, "High (1080p)"}, {1920, 1080, "High (1080p)"},
+		{1916, 800, "High (1080p)"}, {2048, 858, "High (1080p)"},
+		{1024, 576, "Low (576p)"}, {2560, 1072, "High (1440p)"},
+		{1600, 900, "Medium (900p)"}, {1666, 900, "Medium (937p)"},
+		{1728, 720, "Medium (972p)"},
+	}
+	for _, tc := range cases {
+		if got := qualityName(tc.w, tc.h, false); got != tc.want {
+			t.Errorf("%dx%d: %q, the spec says %q", tc.w, tc.h, got, tc.want)
+		}
+	}
+	if got := qualityName(1920, 818, true); got != "Original" {
+		t.Errorf("the original played as it is: %q, the spec says \"Original\"", got)
+	}
+}
+
 // The on-the-fly ladder's rungs are named by the frame each encodes from the
 // source, on ffmpeg and the live worker alike (they encode one frame), by its
 // step as any frame is, a package's rung of it too: high at the source's size
