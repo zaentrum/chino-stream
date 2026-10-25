@@ -139,6 +139,47 @@ func TestTranscodeBandwidthScalesWithTheFrame(t *testing.T) {
 	}
 }
 
+// A lower rung that encodes a better rung's frame is held to that rung's
+// rate - in the master's BANDWIDTH and on the live worker alike - and one
+// that encodes a frame of its own keeps its own.
+func TestALowerRungAtABetterRungsFrameIsNoDearer(t *testing.T) {
+	cases := []struct {
+		name             string
+		srcW, srcH, cap  int
+		high, medium, lo int // video bit/s
+	}{
+		// High and medium both 1920x696: 4,188,888, not 4,350,000 on medium.
+		{"a source wider than 8:3, medium fitted to 1920", 3840, 1390, 0, 4_188_888, 4_188_888, 2_173_770},
+		// High and medium both 1280x720: high's 2,888,888, not 3,000,000.
+		{"a 720p original", 1280, 720, 0, 2_888_888, 2_888_888, 1_400_000},
+		// High and medium both 1280x534 under the cap.
+		{"a scope film under a 720 cap", 1920, 800, 720, 2_142_592, 2_142_592, 1_038_333},
+		// Every rung 854x480: high's rate for all three.
+		{"a 480p original", 854, 480, 0, 1_284_953, 1_284_953, 1_284_953},
+		// Frames of their own: each rung its own rate.
+		{"a 1080p original", 1920, 1080, 0, 6_500_000, 3_000_000, 1_400_000},
+		{"a scope film", 1920, 800, 0, 4_814_814, 4_050_000, 1_888_524},
+		{"a size not known", 0, 0, 0, 6_500_000, 3_000_000, 1_400_000},
+	}
+	for _, tc := range cases {
+		want := map[string]int{"high": tc.high, "medium": tc.medium, "low": tc.lo}
+		p := &Probe{VideoCodec: "hevc", Width: tc.srcW, Height: tc.srcH}
+		for _, q := range onTheFlyRungs {
+			ql := QualityLadder[q]
+			if got := rungVideoBitrate(ql, tc.srcW, tc.srcH, tc.cap); got != want[q] {
+				t.Errorf("%s, %s: %d, want %d", tc.name, q, got, want[q])
+			}
+			inf := fallbackStreamInf(p, ql, tc.cap, false, false, "aud")
+			if bw := "BANDWIDTH=" + strconv.Itoa(want[q]+windowAudioBitrateBps) + ","; !strings.Contains(inf, bw) {
+				t.Errorf("%s, %s: %s, want %s", tc.name, q, inf, bw)
+			}
+			if v := liveVideoRung(&source{probe: p}, ql, tc.cap); v.BitrateKbps != want[q]/1000 {
+				t.Errorf("%s, %s: the live worker's %d kbit/s, want %d", tc.name, q, v.BitrateKbps, want[q]/1000)
+			}
+		}
+	}
+}
+
 func TestFallbackStreamInf(t *testing.T) {
 	sdr720 := &Probe{VideoCodec: "h264", Width: 1280, Height: 720, BitRate: 2_500_000, AudioCodec: "aac", AudioProfile: "LC"}
 	hdr4K := &Probe{VideoCodec: "hevc", Width: 3840, Height: 2160, ColorTransfer: "smpte2084", AudioCodec: "aac"}
@@ -204,9 +245,11 @@ func TestMasterAdvertisesWhatTheVariantIs(t *testing.T) {
 		{"stream copy at the source's size and bitrate",
 			probeJSON(mp4, "h264", 1280, 720, "aac", 2, 2_500_000), "",
 			[]string{"BANDWIDTH=2500000,RESOLUTION=1280x720,", `,NAME="Original"` + "\ncopy/index.m3u8\n"}},
+		// At high's frame, at high's rate: 722,222 and the audio, not
+		// medium's own 750,000.
 		{"the medium rung does not upscale a 360p source",
 			probeJSON("matroska,webm", "hevc", 640, 360, "aac", 2, 900_000), "?q=medium",
-			[]string{"BANDWIDTH=910000,RESOLUTION=640x360,", `,NAME="Lowest (360p)"` + "\nmedium/index.m3u8?q=medium\n"}},
+			[]string{"BANDWIDTH=882222,RESOLUTION=640x360,", `,NAME="Lowest (360p)"` + "\nmedium/index.m3u8?q=medium\n"}},
 		{"a device's 720p HW cap",
 			probeJSON("matroska,webm", "hevc", 1920, 1080, "aac", 2, 8_000_000), "?caps=avc:720,aac",
 			[]string{"BANDWIDTH=3048888,RESOLUTION=1280x720,", `,NAME="Medium (720p)"` + "\nhigh/index.m3u8?caps=avc:720,aac\n"}},

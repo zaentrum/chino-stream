@@ -145,7 +145,7 @@ func liveVideoSource(src *source) api.Source {
 
 // liveVideoRung is the rung ql of src for a device capped at maxHeight: the
 // frame the master's RESOLUTION names (transcodeGeometry) and its BANDWIDTH
-// less the audio (transcodeBandwidth), SDR. A source of unknown size gets the
+// less the audio (rungVideoBitrate), SDR. A source of unknown size gets the
 // rung's height and the worker's aspect-kept width.
 func liveVideoRung(src *source, ql Quality, maxHeight int) *api.Video {
 	var w, h int
@@ -157,7 +157,7 @@ func liveVideoRung(src *source, ql Quality, maxHeight int) *api.Video {
 	if v.Height <= 0 {
 		v.Width, v.Height = 0, rungHeight(ql, maxHeight)
 	}
-	v.BitrateKbps = max(1, transcodeBandwidth(ql.Name, g.w, g.h, false)/1000)
+	v.BitrateKbps = max(1, rungVideoBitrate(ql, w, h, maxHeight)/1000)
 	return v
 }
 

@@ -141,9 +141,11 @@ var nominalRungs = map[string]struct{ bps, w, h int }{
 }
 
 // transcodeBandwidth is the BANDWIDTH of a transcode variant that encodes
-// w×h on rung: the rung's nominal video bitrate scaled by frame area (the
-// nominal bitrate when the size is unknown), plus the audio rendition the
-// variant plays with, if any.
+// w×h on rung by the rung's own rate: its nominal video bitrate scaled by
+// frame area (the nominal bitrate when the size is unknown), plus the audio
+// rendition the variant plays with, if any. A variant of a source is
+// advertised at rungVideoBitrate, which holds a lower rung to a better one's
+// rate for the same frame.
 func transcodeBandwidth(rung string, w, h int, withAudio bool) int {
 	n, ok := nominalRungs[rung]
 	if !ok {
@@ -155,6 +157,31 @@ func transcodeBandwidth(rung string, w, h int, withAudio bool) int {
 	}
 	if withAudio {
 		bps += windowAudioBitrateBps
+	}
+	return bps
+}
+
+// rungVideoBitrate is the video bit rate of rung ql of a srcW×srcH source
+// (0×0 = unknown) for a device capped at maxHeight - its BANDWIDTH less the
+// audio, and the rate the live worker encodes it at: the rung's nominal rate
+// scaled by the frame it encodes (transcodeGeometry, transcodeBandwidth), and
+// never more than a better rung's that encodes the same frame. Each rung's
+// nominal rate per pixel is a little higher than the one above it's, so a
+// lower rung that encodes the better one's frame - medium and high of a 720p
+// original, of a scope film under a 720 cap, of a source wider than 8:3
+// fitted to 1920 (1920x696: 4,350,000 on medium against 4,188,888 on high) -
+// would otherwise claim and spend more for the same picture than the rung it
+// steps down from.
+func rungVideoBitrate(ql Quality, srcW, srcH, maxHeight int) int {
+	g := transcodeGeometry(ql, srcW, srcH, maxHeight)
+	bps := transcodeBandwidth(ql.Name, g.w, g.h, false)
+	for _, better := range onTheFlyRungs { // the best first
+		if better == ql.Name {
+			break
+		}
+		if b := transcodeGeometry(QualityLadder[better], srcW, srcH, maxHeight); b.w == g.w && b.h == g.h {
+			bps = min(bps, transcodeBandwidth(better, b.w, b.h, false))
+		}
 	}
 	return bps
 }
@@ -205,13 +232,14 @@ func fallbackStreamInf(p *Probe, ql Quality, maxHeight int, useCopy, live bool, 
 			copyBandwidth(p), resolutionAttr(p.Width, p.Height), codecs, videoRange(p), nameAttr(qualityName(0, 0, true)))
 	}
 	g := transcodeGeometry(ql, p.Width, p.Height, maxHeight)
+	bps := rungVideoBitrate(ql, p.Width, p.Height, maxHeight)
 	audioAttr := ""
 	if audioGroup != "" {
 		audioAttr = fmt.Sprintf(",AUDIO=%q", audioGroup)
+		bps += windowAudioBitrateBps
 	}
 	return fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d%s,CODECS=\"avc1.640028,mp4a.40.2\",VIDEO-RANGE=SDR%s%s",
-		transcodeBandwidth(ql.Name, g.w, g.h, audioGroup != ""), resolutionAttr(g.w, g.h), audioAttr,
-		nameAttr(onTheFlyName(p, ql, maxHeight, live)))
+		bps, resolutionAttr(g.w, g.h), audioAttr, nameAttr(onTheFlyName(p, ql, maxHeight, live)))
 }
 
 // choicesStreamInf is the #EXT-X-STREAM-INF line of the on-the-fly master's
@@ -237,6 +265,6 @@ func choicesStreamInf(p *Probe, ql Quality, maxHeight int, live bool, audioGroup
 		audioBps = max(audioBps, c.bitrate)
 	}
 	return fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d%s,CODECS=%q,VIDEO-RANGE=SDR,AUDIO=%q%s",
-		transcodeBandwidth(ql.Name, g.w, g.h, false)+audioBps, resolutionAttr(g.w, g.h), strings.Join(codecs, ","), audioGroup,
+		rungVideoBitrate(ql, p.Width, p.Height, maxHeight)+audioBps, resolutionAttr(g.w, g.h), strings.Join(codecs, ","), audioGroup,
 		nameAttr(onTheFlyName(p, ql, maxHeight, live)))
 }
