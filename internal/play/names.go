@@ -4,18 +4,18 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"unicode/utf8"
 )
 
 // What a track is called - the NAME of an on-the-fly audio rendition and the
 // name /play/info gives a track - by the rule the packager names its
 // renditions with (packager.py _track_display_name) and the clients label
 // tracks with (chino-web's lib/languages.ts): the name of the track's
-// language, then what its source title says besides ("English ·
-// Commentary"). A track in no known language is called what its title says,
-// else "Unknown"; "zxx" is "No dialogue". The source's title as it is is no
-// name: it is free text, often the source's codec ("AC3 5.1 @ 640 Kbps"),
-// wrong anyway once the track is stereo AAC.
+// language, with the script and the region its tag or its title names in
+// brackets ("Portuguese (Brazil)", langtags.go), then what its source title
+// says besides ("English · Commentary"). A track in no known language is
+// called what its title says, else "Unknown"; "zxx" is "No dialogue". The
+// source's title as it is is no name: it is free text, often the source's
+// codec ("AC3 5.1 @ 640 Kbps"), wrong anyway once the track is stereo AAC.
 
 // audioRenditionNames are the NAMEs of the master's audio renditions, in
 // track order: each track's audioRenditionName, unique in the group as RFC
@@ -50,19 +50,28 @@ func uniqueNames(names []string) []string {
 	return out
 }
 
-// trackDisplayName is a track's name: the name of its language, then what
-// its title says besides ("English · Commentary"); a track in no known
-// language what its title says, else "Unknown"; one without dialogue "No
-// dialogue".
+// trackDisplayName is a track's name: the name of its language, with the
+// script and the region its tag or its title names ("Portuguese (Brazil)"
+// for "PT-BR" on "por"), then what its title says besides ("English ·
+// Commentary"); a track in no known language what its title says, else
+// "Unknown"; one without dialogue "No dialogue".
 func trackDisplayName(language, title string) string {
-	words := titleWords(title, language)
-	if p := primarySubtag(language); (p == "" || p == "und") && words != "" {
-		return words
+	said := readTitle(title, language)
+	if p := primarySubtag(language); (p == "" || p == "und") && said.words != "" {
+		return said.words
 	}
-	if words != "" {
-		return langDisplay(language) + " · " + words
+	if said.words != "" {
+		return langDisplay(said.tag(language)) + " · " + said.words
 	}
-	return langDisplay(language)
+	return langDisplay(said.tag(language))
+}
+
+// trackTag is the language /play/info tags a track with: its own code, with
+// the script and the region its title names where the code names none -
+// "pt-BR" for a "por" track titled "PT-BR" or "Português (BR)", "zh-Hans"
+// for a "chi" one titled "简体中文" - as its name says them (trackDisplayName).
+func trackTag(language, title string) string {
+	return readTitle(title, language).tag(language)
 }
 
 // subtitleDisplayName is a subtitle track's name: trackDisplayName, and
@@ -85,7 +94,7 @@ var (
 	// more ("Commentary 5.1" is "Commentary"): the rendition is stereo.
 	layoutWords = regexp.MustCompile(`(?i)(^|[^a-z0-9.])(?:mono|stereo|surround|[1-9]\.[0-2]|\d{1,2} ?ch(?:annels?)?)($|[^a-z0-9.])`)
 	// emptyBrackets are what a layout in brackets leaves ("English (5.1)").
-	emptyBrackets = regexp.MustCompile(`\(\s*\)|\[\s*\]`)
+	emptyBrackets = regexp.MustCompile(`\(\s*\)|\[\s*\]|（\s*）`)
 	// numberedTitle only numbers the track ("Track 2", "Audio Track 1",
 	// "Audio", "2").
 	numberedTitle = regexp.MustCompile(`(?i)^(?:audio|sound|track|stream|[\s#])*\d*$`)
@@ -101,15 +110,17 @@ const titleWordsMax = 40
 // says besides it ("English - Commentary", "English: SDH").
 const separators = " \t-–—:·,|/"
 
-// titleWords is what a track's title says besides its language:
-// "Commentary", "SDH" ("English (SDH)" on an English track), "Signs &
-// Songs"; "" when it says nothing - no title, a format, a number, the
-// track's language by its name, its own name for it ("Deutsch") or its code,
-// a code that names no language.
-func titleWords(title, language string) string {
+// readTitle is what a track's title says besides its language: its words
+// - "Commentary", "SDH" ("English (SDH)" on an English track), "Signs &
+// Songs"; none for no title, a format, a number, the track's language by its
+// name, its own name for it ("Deutsch") or a code of it, a code that names
+// no language - and the script and the region of its language it names that
+// the track's tag does not ("PT-BR", "Português (BR)", "Chinese
+// (Simplified)" on a "por" or a "chi" track: langtags.go).
+func readTitle(title, language string) titleSays {
 	raw := strings.TrimSpace(title)
 	if raw == "" || formatWords.MatchString(raw) {
-		return ""
+		return titleSays{}
 	}
 	words := raw
 	for layoutWords.MatchString(words) {
@@ -117,55 +128,49 @@ func titleWords(title, language string) string {
 	}
 	words = emptyBrackets.ReplaceAllString(words, "")
 	words = strings.Trim(strings.Join(strings.Fields(words), " "), separators)
-	if words == "" || numberedTitle.MatchString(words) || isLanguageCode(words, language) {
-		return ""
+	r := &titleReader{tag: parseTag(language), one: hasOneLanguage(language)}
+	if words == "" || numberedTitle.MatchString(words) || r.names(words, false) {
+		return r.says("")
 	}
-	if hasOneLanguage(language) {
-		name := langDisplay(language)
-		for _, said := range []string{name, endonyms[name]} {
-			if said == "" || len(words) < len(said) || !strings.EqualFold(words[:len(said)], said) {
-				continue
+	if r.one {
+		if rest, ok := r.afterHead(words); ok {
+			// The language's name, then brackets that say its script or
+			// region ("Português (BR)", "Chinese (Simplified) · Converted"),
+			// then what says the language again ("German · Deutsch") or
+			// more: "English (SDH)" is "SDH".
+			words = r.afterBrackets(rest)
+			if r.names(words, false) {
+				words = ""
 			}
-			// The name, then a separator or a bracket ("English (SDH)"), or
-			// nothing: not "Englishman".
-			rest := words[len(said):]
-			if r, _ := utf8.DecodeRuneInString(rest); rest != "" && !strings.ContainsRune(separators+"([", r) {
-				continue
+			if inner, after, ok := leadingBracket(words); ok && after == "" {
+				words = strings.TrimSpace(inner)
 			}
-			words = strings.TrimSpace(strings.TrimLeft(rest, separators))
-			if len(words) >= 2 && (words[0] == '(' && words[len(words)-1] == ')' || words[0] == '[' && words[len(words)-1] == ']') {
-				words = strings.TrimSpace(words[1 : len(words)-1])
-			}
-			break
 		}
 	}
 	if words == "" || numberedTitle.MatchString(words) {
-		return ""
+		return r.says("")
 	}
-	if r := []rune(words); len(r) > titleWordsMax {
-		cut := string(r[:titleWordsMax+1])
-		if i := strings.LastIndex(cut, " "); i >= 0 {
-			cut = cut[:i]
-		}
-		if cut == "" {
-			cut = string(r[:titleWordsMax])
-		}
-		if cr := []rune(cut); len(cr) > titleWordsMax {
-			cut = string(cr[:titleWordsMax])
-		}
-		words = strings.Trim(cut, separators) + "…"
-	}
-	return words
+	return r.says(cutWords(words))
 }
 
-// isLanguageCode reports a title that is only a language code: its track's
-// own ("eng" or "en" on an English track) or one that names no language
-// ("und").
-func isLanguageCode(title, language string) bool {
-	if !codeTitle.MatchString(title) {
-		return false
+// cutWords is words no longer than titleWordsMax characters: cut at a word,
+// as the packager cuts them, with an ellipsis.
+func cutWords(words string) string {
+	r := []rune(words)
+	if len(r) <= titleWordsMax {
+		return words
 	}
-	return notOneLanguage[primarySubtag(title)] || langDisplay(title) == langDisplay(language)
+	cut := string(r[:titleWordsMax+1])
+	if i := strings.LastIndex(cut, " "); i >= 0 {
+		cut = cut[:i]
+	}
+	if cut == "" {
+		cut = string(r[:titleWordsMax])
+	}
+	if cr := []rune(cut); len(cr) > titleWordsMax {
+		cut = string(cr[:titleWordsMax])
+	}
+	return strings.Trim(cut, separators) + "…"
 }
 
 // notOneLanguage are the codes that name no one language to follow:
@@ -232,11 +237,15 @@ var endonyms = map[string]string{
 	"Ukrainian": "Українська", "Vietnamese": "Tiếng Việt",
 }
 
-// langDisplay names an ISO 639 code in English ("eng", "en", "en-US":
-// "English"). "zxx" - no linguistic content, a film without dialogue - is
-// "No dialogue", "mul" "Multiple languages", "mis" (a language with no code)
-// "Other language"; "und" or none is "Unknown". A code it has no name for
-// comes back as it is.
+// langDisplay names a language code in English ("eng", "en": "English"),
+// with the script and the region it names in brackets, those it has names
+// for, as the platforms name a language in their standard form ("pt-BR":
+// "Portuguese (Brazil)", "zh-Hant-TW": "Chinese (Traditional, Taiwan)",
+// "es-419": "Spanish (Latin America)"; never "Brazilian Portuguese"). "zxx"
+// - no linguistic content, a film without dialogue - is "No dialogue",
+// "mul" "Multiple languages", "mis" (a language with no code) "Other
+// language"; "und" or none is "Unknown". A code it has no name for comes
+// back as it is.
 func langDisplay(code string) string {
 	primary := primarySubtag(code)
 	switch primary {
@@ -249,8 +258,12 @@ func langDisplay(code string) string {
 	case "mis":
 		return "Other language"
 	}
-	if name, ok := languageNames[primary]; ok {
-		return name
+	name, ok := languageNames[primary]
+	if !ok {
+		return code
 	}
-	return code
+	if q := parseTag(code).qualifier(); q != "" {
+		return name + " (" + q + ")"
+	}
+	return name
 }

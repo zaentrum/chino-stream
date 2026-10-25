@@ -524,6 +524,25 @@ starts on and what it may pick:
   codec: "AC3 5.1 @ 640 Kbps") is never sent. On the fly, `/info` names a
   source's tracks by the same rule, an audio track as the master's `NAME`
   does.
+- A language's name says the script and the region its code names, in
+  brackets, as the platforms name it in their standard form and chino-web
+  names a track (`docs/chino/subtitles.md`): "Portuguese (Brazil)",
+  "Chinese (Simplified)", "Spanish (Latin America)", never "Brazilian
+  Portuguese". A title that names a script or a region of the track's
+  language that its code does not names the track so — a code of the
+  language ("PT-BR", "pt_BR", "zh-Hans", "ES-419"), a region's code in
+  brackets after its name where it is one of the language's regions
+  ("Português (BR)", "Español (419)"; "Svenska (SV)" is "Swedish"), the
+  region's or the script's name ("Portuguese (Brazil)", "Português
+  (Brasil)", "Chinese (Simplified)"), the regional form's ("Brazilian
+  Portuguese", "Español latino", "Flemish"), a Chinese title's script
+  ("简体中文", "CHS") — and the track's `language` says them too where its
+  code does not (`pt-BR` for a `por` track titled "PT-BR"; the master's
+  `LANGUAGE` stays the file's code). So two tracks of one language in two
+  regions are two names, not "Portuguese" and "Portuguese (2)". A title
+  that names another script or region than the code's stays: "Portuguese
+  (Portugal) · PT-BR" on a `pt-PT` track. The names are CLDR's English ones
+  (`internal/play/langtables.go`); the packager's names are its own.
 
 A quality menu shows `qualities` when it has two or more entries, by
 `label`, and on a pick reloads the master with `q=<name>` (`auto` back to

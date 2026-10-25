@@ -800,13 +800,15 @@ func (h *Handler) writeSourceInfo(w http.ResponseWriter, filename string, probe 
 
 // infoTracks are a source's tracks as /play/info lists them: as ffprobe
 // found them, each with its name - an audio track's the master's NAME for
-// it - and title the same name, for a client that reads title. The source's
-// title as it is, free text that is often its codec ("AC3 5.1 @ 640 Kbps"),
-// is never a label.
+// it - and title the same name, for a client that reads title, and its
+// language with the script and the region its title names where its tag
+// names none (trackTag: "pt-BR" for a "por" track titled "PT-BR"), as its
+// name says them. The source's title as it is, free text that is often its
+// codec ("AC3 5.1 @ 640 Kbps"), is never a label.
 func infoTracks(tracks []TrackInfo, names []string) []map[string]any {
 	out := make([]map[string]any, 0, len(tracks))
 	for i, t := range tracks {
-		e := map[string]any{"index": t.Index, "codec": t.Codec, "language": t.Language, "name": names[i], "title": names[i]}
+		e := map[string]any{"index": t.Index, "codec": t.Codec, "language": trackTag(t.Language, t.Title), "name": names[i], "title": names[i]}
 		if t.Default {
 			e["default"] = true
 		}

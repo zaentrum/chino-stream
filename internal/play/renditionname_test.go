@@ -24,8 +24,8 @@ func TestAudioRenditionName(t *testing.T) {
 		{"mul", "", "Multiple languages"},
 		{"MUL", "mul", "Multiple languages"},
 		{"mis", "", "Other language"},
-		{"en-US", "", "English"},
-		{"fil", "", "fil"}, // no name for it: the code as it came
+		{"en-US", "", "English (United States)"}, // its region, as the platforms name it
+		{"fil", "", "fil"},                       // no name for it: the code as it came
 		// What a title says besides the language comes after it; a track in
 		// no language is called what its title says.
 		{"eng", "Commentary", "English · Commentary"},
@@ -41,7 +41,7 @@ func TestAudioRenditionName(t *testing.T) {
 		{"eng", "English", "English"},
 		{"ger", "Deutsch", "German"},
 		{"fre", "Français", "French"},
-		{"spa", "Español latino", "Spanish · latino"},
+		{"spa", "Español latino", "Spanish (Latin America)"}, // the regional form's name
 		// Long words are cut at a word.
 		{"eng", "A very long commentary about the making of the film and its music",
 			"English · A very long commentary about the making…"},

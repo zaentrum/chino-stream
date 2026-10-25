@@ -1234,7 +1234,9 @@ func writePackagedInfo(w http.ResponseWriter, p *pkgDir, mf *pkgmanifest.Manifes
 // trackDisplayName of its language and title, unique as the master's NAMEs
 // are. title is the same name, for a client that reads title: the source's
 // title as it is, free text that is often its codec ("AC3 5.1 @ 640 Kbps"),
-// is never a label.
+// is never a label. language has the script and the region the source's
+// title names where the manifest's code names none (trackTag: "pt-BR" for
+// "por" titled "PT-BR").
 func packagedAudioTracks(renditions []pkgmanifest.AudioRendition) []map[string]any {
 	names := make([]string, len(renditions))
 	for i, a := range renditions {
@@ -1248,7 +1250,7 @@ func packagedAudioTracks(renditions []pkgmanifest.AudioRendition) []map[string]a
 		out = append(out, map[string]any{
 			"index":    i,
 			"codec":    a.Codec, // always mp4a in packaged mode
-			"language": a.Language,
+			"language": trackTag(a.Language, a.Title),
 			"name":     names[i],
 			"title":    names[i],
 			"default":  a.Default,
@@ -1264,8 +1266,9 @@ func packagedAudioTracks(renditions []pkgmanifest.AudioRendition) []map[string]a
 // master's order — each 5.1 companion just before the stereo rendition of
 // its source track — so a client lists what its player lists, in the same
 // order. Each has its name as that master has it (NAME, unique in the group,
-// what a client picks it by; title the same), its codec, language and
-// channels from the manifest, default as the master marks it, and group and
+// what a client picks it by; title the same), its codec, language (with the
+// script and the region its source's title names: trackTag) and channels
+// from the manifest, default as the master marks it, and group and
 // rendition: the group's GROUP-ID and the rendition's id ("a2"), the folder
 // its URI names. nil for a client served the stereo group alone, whose
 // tracks are packagedAudioTracks, as they always were.
@@ -1299,7 +1302,7 @@ func unionAudioTracks(served, packaged string, mf *pkgmanifest.Manifest) []map[s
 		if channels == 0 {
 			channels = md.channels
 		}
-		language := a.Language
+		language := trackTag(a.Language, a.Title)
 		if language == "" {
 			language = md.language
 		}
@@ -1417,7 +1420,8 @@ func codecName(codec string) string {
 // subtitle files from next to it (external), whose sN count on past them -
 // each with its name: the packager's, else subtitleDisplayName of its
 // language, title and forced flag. title is the same name, never the
-// source's title as it is.
+// source's title as it is; language has the script and the region that title
+// names where the manifest's code names none (trackTag).
 func packagedSubtitleTracks(subs []pkgmanifest.Subtitle) []map[string]any {
 	out := make([]map[string]any, 0, len(subs))
 	for _, s := range subs {
@@ -1425,7 +1429,7 @@ func packagedSubtitleTracks(subs []pkgmanifest.Subtitle) []map[string]any {
 		if name == "" {
 			name = subtitleDisplayName(s.Language, s.Title, s.Forced)
 		}
-		e := map[string]any{"id": s.ID, "path": s.Path, "language": s.Language, "name": name, "title": name, "format": s.Format}
+		e := map[string]any{"id": s.ID, "path": s.Path, "language": trackTag(s.Language, s.Title), "name": name, "title": name, "format": s.Format}
 		if s.Default {
 			e["default"] = true
 		}

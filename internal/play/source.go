@@ -307,10 +307,14 @@ type audioChoice struct {
 	// ("audio/1/index.m3u8").
 	uri, rendition string
 	name, language string
-	codec          string // its CODECS entry: ec-3, mp4a.40.2
-	channels       int
-	bitrate        int // bit/s
-	isDefault      bool
+	// tag is the language /play/info lists it with: language with the
+	// script and the region the track's title names (trackTag), "" for
+	// language as it is.
+	tag       string
+	codec     string // its CODECS entry: ec-3, mp4a.40.2
+	channels  int
+	bitrate   int // bit/s
+	isDefault bool
 }
 
 // companion says whether c is a package's 5.1 companion, served as
@@ -379,7 +383,8 @@ func companionChoice(c pkgmanifest.AudioRendition, isDefault bool) audioChoice {
 		name = trackDisplayName(c.Language, c.Title) + " 5.1"
 	}
 	ch := audioChoice{uri: renditionID(c) + "/playlist.m3u8", rendition: renditionID(c), name: name,
-		language: normalizeLang(c.Language), codec: c.Codec, channels: c.Channels, bitrate: c.BitrateBps, isDefault: isDefault}
+		language: normalizeLang(c.Language), tag: trackTag(normalizeLang(c.Language), c.Title), codec: c.Codec,
+		channels: c.Channels, bitrate: c.BitrateBps, isDefault: isDefault}
 	if ch.channels == 0 {
 		ch.channels = 6
 	}
@@ -396,7 +401,8 @@ func stereoChoice(t TrackInfo, name string, isDefault bool) audioChoice {
 		lang = "und"
 	}
 	return audioChoice{uri: fmt.Sprintf("audio/%d/index.m3u8", t.Index), rendition: fmt.Sprintf("audio/%d", t.Index),
-		name: name, language: lang, codec: "mp4a.40.2", channels: 2, bitrate: windowAudioBitrateBps, isDefault: isDefault}
+		name: name, language: lang, tag: trackTag(lang, t.Title), codec: "mp4a.40.2", channels: 2, bitrate: windowAudioBitrateBps,
+		isDefault: isDefault}
 }
 
 // uniqueChoiceNames makes the names of choices unique (uniqueNames).
@@ -468,7 +474,7 @@ func onTheFlyMirror(src *source, caps Caps) []audioChoice {
 		member := stereoChoice(t, names[i], t.Index == def)
 		if i < len(companion) && companion[i] != nil {
 			c := companionChoice(*companion[i], member.isDefault)
-			c.name, c.language = member.name, member.language
+			c.name, c.language, c.tag = member.name, member.language, member.tag
 			member = c
 		}
 		out = append(out, member)
@@ -494,13 +500,18 @@ func unionDefault(choices []audioChoice) *audioChoice {
 }
 
 // onTheFlyInfoTracks are /play/info's audio_tracks for an onTheFlyUnion
-// list, in its order: index (its place), codec, language, name and title
-// (its NAME in the master), default (only when it is), channels, and group
-// and rendition, which a client may pick it by.
+// list, in its order: index (its place), codec, language (with the script
+// and the region its title names: trackTag), name and title (its NAME in the
+// master), default (only when it is), channels, and group and rendition,
+// which a client may pick it by.
 func onTheFlyInfoTracks(choices []audioChoice) []map[string]any {
 	out := make([]map[string]any, 0, len(choices))
 	for i, c := range choices {
-		e := map[string]any{"index": i, "codec": codecName(c.codec), "language": c.language, "name": c.name, "title": c.name,
+		language := c.tag
+		if language == "" {
+			language = c.language
+		}
+		e := map[string]any{"index": i, "codec": codecName(c.codec), "language": language, "name": c.name, "title": c.name,
 			"channels": c.channels, "group": onTheFlyAudioGroup, "rendition": c.rendition}
 		if c.isDefault {
 			e["default"] = true
