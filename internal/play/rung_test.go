@@ -139,9 +139,10 @@ func TestTranscodeBandwidthScalesWithTheFrame(t *testing.T) {
 	}
 }
 
-// A lower rung that encodes a better rung's frame is held to that rung's
-// rate - in the master's BANDWIDTH and on the live worker alike - and one
-// that encodes a frame of its own keeps its own.
+// A lower rung that encodes a better rung's frame, or a frame just smaller
+// than it, is held to that rung's rate - in the master's BANDWIDTH and on
+// the live worker alike - and one that encodes a frame of its own small
+// enough keeps its own.
 func TestALowerRungAtABetterRungsFrameIsNoDearer(t *testing.T) {
 	cases := []struct {
 		name             string
@@ -156,6 +157,14 @@ func TestALowerRungAtABetterRungsFrameIsNoDearer(t *testing.T) {
 		{"a scope film under a 720 cap", 1920, 800, 720, 2_142_592, 2_142_592, 1_038_333},
 		// Every rung 854x480: high's rate for all three.
 		{"a 480p original", 854, 480, 0, 1_284_953, 1_284_953, 1_284_953},
+		// High and medium 720x486, low 712x480: high's 1,096,875 for low
+		// too, not 1,167,213.
+		{"a 720x486 original", 720, 486, 0, 1_096_875, 1_096_875, 1_096_875},
+		// High and medium 1024x486, low 1012x480: 1,560,000, not 1,659,016.
+		{"a 1024x486 original", 1024, 486, 0, 1_560_000, 1_560_000, 1_560_000},
+		// High 1280x726, medium 1270x720: 2,912,962, not 2,976,562; low
+		// 846x480 its own.
+		{"a 726-line original", 1280, 726, 0, 2_912_962, 2_912_962, 1_386_885},
 		// Frames of their own: each rung its own rate.
 		{"a 1080p original", 1920, 1080, 0, 6_500_000, 3_000_000, 1_400_000},
 		{"a scope film", 1920, 800, 0, 4_814_814, 4_050_000, 1_888_524},

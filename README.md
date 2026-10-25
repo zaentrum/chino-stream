@@ -276,11 +276,13 @@ its own. So do the steps past either end (`Ultra (4320p)`, `Lowest
   than 4:1) is fitted to it by width as `high` is, so a 3840x1390 film's
   `medium` is `high`'s 1920x696, `High (1080p)`, not 1990x720; its files
   live under `{rung}-fit` (`medium-h1080-fit` on a 1080 cap), none of those
-  made at the wider frame before. A rung that encodes a better rung's frame
-  is advertised (`BANDWIDTH`) and encoded on the live worker at that rung's
-  rate, never above it: that film's `medium` at `high`'s 4,188,888 bit/s,
-  not the 4,350,000 its own rate per pixel gives, a 720p original's at
-  2,888,888, not 3,000,000.
+  made at the wider frame before. No rung is advertised (`BANDWIDTH`) or
+  encoded on the live worker above a better rung's rate: one that encodes
+  a better rung's frame, or one just smaller, gets that rung's rate where
+  its own rate per pixel gives more — that film's `medium` at `high`'s
+  4,188,888 bit/s, not 4,350,000, a 720p original's at 2,888,888, not
+  3,000,000, a 720x486 original's `low` (712x480) at `high`'s 1,096,875,
+  not 1,167,213.
   `/play/info` lists every `q`, as before, each with its name: two rungs
   that encode one frame carry one name (a 720p original's `high` and
   `medium` are both `Medium (720p)`, a 1728x720 one's `Medium (972p)`), and

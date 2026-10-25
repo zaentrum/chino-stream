@@ -144,8 +144,8 @@ var nominalRungs = map[string]struct{ bps, w, h int }{
 // w×h on rung by the rung's own rate: its nominal video bitrate scaled by
 // frame area (the nominal bitrate when the size is unknown), plus the audio
 // rendition the variant plays with, if any. A variant of a source is
-// advertised at rungVideoBitrate, which holds a lower rung to a better one's
-// rate for the same frame.
+// advertised at rungVideoBitrate, which holds a lower rung to no more than a
+// better one's rate.
 func transcodeBandwidth(rung string, w, h int, withAudio bool) int {
 	n, ok := nominalRungs[rung]
 	if !ok {
@@ -165,12 +165,13 @@ func transcodeBandwidth(rung string, w, h int, withAudio bool) int {
 // (0×0 = unknown) for a device capped at maxHeight - its BANDWIDTH less the
 // audio, and the rate the live worker encodes it at: the rung's nominal rate
 // scaled by the frame it encodes (transcodeGeometry, transcodeBandwidth), and
-// never more than a better rung's that encodes the same frame. Each rung's
-// nominal rate per pixel is a little higher than the one above it's, so a
-// lower rung that encodes the better one's frame - medium and high of a 720p
-// original, of a scope film under a 720 cap, of a source wider than 8:3
-// fitted to 1920 (1920x696: 4,350,000 on medium against 4,188,888 on high) -
-// would otherwise claim and spend more for the same picture than the rung it
+// never more than a better rung's. Each rung's nominal rate per pixel is a
+// little higher than the one above it's, so a lower rung that encodes the
+// better one's frame - medium and high of a 720p original, of a scope film
+// under a 720 cap, of a source wider than 8:3 fitted to 1920 (1920x696:
+// 4,350,000 on medium against 4,188,888 on high) - or a frame just smaller
+// than it (a 720x486 original's low, 712x480: 1,167,213 against high's
+// 1,096,875 at 720x486) would otherwise claim and spend more than the rung it
 // steps down from.
 func rungVideoBitrate(ql Quality, srcW, srcH, maxHeight int) int {
 	g := transcodeGeometry(ql, srcW, srcH, maxHeight)
@@ -179,9 +180,8 @@ func rungVideoBitrate(ql Quality, srcW, srcH, maxHeight int) int {
 		if better == ql.Name {
 			break
 		}
-		if b := transcodeGeometry(QualityLadder[better], srcW, srcH, maxHeight); b.w == g.w && b.h == g.h {
-			bps = min(bps, transcodeBandwidth(better, b.w, b.h, false))
-		}
+		b := transcodeGeometry(QualityLadder[better], srcW, srcH, maxHeight)
+		bps = min(bps, transcodeBandwidth(better, b.w, b.h, false))
 	}
 	return bps
 }
