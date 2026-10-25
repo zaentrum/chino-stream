@@ -285,11 +285,14 @@ its own. So do the steps past either end (`Ultra (4320p)`, `Lowest
   `medium` re-encodes that original's frame once more), never to a `q` the
   list does not have, so the notice can say the step's name. Every `q`
   plays its rung, at the frame given above. Of an original whose size
-  ffprobe does not give, `medium` and `low` are named by their heights;
-  `high` is `High (1080p)` (or the cap's) when `LIVE_WORKER_MODE` is `on`, as
-  the live worker encodes it at that height, and has no name on ffmpeg,
-  which encodes it at the original's unknown size: an empty `label`, no
-  `NAME`. A client names an empty label by itself.
+  ffprobe does not give, each rung is named by its height when
+  `LIVE_WORKER_MODE` is `on` (`high` `High (1080p)` or the cap's, `medium`
+  `Medium (720p)`, `low` `Low (480p)`): the live worker, asked for a height
+  alone, fits the original into the 16:9 box of it. On ffmpeg no rung has a
+  name: it encodes `high` at the original's unknown size and `medium` and
+  `low` in its unknown shape (a scope film's `medium` would be 1728x720,
+  `Medium (972p)`, not `Medium (720p)`): an empty `label`, no `NAME`. A
+  client names an empty label by itself.
 - **A package's rungs**: `Original` for a rung that is the original's own
   video stream copied into the package without a re-encode, as the
   package's record says (its video rendition's `encoder` is `copy`, in

@@ -187,10 +187,12 @@ func TestOnTheFlyNames(t *testing.T) {
 	}
 }
 
-// Of a source whose size is not known, medium and low are encoded at their
-// heights on both pipelines and named by them. high is the height the live
-// worker then encodes (1080p, or the device's cap); ffmpeg encodes it at the
-// source's own size, which is not known: no name rather than a wrong one.
+// Of a source whose size is not known, the live worker is asked for each
+// rung's height (high's 1080p, or the device's cap) and fits the source into
+// the 16:9 box of it, whose step is that height: named by it. ffmpeg keeps
+// the source's shape at medium's and low's height (a scope film's 1728x720 is
+// "Medium (972p)") and encodes high at the source's own size, which are not
+// known: no name rather than a wrong one, also where only the width is not.
 func TestOnTheFlyNamesOfASizeNotKnown(t *testing.T) {
 	cases := []struct {
 		cap            int
@@ -199,8 +201,8 @@ func TestOnTheFlyNamesOfASizeNotKnown(t *testing.T) {
 	}{
 		{0, true, "High (1080p)", "Medium (720p)", "Low (480p)"},
 		{720, true, "Medium (720p)", "Medium (720p)", "Low (480p)"},
-		{0, false, "", "Medium (720p)", "Low (480p)"},
-		{720, false, "", "Medium (720p)", "Low (480p)"},
+		{0, false, "", "", ""},
+		{720, false, "", "", ""},
 	}
 	for _, p := range []*Probe{{VideoCodec: "mpeg2video"}, nil} {
 		for _, tc := range cases {
@@ -209,6 +211,16 @@ func TestOnTheFlyNamesOfASizeNotKnown(t *testing.T) {
 			if want := []string{tc.high, tc.med, tc.low}; !reflect.DeepEqual(got, want) {
 				t.Errorf("cap %d, live %v: %q, want %q", tc.cap, tc.live, got, want)
 			}
+		}
+	}
+	// Only the height known: ffmpeg's width is not, the live worker's box is
+	// that of the height it is asked for.
+	p := &Probe{Height: 800}
+	for live, want := range map[bool][]string{false: {"", "", ""}, true: {"Medium (800p)", "Medium (720p)", "Low (480p)"}} {
+		got := []string{onTheFlyName(p, QualityLadder["high"], 0, live),
+			onTheFlyName(p, QualityLadder["medium"], 0, live), onTheFlyName(p, QualityLadder["low"], 0, live)}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("a height alone, live %v: %q, want %q", live, got, want)
 		}
 	}
 	// The live worker encodes the heights it is named by.
@@ -587,8 +599,10 @@ func TestOnTheFlyInfoAndMasterNameTheRungs(t *testing.T) {
 			[]string{"high High (1080p)", "medium Medium (972p)", "low Low (648p)"}, "Medium (972p)"},
 		{"a 2.39:1 transcode on a 720p HW cap", probeJSON(mkv, "hevc", 1920, 800, "aac", 2, 6_000_000), "avc:720,aac", "transcode",
 			[]string{"high Medium (720p)", "medium Medium (720p)", "low Low (480p)"}, "Medium (720p)"},
-		{"a transcode of a size not known: high at it, no name", probeJSON(mkv, "mpeg2video", 0, 0, "aac", 2, 0), "avc,aac", "transcode",
-			[]string{"high ", "medium Medium (720p)", "low Low (480p)"}, "Medium (720p)"},
+		// ffmpeg encodes high at that size and medium and low in its shape:
+		// no frame known, no name.
+		{"a transcode of a size not known: no names", probeJSON(mkv, "mpeg2video", 0, 0, "aac", 2, 0), "avc,aac", "transcode",
+			[]string{"high ", "medium ", "low "}, ""},
 		{"a 360p transcode", probeJSON(mkv, "hevc", 640, 360, "aac", 2, 900_000), "avc,aac", "transcode",
 			[]string{"high Lowest (360p)", "medium Lowest (360p)", "low Lowest (360p)"}, "Lowest (360p)"},
 		{"a stream copy", probeJSON("mov,mp4,m4a,3gp,3g2,mj2", "h264", 1920, 1080, "aac", 2, 8_000_000), "avc,aac", "passthrough",

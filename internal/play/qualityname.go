@@ -127,24 +127,30 @@ func namedHeight(w, h int) int {
 // into it (a 2.39:1 film on a 720 cap: high and medium 1280x534 "Medium
 // (720p)", low 854x356 "Low (480p)").
 //
-// With p's size not known medium and low encode their height, on both
-// pipelines, and are named by it. The high rung of such a source is named
-// by the height the live worker then encodes (rungHeight); ffmpeg encodes it
-// at the source's own size, which is not known: no name ("") rather than a
-// wrong one.
+// With p's size not known the frame's width is not known either. The live
+// worker, asked for a height with no width, fits the source into the 16:9
+// box of that height, whose step is the height: a rung is named by the
+// height it asks for (medium's 720, high's rungHeight, 1080 or the cap).
+// ffmpeg keeps the source's shape at medium's and low's height
+// (scale=-2:720, a scope film's 1728x720, "Medium (972p)") and encodes high
+// at the source's own size, so the step of none of them is known: no name
+// ("") rather than a wrong one.
 func onTheFlyName(p *Probe, ql Quality, maxHeight int, live bool) string {
 	var w, h int
 	if p != nil {
 		w, h = p.Width, p.Height
 	}
 	g := transcodeGeometry(ql, w, h, maxHeight)
-	if g.h <= 0 {
-		if !live {
-			return ""
-		}
-		g.w, g.h = 0, rungHeight(ql, maxHeight)
+	if g.w > 0 && g.h > 0 {
+		return qualityName(g.w, g.h, false)
 	}
-	return qualityName(g.w, g.h, false)
+	if !live {
+		return ""
+	}
+	if g.h <= 0 {
+		g.h = rungHeight(ql, maxHeight)
+	}
+	return qualityName(0, g.h, false)
 }
 
 // onTheFlyRungs are the on-the-fly ladder's rungs, the best first: the q
