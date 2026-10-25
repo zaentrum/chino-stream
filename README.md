@@ -279,13 +279,17 @@ its own. So do the steps past either end (`Ultra (4320p)`, `Lowest
   made at the wider frame before.
   `/play/info` lists every `q`, as before, each with its name: two rungs
   that encode one frame carry one name (a 720p original's `high` and
-  `medium` are both `Medium (720p)`, a 1728x720 one's `Medium (972p)`). A
-  client's menu shows one row per name, the first entry's (the better
-  encode); a step-down goes to the next entry with another name (`high` to
-  `medium` re-encodes that original's frame once more), never to a `q` the
-  list does not have, so the notice can say the step's name. Every `q`
-  plays its rung, at the frame given above. Of an original whose size
-  ffprobe does not give, each rung is named by its height when
+  `medium` are both `Medium (720p)`, a 1728x720 one's `Medium (972p)`), and
+  both are listed, as the apps step down by `q` and look a `q`'s name up in
+  the list. A client is to merge such entries: one row per name, the first
+  entry's (the better encode), and a step-down to the next entry with
+  another name (`high` to `medium` re-encodes that original's frame once
+  more), never to a `q` the list does not have, so the notice can say the
+  step's name. The released phone, TV and Tizen apps do not merge yet: they
+  show one row per entry, so such a name shows twice (three times for a
+  360p original) until they do; deploy this naming after apps that merge.
+  Every `q` plays its rung, at the frame given above. Of an original whose
+  size ffprobe does not give, each rung is named by its height when
   `LIVE_WORKER_MODE` is `on` (`high` `High (1080p)` or the cap's, `medium`
   `Medium (720p)`, `low` `Low (480p)`): the live worker, asked for a height
   alone, fits the original into the 16:9 box of it. On ffmpeg no rung has a
