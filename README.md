@@ -244,11 +244,13 @@ A frame's height for naming is its step: its own height, or the height its
 width stands for at 16:9, whichever is larger — the 16:9 frame it fills, as
 the transcoder's `LADDER` names its rungs. A scope film's 1920x818 is
 `High (1080p)`, like a 16:9 film's 1920x1080, its 3840x1606 `Ultra
-(2160p)`, a 1.85:1 film's 1920x1038 `High (1080p)`. A frame wider than 16:9
-that is a little wider or a little narrower than a standard 16:9 frame is
-that frame: up to 10% wider (DCI 4096x2160 is `Ultra (2160p)`, 2048x858
-`High (1080p)`), or up to 3% narrower, a standard frame cropped at the
-sides (1916x800 is `High (1080p)`, 3836x1600 `Ultra (2160p)`). A step
+(2160p)`, a 1.85:1 film's 1920x1038 `High (1080p)`. A frame that is a
+little wider or a little narrower than a standard 16:9 frame is that frame:
+up to 10% wider (DCI 4096x2160 is `Ultra (2160p)`, 2048x858 `High
+(1080p)`), or a step up to 3% below a standard height, whatever the frame's
+shape - a standard frame cropped at the sides or a few lines short (1916x800
+and 1904x1072 are `High (1080p)`, 3836x1600 `Ultra (2160p)`, 1272x716
+`Medium (720p)`). A step
 between two heights of the table takes the lower one's word with its own
 number: 1600x900 is `Medium (900p)`, and 1666x900, wider than 16:9 and no
 standard frame, `Medium (937p)`, by the height its width stands for, not by

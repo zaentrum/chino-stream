@@ -82,14 +82,15 @@ var sizeClasses = []int{240, 360, 480, 540, 576, 720, 1080, 1440, 2160, 4320}
 // 1280x720 box). So a frame wider than 16:9 is named by the 16:9 frame as
 // wide: a 2.39:1 film's 1920x800 is 1080p and its 3840x1606 2160p, as a
 // 16:9 film's of that width are, and a 1.85:1 film's 1920x1038 1080p. A
-// frame wider than 16:9 a little wider or a little narrower than a standard
-// 16:9 frame (sizeClasses) is that frame: up to 10% wider than the 16:9
-// frame of a standard height it is no taller than - DCI 4096x2160 is 2160p,
-// 2048x858 and 1998x1080 1080p - or up to 3% narrower, a standard frame
-// cropped at the sides (1916x800 and 1912x1036 are 1080p, 3836x1600 2160p,
-// 1278x534 720p). Any other frame wider than 16:9 is named by the height its
-// width stands for at 16:9, not by its own: 1666x900 is 937p, 1856x1036
-// 1044p. A width of 0 (not known) leaves the height; 0 without a height.
+// frame a little wider or a little narrower than a standard 16:9 frame
+// (sizeClasses) is that frame: up to 10% wider than the 16:9 frame of a
+// standard height it is no taller than - DCI 4096x2160 is 2160p, 2048x858
+// and 1998x1080 1080p - or a step up to 3% below a standard height, a
+// standard frame cropped at the sides or a few lines short (1916x800,
+// 1912x1036 and 1904x1072 are 1080p, 3836x1600 2160p, 1278x534 and 1272x716
+// 720p), whatever its shape (the product spec's step rule). Any other frame
+// is named by its step: 1666x900 is 937p, 1856x1036 1044p, 1600x900 900p. A
+// width of 0 (not known) leaves the height as the step; 0 without a height.
 func namedHeight(w, h int) int {
 	if h <= 0 {
 		return 0
@@ -97,9 +98,6 @@ func namedHeight(w, h int) int {
 	full := h
 	if w > 0 {
 		full = max(h, (w*9+8)/16) // the 16:9 frame w wide, to the nearest pixel
-	}
-	if full == h {
-		return h
 	}
 	for i := len(sizeClasses) - 1; i >= 0; i-- {
 		if c := sizeClasses[i]; c >= h && c <= full && full*10 <= c*11 {

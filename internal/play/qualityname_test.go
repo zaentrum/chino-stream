@@ -15,27 +15,33 @@ import (
 
 // The fixed table, at every boundary: a 16:9 frame of each height, and the
 // height alone (a width not known), are named the same. 2160p and up is
-// Ultra, 1080p High, 720p Medium, 480p Low, below 480p Lowest; a height
-// between two steps takes the lower step's word with its own height, as do
-// the heights past either end.
+// Ultra, 1080p High, 720p Medium, 480p Low, below 480p Lowest; a height up
+// to 3% below a standard one is that height; any other height between two
+// steps takes the lower step's word with its own height, as do the heights
+// past either end.
 func TestQualityNameTable(t *testing.T) {
 	cases := []struct {
 		h    int
 		want string
 	}{
 		{240, "Lowest (240p)"},
-		{359, "Lowest (359p)"},
+		{340, "Lowest (340p)"},
+		{359, "Lowest (360p)"},
 		{360, "Lowest (360p)"},
-		{479, "Lowest (479p)"},
+		{460, "Lowest (460p)"},
+		{479, "Low (480p)"},
 		{480, "Low (480p)"},
 		{576, "Low (576p)"},
-		{719, "Low (719p)"},
+		{690, "Low (690p)"},
+		{719, "Medium (720p)"},
 		{720, "Medium (720p)"},
 		{900, "Medium (900p)"},
-		{1079, "Medium (1079p)"},
+		{1040, "Medium (1040p)"},
+		{1079, "High (1080p)"},
 		{1080, "High (1080p)"},
 		{1440, "High (1440p)"},
-		{2159, "High (2159p)"},
+		{2080, "High (2080p)"},
+		{2159, "Ultra (2160p)"},
 		{2160, "Ultra (2160p)"},
 		{4320, "Ultra (4320p)"},
 	}
@@ -82,6 +88,10 @@ func TestQualityNameOfFramesNot16By9(t *testing.T) {
 		{1916, 800, "High (1080p)"}, {1904, 800, "High (1080p)"}, {1912, 1036, "High (1080p)"},
 		{1918, 1040, "High (1080p)"}, {3836, 1600, "Ultra (2160p)"}, {3816, 1600, "Ultra (2160p)"},
 		{1278, 534, "Medium (720p)"}, {1276, 716, "Medium (720p)"},
+		// A few lines short of a standard frame, at 16:9 or narrower: its
+		// step is its own height, up to 3% below a standard one.
+		{1904, 1072, "High (1080p)"}, {1272, 716, "Medium (720p)"}, {1440, 1050, "High (1080p)"},
+		{0, 1072, "High (1080p)"}, {1848, 1040, "Medium (1040p)"},
 		// More than 3% narrower: the 16:9 frame as wide, however close to its
 		// own height.
 		{1856, 800, "Medium (1044p)"}, {1856, 1036, "Medium (1044p)"},
