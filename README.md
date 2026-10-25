@@ -258,25 +258,33 @@ its own. So do the steps past either end (`Ultra (4320p)`, `Lowest
 - **The stream copy** (`copy/`, and the `remux` copy's `video/`): `Original`.
 - **The on-the-fly ladder**, on ffmpeg and on the live worker alike: each
   rung by the frame it encodes for that title and client (`caps`' height
-  cap included). A re-encode at the original's size is named by its height
-  like any other step: a 720p original's `high` is `Medium (720p)`, a 4K
-  one's (fitted into 1080p) `High (1080p)`. `medium` and `low` scale to a
-  height (720 and 480, under the cap) and are named by it, whatever the
-  original's shape: a 2.39:1 film's `medium` (1728x720) is `Medium (720p)`,
-  as a 16:9 film's is; where the original is shorter they encode its own
-  frame and are named as `high` is. `/play/info` lists every `q`, as
-  before, each with its name: two rungs that encode one frame carry one name
-  (a 720p original's `high` and `medium` are both `Medium (720p)`). A
+  cap included), by its step like any frame, as a package's rung of that
+  frame is named. A re-encode at the original's size is named by its step
+  like any other: a 720p original's `high` is `Medium (720p)`, a 1728x720
+  one's `Medium (972p)`, a 4K one's (fitted into 1080p) `High (1080p)`.
+  `medium` and `low` scale to 720 and 480 lines, keeping the original's
+  shape, and are named by their steps too: a 16:9 film's `medium` (1280x720)
+  is `Medium (720p)`, a 1920x800 (2.39:1) film's `medium` (1728x720) `Medium
+  (972p)` and its `low` (1152x480) `Low (648p)`; where the original is
+  shorter they encode its own frame and are named as `high` is. Under a
+  `caps` height cap below 1080 a rung wider than the 16:9 box of its height
+  is fitted into it, as `high` is into the cap's: a 1920x800 film on a 720
+  cap is 1280x534 on `high` and `medium`, `Medium (720p)`, and 854x356 on
+  `low`, `Low (480p)`; an original no wider than 16:9 scales to the height
+  as without a cap.
+  `/play/info` lists every `q`, as before, each with its name: two rungs
+  that encode one frame carry one name (a 720p original's `high` and
+  `medium` are both `Medium (720p)`, a 1728x720 one's `Medium (972p)`). A
   client's menu shows one row per name, the first entry's (the better
   encode); a step-down goes to the next entry with another name (`high` to
   `medium` re-encodes that original's frame once more), never to a `q` the
-  list does not have, so the notice can say the step's name. Every `q` still
-  plays what it did. Of an original whose size ffprobe does not give,
-  `medium` and `low` are named by their heights; `high` is `High (1080p)`
-  (or the cap's) when `LIVE_WORKER_MODE` is `on`, as the live worker encodes
-  it at that height, and has no name on ffmpeg, which encodes it at the
-  original's unknown size: an empty `label`, no `NAME`. A client names an
-  empty label by itself.
+  list does not have, so the notice can say the step's name. Every `q`
+  plays its rung, at the frame given above. Of an original whose size
+  ffprobe does not give, `medium` and `low` are named by their heights;
+  `high` is `High (1080p)` (or the cap's) when `LIVE_WORKER_MODE` is `on`, as
+  the live worker encodes it at that height, and has no name on ffmpeg,
+  which encodes it at the original's unknown size: an empty `label`, no
+  `NAME`. A client names an empty label by itself.
 - **A package's rungs**: `Original` for a rung that is the original's own
   video stream copied into the package without a re-encode, as the
   package's record says (its video rendition's `encoder` is `copy`, in

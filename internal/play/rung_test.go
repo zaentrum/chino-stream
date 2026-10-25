@@ -142,7 +142,7 @@ func TestFallbackStreamInf(t *testing.T) {
 			`#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720,CODECS="avc1.640028,mp4a.40.2",VIDEO-RANGE=SDR,NAME="Original"`},
 		{"copy of a 4K HDR HEVC without a known bitrate", hdr4K, "high", 0, true, false, "",
 			`#EXT-X-STREAM-INF:BANDWIDTH=6500000,RESOLUTION=3840x2160,CODECS="hvc1.1.6.L120.B0,mp4a.40.2",VIDEO-RANGE=PQ,NAME="Original"`},
-		{"high rung of a 720p source: a re-encode at its size, named by its height", sdr720, "high", 0, false, false, "aud",
+		{"high rung of a 720p source: a re-encode at its size, named by its step", sdr720, "high", 0, false, false, "aud",
 			`#EXT-X-STREAM-INF:BANDWIDTH=3048888,RESOLUTION=1280x720,CODECS="avc1.640028,mp4a.40.2",VIDEO-RANGE=SDR,AUDIO="aud",NAME="Medium (720p)"`},
 		{"high rung of 4K: fitted into the 1080p box", hdr4K, "high", 0, false, false, "aud",
 			`#EXT-X-STREAM-INF:BANDWIDTH=6660000,RESOLUTION=1920x1080,CODECS="avc1.640028,mp4a.40.2",VIDEO-RANGE=SDR,AUDIO="aud",NAME="High (1080p)"`},

@@ -116,30 +116,28 @@ func namedHeight(w, h int) int {
 
 // onTheFlyName is the name of rung ql of the on-the-fly ladder of source p,
 // for a device whose HW decoder tops out at maxHeight (0: no cap), on the
-// live worker (live) or ffmpeg: by the frame the rung encodes from p
-// (transcodeGeometry), which ffmpeg and the live worker both encode.
+// live worker (live) or ffmpeg: qualityName of the frame the rung encodes
+// from p (transcodeGeometry), which ffmpeg and the live worker both encode -
+// by its step, as a package's rung of that frame is named. A 2.39:1 film's
+// 1728x720 medium is "Medium (972p)" and its 1152x480 low "Low (648p)", a
+// 16:9 film's 1280x720 medium "Medium (720p)". Two rungs that encode one
+// frame carry one name: a 1728x720 original's high and medium are both
+// "Medium (972p)", a 1152x480 original's three rungs "Low (648p)". Under a
+// HW cap below 1080 a rung wider than the 16:9 box of its height is fitted
+// into it (a 2.39:1 film on a 720 cap: high and medium 1280x534 "Medium
+// (720p)", low 854x356 "Low (480p)").
 //
-// A rung scaled to a height (medium, low: scale=-2:720 under the cap) is
-// named by that height, the lines it produces, whatever the source's shape:
-// a 2.39:1 film's 1728x720 medium is "Medium (720p)" as a 16:9 film's
-// 1280x720 is, not the 16:9 frame as wide (972p). One the source is shorter
-// than encodes the source's own frame, high's, and is named as that is
-// (a 1280x536 source's medium is "Medium (720p)", as its high is). With p's
-// size not known both pipelines encode that height.
-//
-// The high rung of a source whose size is not known is named by the height
-// the live worker then encodes (rungHeight); ffmpeg encodes it at the
-// source's own size, which is not known: no name ("") rather than a wrong
-// one.
+// With p's size not known medium and low encode their height, on both
+// pipelines, and are named by it. The high rung of such a source is named
+// by the height the live worker then encodes (rungHeight); ffmpeg encodes it
+// at the source's own size, which is not known: no name ("") rather than a
+// wrong one.
 func onTheFlyName(p *Probe, ql Quality, maxHeight int, live bool) string {
 	var w, h int
 	if p != nil {
 		w, h = p.Width, p.Height
 	}
 	g := transcodeGeometry(ql, w, h, maxHeight)
-	if t := rungHeight(ql, maxHeight); g.scaleH > 0 && g.h >= t {
-		return qualityName(0, t, false)
-	}
 	if g.h <= 0 {
 		if !live {
 			return ""

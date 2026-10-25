@@ -107,12 +107,14 @@ func TestQualityNameOfFramesNot16By9(t *testing.T) {
 }
 
 // The on-the-fly ladder's rungs are named by the frame each encodes from the
-// source, on ffmpeg and the live worker alike (they encode one frame): high at
-// the source's size (no
-// "source" in its name - a 720p source's high is "Medium (720p)"), fitted
-// into the 1080p box past it, under a device's HW cap; medium and low by the
-// height they scale to (the lines they produce, a scope film's as a 16:9
-// one's), and where the source is shorter at its frame, named as high is.
+// source, on ffmpeg and the live worker alike (they encode one frame), by its
+// step as any frame is, a package's rung of it too: high at the source's size
+// (no "source" in its name - a 720p source's high is "Medium (720p)"),
+// fitted into the 1080p box past it, under a device's HW cap; medium and low
+// at the height they scale to, a scope film's by the height its width stands
+// for at 16:9 (1728x720 "Medium (972p)"), and where the source is shorter
+// at its frame, named as high is. Under a cap below 1080 each rung fits the
+// 16:9 box of its height.
 func TestOnTheFlyNames(t *testing.T) {
 	cases := []struct {
 		name           string
@@ -130,20 +132,34 @@ func TestOnTheFlyNames(t *testing.T) {
 		// Wider than 16:9 and no standard frame: high at the source's size,
 		// by the height its width stands for.
 		{"1666x900: high at the source's size", 1666, 900, 0, "Medium (937p)", "Medium (720p)", "Low (480p)"},
+		// 1.85:1: medium 1332x720 and low 888x480 are a little wider than
+		// the 16:9 frames of 720 and 480, and so those frames.
 		{"1.85:1 1080p", 1920, 1038, 0, "High (1080p)", "Medium (720p)", "Low (480p)"},
-		// medium and low scale to a height: wider than a 16:9 frame of it
-		// (1728x720, 1152x480), named by it.
-		{"2.39:1 1080p", 1920, 800, 0, "High (1080p)", "Medium (720p)", "Low (480p)"},
-		{"2.39:1 1080p on a 1080p HW cap", 1920, 800, 1080, "High (1080p)", "Medium (720p)", "Low (480p)"},
-		{"2.39:1 1080p on a 720p HW cap", 1920, 800, 720, "Medium (720p)", "Medium (720p)", "Low (480p)"},
-		{"2.39:1 2160p", 3840, 1606, 0, "High (1080p)", "Medium (720p)", "Low (480p)"},
-		{"2:1 1080p", 1920, 960, 0, "High (1080p)", "Medium (720p)", "Low (480p)"},
+		// Wider: medium and low scale to a height and are named, as any
+		// frame is, by the height their width stands for at 16:9 - 1728x720
+		// is 972p, 1152x480 648p, as in a package's master.
+		{"2.39:1 1080p", 1920, 800, 0, "High (1080p)", "Medium (972p)", "Low (648p)"},
+		{"2.39:1 1080p on a 1080p HW cap", 1920, 800, 1080, "High (1080p)", "Medium (972p)", "Low (648p)"},
+		{"2.39:1 2160p", 3840, 1606, 0, "High (1080p)", "Medium (969p)", "Low (646p)"},
+		{"2:1 1080p", 1920, 960, 0, "High (1080p)", "Medium (810p)", "Low (540p)"},
+		// An original at a scaled rung's frame: the rungs that encode it are
+		// one name.
+		{"1728x720", 1728, 720, 0, "Medium (972p)", "Medium (972p)", "Low (648p)"},
+		{"1152x480", 1152, 480, 0, "Low (648p)", "Low (648p)", "Low (648p)"},
 		// medium is the source's own 1280x536 frame, named as high is.
-		{"2.39:1 720p", 1280, 536, 0, "Medium (720p)", "Medium (720p)", "Low (480p)"},
+		{"2.39:1 720p", 1280, 536, 0, "Medium (720p)", "Medium (720p)", "Low (645p)"},
 		// A few pixels cropped off the sides: high named as the standard frame.
-		{"2.39:1 1080p cropped", 1916, 800, 0, "High (1080p)", "Medium (720p)", "Low (480p)"},
+		{"2.39:1 1080p cropped", 1916, 800, 0, "High (1080p)", "Medium (970p)", "Low (647p)"},
 		{"1.85:1 1080p cropped", 1912, 1036, 0, "High (1080p)", "Medium (720p)", "Low (480p)"},
 		{"4:3 SD", 720, 576, 0, "Low (576p)", "Low (576p)", "Low (480p)"},
+		// Under a HW cap below 1080 every rung fits the 16:9 box of its
+		// height: high and medium the cap's (1280x534, 960x400), low 480's
+		// (854x356) - never a larger frame below a smaller one.
+		{"2.39:1 1080p on a 720p HW cap", 1920, 800, 720, "Medium (720p)", "Medium (720p)", "Low (480p)"},
+		{"2.39:1 2160p on a 720p HW cap", 3840, 1600, 720, "Medium (720p)", "Medium (720p)", "Low (480p)"},
+		{"1728x720 on a 720p HW cap", 1728, 720, 720, "Medium (720p)", "Medium (720p)", "Low (480p)"},
+		{"2.39:1 1080p on a 540p HW cap", 1920, 800, 540, "Low (540p)", "Low (540p)", "Low (480p)"},
+		{"1152x480 on a 720p HW cap: within the box", 1152, 480, 720, "Low (648p)", "Low (648p)", "Low (480p)"},
 	}
 	for _, tc := range cases {
 		p := &Probe{Width: tc.w, Height: tc.h}
@@ -558,8 +574,10 @@ func TestOnTheFlyInfoAndMasterNameTheRungs(t *testing.T) {
 			[]string{"high Medium (720p)", "medium Medium (720p)", "low Low (480p)"}, "Medium (720p)"},
 		{"4K on a 720p HW cap", probeJSON(mkv, "hevc", 3840, 2160, "aac", 2, 20_000_000), "avc:720,aac", "transcode",
 			[]string{"high Medium (720p)", "medium Medium (720p)", "low Low (480p)"}, "Medium (720p)"},
+		// medium 1728x720 and low 1152x480, by their steps as a package's
+		// rungs of those frames are.
 		{"a 2.39:1 transcode", probeJSON(mkv, "hevc", 1920, 800, "aac", 2, 6_000_000), "avc,aac", "transcode",
-			[]string{"high High (1080p)", "medium Medium (720p)", "low Low (480p)"}, "Medium (720p)"},
+			[]string{"high High (1080p)", "medium Medium (972p)", "low Low (648p)"}, "Medium (972p)"},
 		{"a 2.39:1 transcode on a 720p HW cap", probeJSON(mkv, "hevc", 1920, 800, "aac", 2, 6_000_000), "avc:720,aac", "transcode",
 			[]string{"high Medium (720p)", "medium Medium (720p)", "low Low (480p)"}, "Medium (720p)"},
 		{"a transcode of a size not known: high at it, no name", probeJSON(mkv, "mpeg2video", 0, 0, "aac", 2, 0), "avc,aac", "transcode",
