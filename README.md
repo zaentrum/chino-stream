@@ -57,6 +57,8 @@ Dockerfile
 | GET    | `/api/play/zap-feed`                         | zap discovery feed                  |
 | GET    | `/api/play/{itemId}/subtitles/{idx}.vtt`     | embedded subtitle track             |
 | GET    | `/api/play/subs/{subID}.vtt` (and `.sup`…)   | sidecar subtitle files (a SubRip one as WebVTT) |
+| GET    | `/api/play/subs/{subID}.ass`                 | a subtitle's styled original, its ASS or SSA script (`text/x-ssa`); 404 for a subtitle without one |
+| GET    | `/api/play/fonts/{fontID}.{ttf\|otf\|ttc\|woff\|woff2\|bin}` | a font of the package, for a player that draws styled subtitles (its MIME by the catalog's format) |
 | GET    | `/api/play/{itemId}/master.m3u8`             | HLS master (packaged or on the fly) |
 | POST   | `/api/play/{itemId}/prewarm`                 | warm the start of a title (202)     |
 | GET    | `/api/play/{itemId}/{vN\|aN}/playlist.m3u8`   | packaged video / audio rendition    |
