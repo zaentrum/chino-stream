@@ -190,6 +190,15 @@ func NewRouter(d Deps) (http.Handler, error) {
 		r.Get("/api/play/subs/{subID}.idx", playH.SidecarSubtitle)
 		r.Get("/api/play/subs/{subID}.sub", playH.SidecarSubtitle)
 		r.Get("/api/play/subs/{subID}.dvb", playH.SidecarSubtitle)
+		// A subtitle's styled original (an ASS or SSA script its package
+		// keeps beside its WebVTT file) and the fonts of the package, for a
+		// player that draws styles; every other client keeps the .vtt. The
+		// extension of a font is advisory too: the catalog's format drives
+		// its MIME.
+		r.Get("/api/play/subs/{subID}.ass", playH.StyledSubtitle)
+		for _, ext := range []string{"ttf", "otf", "ttc", "woff", "woff2", "bin"} {
+			r.Get("/api/play/fonts/{fontID}."+ext, playH.Font)
+		}
 		// HLS sub-router: master.m3u8, per-quality playlists, init
 		// segment, and on-demand media segments. See HLSHandler.Routes
 		// for the URL shape.

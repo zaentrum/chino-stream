@@ -206,3 +206,52 @@ func TestExtrasTakeTheStreamToken(t *testing.T) {
 		t.Errorf("master: %q", w.Body)
 	}
 }
+
+// A subtitle's styled original and a package's fonts sit behind the same
+// auth as its subtitles: a stream token in ?stream= or a bearer; nothing or
+// a forged token is a 401, before the catalog is asked.
+func TestStyledSubtitlesAndFontsTakeTheStreamToken(t *testing.T) {
+	root := t.TempDir()
+	subs := filepath.Join(root, "movies", "5a", "5ab5ab00-0000-4000-8000-000000000001", "versions",
+		"9a2e0000-0000-4000-8000-000000000001", "subs")
+	for name, body := range map[string]string{"0.vtt": "WEBVTT\n", "0.ass": "[Script Info]\n", "fonts/0.ttf": "\x00\x01\x00\x00"} {
+		p := filepath.Join(subs, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h, err := NewRouter(Deps{
+		Catalog: katalogAnswering(t, map[string]any{
+			"/api/v1/subtitles/s1/asset": map[string]any{"itemId": "i1", "path": filepath.Join(subs, "0.vtt"),
+				"format": "webvtt", "styledPath": filepath.Join(subs, "0.ass"), "styledFormat": "ass"},
+			"/api/v1/fonts/f1/asset": map[string]any{"itemId": "i1", "path": filepath.Join(subs, "fonts", "0.ttf"), "format": "ttf"},
+		}),
+		MediaRoot:  root,
+		OIDCIssuer: oidcIssuer(t), OIDCAudience: "chino-web", AuthEnabled: true,
+		StreamSigningKey: signingKey, FFmpegBin: "ffmpeg", FFprobeBin: "ffprobe", HLSCacheDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := streamToken(t, time.Hour)
+	cases := []struct {
+		name, query string
+		want        int
+	}{
+		{"stream token", "?stream=" + tok, http.StatusOK},
+		{"nothing", "", http.StatusUnauthorized},
+		{"a forged token", "?stream=" + forged(tok), http.StatusUnauthorized},
+	}
+	for _, path := range []string{"/api/play/subs/s1.ass", "/api/play/fonts/f1.ttf"} {
+		for _, tc := range cases {
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path+tc.query, nil))
+			if w.Code != tc.want {
+				t.Errorf("%s, %s: %d %q, want %d", path, tc.name, w.Code, w.Body, tc.want)
+			}
+		}
+	}
+}

@@ -244,7 +244,7 @@ func (h *Handler) SidecarSubtitle(w http.ResponseWriter, r *http.Request) {
 	// files next to an original (sources/<id>/) and the arrivals — or in the
 	// package store a deployment whose media root is still its old media/
 	// folder serves its packages' subtitles from.
-	if !underRoot(clean, legacyPackageStore) && !(h.MediaRoot != "" && underRoot(clean, h.MediaRoot)) {
+	if !h.servable(clean) {
 		http.Error(w, "subtitle path outside allowed roots", http.StatusForbidden)
 		return
 	}
@@ -276,6 +276,125 @@ func (h *Handler) SidecarSubtitle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Last-Modified", st.ModTime().UTC().Format(http.TimeFormat))
 	http.ServeFile(w, r, clean)
+}
+
+// styledSubtitleMIME is the wire MIME of a styled original by the catalog's
+// styledFormat: an ASS or an SSA script as AndroidX Media3 names both
+// (MimeTypes.TEXT_SSA), which libass-based renderers (JASSUB on the web) read
+// as text.
+var styledSubtitleMIME = map[string]string{
+	"ass": "text/x-ssa; charset=utf-8",
+}
+
+// StyledSubtitle serves a subtitle's styled original — the ASS or SSA script
+// its package keeps beside its WebVTT file — at /api/play/subs/{subID}.ass,
+// for a player that draws styles. The subtitle's own URL (.vtt) is
+// unchanged; a subtitle without a styled original is 404 here. The id and
+// the roots are those of SidecarSubtitle, and so are the caching headers: a
+// subtitle's id is new with every package.
+func (h *Handler) StyledSubtitle(w http.ResponseWriter, r *http.Request) {
+	subID := chi.URLParam(r, "subID")
+	if subID == "" {
+		http.Error(w, "missing subtitle id", http.StatusBadRequest)
+		return
+	}
+	a, err := h.Catalog.SubtitleAssetByID(r.Context(), subID, bearerFrom(r))
+	if err != nil {
+		if errors.Is(err, catalog.ErrNotFound) {
+			http.Error(w, "unknown subtitle id", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "catalog: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	if a.StyledPath == "" {
+		http.Error(w, "the subtitle has no styled original", http.StatusNotFound)
+		return
+	}
+	mime, known := styledSubtitleMIME[a.StyledFormat]
+	if !known {
+		http.Error(w, "unsupported styled subtitle format "+a.StyledFormat, http.StatusBadGateway)
+		return
+	}
+	clean := filepath.Clean(a.StyledPath)
+	if !h.servable(clean) {
+		http.Error(w, "subtitle path outside allowed roots", http.StatusForbidden)
+		return
+	}
+	st, err := os.Stat(clean)
+	if err != nil {
+		http.Error(w, "subtitle file missing", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", mime)
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Last-Modified", st.ModTime().UTC().Format(http.TimeFormat))
+	http.ServeFile(w, r, clean)
+}
+
+// fontMIME is the wire MIME of a package's font file by the catalog's format
+// (RFC 8081); a font of no format is bytes.
+var fontMIME = map[string]string{
+	"ttf":   "font/ttf",
+	"otf":   "font/otf",
+	"ttc":   "font/collection",
+	"woff":  "font/woff",
+	"woff2": "font/woff2",
+	"":      "application/octet-stream",
+}
+
+// Font serves a font file of the package an item plays at
+// /api/play/fonts/{fontID}.{ext} (ext the font's format, bin for none of
+// them: advisory, as a subtitle's is), for a player that draws styled
+// subtitles. The id is resolved via katalog-api /api/v1/fonts/{id}/asset and
+// the file served under the roots a subtitle is. A font's id is the same for
+// the same place in the same package, also in a package store's package made
+// again, so a font is cached for a day and then asked for again — a 304
+// while it is unchanged, by its ETag (which chino-api's proxy passes on) or
+// its time — not for good as a subtitle is.
+func (h *Handler) Font(w http.ResponseWriter, r *http.Request) {
+	fontID := chi.URLParam(r, "fontID")
+	if fontID == "" {
+		http.Error(w, "missing font id", http.StatusBadRequest)
+		return
+	}
+	a, err := h.Catalog.FontAssetByID(r.Context(), fontID, bearerFrom(r))
+	if err != nil {
+		if errors.Is(err, catalog.ErrNotFound) {
+			http.Error(w, "unknown font id", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "catalog: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	mime, known := fontMIME[a.Format]
+	if !known {
+		http.Error(w, "unsupported font format "+a.Format, http.StatusBadGateway)
+		return
+	}
+	clean := filepath.Clean(a.Path)
+	if !h.servable(clean) {
+		http.Error(w, "font path outside allowed roots", http.StatusForbidden)
+		return
+	}
+	st, err := os.Stat(clean)
+	if err != nil {
+		http.Error(w, "font file missing", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", mime)
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Set("ETag", fmt.Sprintf(`"%x-%x"`, st.Size(), st.ModTime().UnixNano()))
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Last-Modified", st.ModTime().UTC().Format(http.TimeFormat))
+	http.ServeFile(w, r, clean)
+}
+
+// servable reports whether a clean path is one a subtitle or a font of a
+// package is served from: under the media root, or in the package store.
+func (h *Handler) servable(clean string) bool {
+	return underRoot(clean, legacyPackageStore) || (h.MediaRoot != "" && underRoot(clean, h.MediaRoot))
 }
 
 // legacyPackageStore is the package store of the packages from before the
