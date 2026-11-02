@@ -2,6 +2,7 @@ package play
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -93,7 +94,7 @@ func TestExtraMasterIsTheClientsShareOfItsLadder(t *testing.T) {
 // their URIs carrying the request's query, the init segments and the media
 // segments (ranges and all), the I-frame playlists, and a WebVTT rendition
 // where the package has one. What the package has not, and the routes of an
-// item that an extra has none of (trickplay, /info), are 404.
+// item that an extra has none of (trickplay), are 404.
 func TestExtraRenditionsAreServed(t *testing.T) {
 	h := &HLSHandler{Packages: stagePackages(t, nil, extraTrailer)}
 	const query = "?stream=dXNlci0xfDE3OTEwNjI5NDM.c2ln&caps=avc,aac"
@@ -157,7 +158,7 @@ func TestExtraRenditionsAreServed(t *testing.T) {
 
 	for _, route := range []string{
 		"v2/playlist.m3u8", "a1/init.mp4", "v0/seg-00009.m4s", "v1/seg-00001.vtt", "s0/init.mp4", "s1/seg-00001.vtt",
-		"a0/iframes.m3u8", "trickplay/thumbnails.vtt", "trickplay/sprite-1.jpg", "info", "master.m3u8/x",
+		"a0/iframes.m3u8", "trickplay/thumbnails.vtt", "trickplay/sprite-1.jpg", "info/x", "master.m3u8/x",
 	} {
 		if w := get(h, url(route)); w.Code != http.StatusNotFound {
 			t.Errorf("%s: %d, want 404", route, w.Code)
@@ -166,15 +167,15 @@ func TestExtraRenditionsAreServed(t *testing.T) {
 }
 
 // An extra plays only under its own title, once it is complete: every route
-// of it is 404 under another title than the one katalog-api answers it as
-// an extra of (a packaged one, one without a package, the extra's own id),
-// for an extra katalog-api does not know (not packaged, removed) or answers
-// with no title, while its package is not complete (.complete missing), and
-// for an id that is no UUID or the id of an item's package. When
-// katalog-api answers it as another title's, that title's it is from the
-// next lookup on; while katalog-api cannot say, 502.
+// of it, its /info too, is 404 under another title than the one katalog-api
+// answers it as an extra of (a packaged one, one without a package, the
+// extra's own id), for an extra katalog-api does not know (not packaged,
+// removed) or answers with no title, while its package is not complete
+// (.complete missing), and for an id that is no UUID or the id of an item's
+// package. When katalog-api answers it as another title's, that title's it
+// is from the next lookup on; while katalog-api cannot say, 502.
 func TestAnExtraIsServedOnlyUnderItsTitle(t *testing.T) {
-	routes := []string{"master.m3u8", "v0/playlist.m3u8", "a0/playlist.m3u8", "v0/iframes.m3u8", "v0/init.mp4",
+	routes := []string{"master.m3u8", "info", "v0/playlist.m3u8", "a0/playlist.m3u8", "v0/iframes.m3u8", "v0/init.mp4",
 		"v0/seg-00001.m4s", "a0/seg-00004.m4s"}
 	var h *HLSHandler
 	codes := func(item, extra string) map[string]int {
@@ -264,6 +265,102 @@ func TestALibraryExtraIsServed(t *testing.T) {
 	}
 	if w := get(h, extraURL(libExtra, libExtra, "master.m3u8")); w.Code != 404 {
 		t.Errorf("under its own id: %d", w.Code)
+	}
+}
+
+// extraInfo is GET /api/play/{item}/extras/{extra}/info{query} on h: its
+// fields as a client reads them, and each as it is on the wire.
+func extraInfo(t *testing.T, h *HLSHandler, item, extra, query string) (playInfo, map[string]json.RawMessage) {
+	t.Helper()
+	w := get(h, extraURL(item, extra, "info"+query))
+	var info playInfo
+	var raw map[string]json.RawMessage
+	if w.Code != 200 || w.Header().Get("Content-Type") != "application/json" ||
+		json.Unmarshal(w.Body.Bytes(), &info) != nil || json.Unmarshal(w.Body.Bytes(), &raw) != nil {
+		t.Fatalf("info%s: %d %q %q", query, w.Code, w.Header().Get("Content-Type"), w.Body)
+	}
+	return info, raw
+}
+
+// An extra's /info is a title's /play/info of its package, for the client
+// its master serves: packaged for one that decodes a rung of it (the rung it
+// starts on or picked with q, the rungs it may pick, the extra's own title),
+// on the fly for one that decodes none, by the same caps and q. Its
+// pictureArea is the extra's own answer's, of the frame served, the same
+// fractions on each rung; none where katalog-api answers none. An extra in
+// the library names no title, as its title's records are not its own. Under
+// another title, 404, as on every route of the extra.
+func TestAnExtrasInfoIsItsPackagesAsItsMasterServesIt(t *testing.T) {
+	stagePackages(t, nil, extraTrailer)
+	dir := filepath.Join(testPackagesRoot, "extras", extraTrailer[:2], extraTrailer)
+	f := newFakeLibrary(t)
+	// The trailer's 1280x720 frame, letterboxed as letterbox is in 1920x1080.
+	area := &catalog.PictureArea{FrameWidth: 1280, FrameHeight: 720, Y: 92, Width: 1280, Height: 536}
+	f.setExtra(catalog.ExtraPlayback{ExtraID: extraTrailer, ItemID: pkgStereoLadder, Dir: dir, Record: "manifest.json", PictureArea: area})
+	h := &HLSHandler{Packages: f.resolver()}
+	ladder := []string{"auto Auto", "v0 Medium (720p)", "v1 Low (480p)"}
+	for _, tc := range []struct {
+		name, query, mode, codec string
+		w, h                     int
+		qualities                []string
+	}{
+		{"packaged", "?caps=avc,aac", "packaged", "avc1.64001f", 1280, 720, ladder},
+		{"a rung picked", "?caps=avc,aac&q=v1", "packaged", "avc1.64001e", 854, 480, ladder},
+		{"no caps (the default set)", "", "packaged", "avc1.64001f", 1280, 720, ladder},
+		{"a client that decodes no H.264: on the fly", "?caps=hvc,aac", "transcode", "h264", 1280, 720,
+			[]string{"high Medium (720p)", "medium Medium (720p)", "low Low (480p)"}},
+	} {
+		info, raw := extraInfo(t, h, pkgStereoLadder, extraTrailer, tc.query)
+		if info.Mode != tc.mode || info.VideoCodec != tc.codec || info.Width != tc.w || info.Height != tc.h {
+			t.Errorf("%s: %s %s %dx%d, want %s %s %dx%d", tc.name, info.Mode, info.VideoCodec, info.Width, info.Height, tc.mode, tc.codec, tc.w, tc.h)
+		}
+		if got := qualityNames(info.Qualities); !reflect.DeepEqual(got, tc.qualities) {
+			t.Errorf("%s: qualities %v, want %v", tc.name, got, tc.qualities)
+		}
+		if got := names(t, info.AudioTracks); !reflect.DeepEqual(got, []string{"English"}) {
+			t.Errorf("%s: audio tracks %v", tc.name, got)
+		}
+		if string(raw["filename"]) != `"Trailer"` || string(raw["pictureArea"]) != letterboxInfo {
+			t.Errorf("%s: filename %s, pictureArea %s, want \"Trailer\", %s", tc.name, raw["filename"], raw["pictureArea"], letterboxInfo)
+		}
+	}
+	if w := get(h, extraURL(pkgLadder, extraTrailer, "info?caps=avc,aac")); w.Code != http.StatusNotFound {
+		t.Errorf("under another title: %d %q, want 404", w.Code, w.Body)
+	}
+
+	// No area answered: none said.
+	f.setExtra(catalog.ExtraPlayback{ExtraID: extraTrailer, ItemID: pkgStereoLadder, Dir: dir, Record: "manifest.json"})
+	h = &HLSHandler{Packages: f.resolver()}
+	for _, query := range []string{"?caps=avc,aac", "?caps=hvc,aac"} {
+		if _, raw := extraInfo(t, h, pkgStereoLadder, extraTrailer, query); raw["pictureArea"] != nil {
+			t.Errorf("%s without an area: pictureArea %s", query, raw["pictureArea"])
+		}
+	}
+
+	// A record that cannot be read: the master is served as packaged, and
+	// the extra described by it alone - its rungs, no frame to say an area
+	// of.
+	captureLog(t)
+	f.setExtra(catalog.ExtraPlayback{ExtraID: extraTrailer, ItemID: pkgStereoLadder, Dir: dir, Record: "manifest.json", PictureArea: area})
+	h = &HLSHandler{Packages: f.resolver()}
+	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if info, raw := extraInfo(t, h, pkgStereoLadder, extraTrailer, "?caps=avc,aac"); info.Mode != "packaged" ||
+		!reflect.DeepEqual(qualityNames(info.Qualities), ladder) || raw["pictureArea"] != nil {
+		t.Errorf("an unreadable record: %+v, pictureArea %s", info, raw["pictureArea"])
+	}
+
+	// In the library: no title of its own on the storage, never its title's.
+	l := stageLibrary(t)
+	l.katalog.setExtra(catalog.ExtraPlayback{ExtraID: libExtra, ItemID: libItem, Dir: filepath.Join(l.item, "extras", libExtra),
+		Record: "package.json", PictureArea: area})
+	h = &HLSHandler{Packages: l.packages}
+	for _, query := range []string{"?caps=avc,aac", "?caps=hvc,aac"} {
+		if info, raw := extraInfo(t, h, libItem, libExtra, query); string(raw["filename"]) != `""` ||
+			string(raw["pictureArea"]) != letterboxInfo || info.Width != 1280 {
+			t.Errorf("a library extra%s: filename %s, pictureArea %s, %dx%d", query, raw["filename"], raw["pictureArea"], info.Width, info.Height)
+		}
 	}
 }
 

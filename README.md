@@ -68,6 +68,7 @@ Dockerfile
 | GET    | `/api/play/{itemId}/{high\|medium\|low}/…`, `copy/…`, `audio/{n}/…` | on-the-fly HLS |
 | GET    | `/api/play/{itemId}/video/…`, `audiocopy{n}/…`, `surround{n}/…` | an original's stream copy ([below](#what-an-original-plays-as)) |
 | GET    | `/api/play/{itemId}/extras/{extraId}/master.m3u8` | an extra's HLS master ([below](#extras)) |
+| GET    | `/api/play/{itemId}/extras/{extraId}/info`   | an extra's playback info, as a title's |
 | GET    | `/api/play/{itemId}/extras/{extraId}/{vN\|aN\|sN}/…` | its renditions, as a packaged title's |
 | GET    | `/api/play/{itemId}/extras/{extraId}/{high\|medium\|low}/…`, `audio/{n}/…` | its on-the-fly HLS |
 
@@ -622,6 +623,7 @@ trickplay, wherever katalog-api answers them: in the library
 
 ```
 GET /api/play/{itemId}/extras/{extraId}/master.m3u8            ?stream=&caps=&q=
+GET /api/play/{itemId}/extras/{extraId}/info                   ?stream=&caps=&q=
 GET /api/play/{itemId}/extras/{extraId}/{vN|aN|sN}/playlist.m3u8
 GET /api/play/{itemId}/extras/{extraId}/{vN|aN}/iframes.m3u8, init.mp4, seg-{n}.m4s
 GET /api/play/{itemId}/extras/{extraId}/{sN}/seg-{n}.vtt
@@ -638,9 +640,15 @@ GET /api/play/{itemId}/extras/{extraId}/audio/{n}/index.m3u8, init.mp4, {n}.m4s
   URIs carrying the request's query. Extras are packaged HEVC only too: a
   client that decodes none of an extra's rungs gets its on-the-fly master,
   transcoded from the extra's package as a title's is.
+- `/info` is a packaged title's `/info` of the extra's package, by the same
+  `caps` and `q` - or, for a client that decodes none of its rungs, the
+  on-the-fly master's, as a title's on the fly from its package - with the
+  extra's own `pictureArea` (katalog-api's answer for the extra). An extra
+  in the library has no title on the storage: its `filename` is empty,
+  never its title's name.
 - An extra is no item: it is not among the packaged ids nor in the Zap pool,
-  it has no `/info`, `/prewarm` or trickplay, and `/api/play/{extraId}/…`
-  finds no package of it.
+  it has no `/prewarm` or trickplay, and `/api/play/{extraId}/…` finds no
+  package of it.
 
 ## Configuration
 

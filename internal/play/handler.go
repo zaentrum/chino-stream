@@ -39,8 +39,8 @@ type Handler struct {
 	TranscodePreset string
 	// UseNVENC is reflected in /play/info so the player's Playback info
 	// dialog can show the user whether their transcode is happening on
-	// GPU (h264_nvenc) or CPU (libx264). Set from the same env var as
-	// HLSHandler.UseNVENC.
+	// GPU (h264_nvenc) or CPU (libx264) — HLS's, which plays the session,
+	// when it is set. Set from the same env var as HLSHandler.UseNVENC.
 	UseNVENC bool
 	// AACEncoder is the ffmpeg AAC encoder the progressive pipeline uses,
 	// as DetectAACEncoder found it ("" = the native aac encoder).
@@ -848,34 +848,11 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 
 	planner := h.HLS
 	if planner == nil {
-		planner = &HLSHandler{CacheDir: h.CacheDir, FFprobeBin: h.FFprobeBin, Live: h.Live}
+		planner = &HLSHandler{CacheDir: h.CacheDir, FFprobeBin: h.FFprobeBin, Live: h.Live, UseNVENC: h.UseNVENC}
 	}
 	// No original to read: the package, transcoded on the fly.
 	fromPackage := func(src *source) {
-		plan := planner.planOnTheFly(r.Context(), src, infoCaps, r.URL.Query().Get("q"))
-		mode, reason := plan.mode, plan.reason
-		title := src.mf.Title
-		if title == "" && src.pkg.library() {
-			title, _ = libraryTitle(src.pkg.dir)
-		}
-		// A client that decodes the package's 5.1 companions is served
-		// them with the stereo tracks (onTheFlyUnion): listed so. A native
-		// player gets them as a second group of the same tracks
-		// (onTheFlyMirror): its tracks as ever, each a companion plays
-		// there marked "surround".
-		var audio []map[string]any
-		if union := onTheFlyUnion(src, infoCaps); union != nil {
-			audio = onTheFlyInfoTracks(union)
-		} else if mirror := onTheFlyMirror(src, infoCaps); mirror != nil {
-			audio = infoTracks(src.probe.AudioTracks, audioRenditionNames(src.probe.AudioTracks))
-			for i, c := range mirror {
-				if i < len(audio) && c.companion() {
-					audio[i]["surround"] = map[string]any{"group": onTheFlySurroundGroup, "rendition": c.rendition,
-						"codec": codecName(c.codec), "channels": c.channels}
-				}
-			}
-		}
-		h.writeSourceInfo(w, title, src.probe, mode, reason, audio, infoCaps.MaxVideoHeight(), false, area)
+		planner.writePackageSourceInfo(w, r, src, infoCaps, area)
 	}
 	path, err := h.Catalog.PrimaryAssetPath(r.Context(), itemID, bearerFrom(r))
 	if err != nil {
@@ -925,7 +902,37 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 	// "Original" where it plays the original as it is, as its master names
 	// it - the stream copy a client steps down from and back up to.
 	highOriginal := q != "" && q != "high" && planner.playsOriginal(src, planner.planOnTheFly(r.Context(), src, infoCaps, "high"))
-	h.writeSourceInfo(w, filepath.Base(clean), &probe, plan.mode, plan.reason, nil, infoCaps.MaxVideoHeight(), highOriginal, area)
+	planner.writeSourceInfo(w, filepath.Base(clean), &probe, plan.mode, plan.reason, nil, infoCaps.MaxVideoHeight(), highOriginal, area)
+}
+
+// writePackageSourceInfo answers /play/info for the package src played on
+// the fly, an item's or an extra's, for a client with caps: the plan of the
+// master it is served (planOnTheFly, the request's q), the package's title,
+// its audio tracks as that master serves them, and pictureArea of
+// katalog-api's area for the frame transcoded, the package's top rendition.
+func (h *HLSHandler) writePackageSourceInfo(w http.ResponseWriter, r *http.Request, src *source, caps Caps, area *catalog.PictureArea) {
+	plan := h.planOnTheFly(r.Context(), src, caps, r.URL.Query().Get("q"))
+	title := src.mf.Title
+	if title == "" && src.pkg.library() {
+		title, _ = libraryTitle(src.pkg.dir)
+	}
+	// A client that decodes the package's 5.1 companions is served them with
+	// the stereo tracks (onTheFlyUnion): listed so. A native player gets them
+	// as a second group of the same tracks (onTheFlyMirror): its tracks as
+	// ever, each a companion plays there marked "surround".
+	var audio []map[string]any
+	if union := onTheFlyUnion(src, caps); union != nil {
+		audio = onTheFlyInfoTracks(union)
+	} else if mirror := onTheFlyMirror(src, caps); mirror != nil {
+		audio = infoTracks(src.probe.AudioTracks, audioRenditionNames(src.probe.AudioTracks))
+		for i, c := range mirror {
+			if i < len(audio) && c.companion() {
+				audio[i]["surround"] = map[string]any{"group": onTheFlySurroundGroup, "rendition": c.rendition,
+					"codec": codecName(c.codec), "channels": c.channels}
+			}
+		}
+	}
+	h.writeSourceInfo(w, title, src.probe, plan.mode, plan.reason, audio, caps.MaxVideoHeight(), false, area)
 }
 
 // writeSourceInfo answers /play/info for an on-the-fly source: its file
@@ -937,10 +944,11 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 // the master sends a new session there (a worker not ready sends it to
 // ffmpeg, which names the rungs alike but for a source of unknown size).
 // highOriginal names q=high "Original": it plays the original as it is
-// (playsOriginal), whatever rung was asked for. pictureArea is
-// katalog-api's picture area (area) as fractions of the source's frame,
+// (playsOriginal), whatever rung was asked for. The live worker and the
+// encoder are those of this pipeline, which plays the session. pictureArea
+// is katalog-api's picture area (area) as fractions of the source's frame,
 // whose shape every rung keeps (infoPictureArea).
-func (h *Handler) writeSourceInfo(w http.ResponseWriter, filename string, probe *Probe, mode, reason string, audio []map[string]any, maxHeight int, highOriginal bool, area *catalog.PictureArea) {
+func (h *HLSHandler) writeSourceInfo(w http.ResponseWriter, filename string, probe *Probe, mode, reason string, audio []map[string]any, maxHeight int, highOriginal bool, area *catalog.PictureArea) {
 	// Surface the available quality rungs so the client can render a
 	// picker, each named by the frame it encodes for this source and
 	// client (onTheFlyQualities), as its master names its variant.
@@ -950,11 +958,7 @@ func (h *Handler) writeSourceInfo(w http.ResponseWriter, filename string, probe 
 	// stream-copy video eventually (see Master).
 	var ladder []map[string]string
 	if mode == "transcode" {
-		lw := h.Live
-		if h.HLS != nil {
-			lw = h.HLS.Live
-		}
-		ladder = onTheFlyQualities(probe, maxHeight, lw.On(), highOriginal)
+		ladder = onTheFlyQualities(probe, maxHeight, h.Live.On(), highOriginal)
 	}
 	// Encoder hint for the Playback info dialog. Meaningful for the
 	// transcode and remux paths (both run the video encoder on HLS);

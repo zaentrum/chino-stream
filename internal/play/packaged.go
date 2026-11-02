@@ -1110,8 +1110,12 @@ func readManifest(path string, decode func([]byte) (*pkgmanifest.Manifest, error
 // metadata.json, which katalog-manager projects whenever the catalog
 // changes, else the title its item.json was created with. A version's
 // package.json names no item; the item's own records do. "" when neither
-// can be read.
+// can be read, and for an extra's folder (<title>/extras/<extraId>): the
+// records two folders up are its title's, whose name is not the extra's.
 func libraryTitle(dir string) (string, int) {
+	if filepath.Base(filepath.Dir(dir)) == "extras" {
+		return "", 0
+	}
 	item := filepath.Dir(filepath.Dir(dir)) // <item>/versions/<versionId>
 	if title, year := recordTitle(filepath.Join(item, "metadata.json")); title != "" {
 		return title, year

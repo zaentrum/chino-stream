@@ -3,12 +3,14 @@ package play
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"regexp"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/zaentrum/chino-stream/internal/catalog"
+	"github.com/zaentrum/chino-stream/internal/pkgmanifest"
 )
 
 // A title's extras: its trailers, teasers, featurettes and other bonus
@@ -19,9 +21,10 @@ import (
 // it the package store's extras/{shard2}/{extraId}/, read by its
 // manifest.json. Either is laid out as an item's package, without trickplay.
 // It is served under its title's id, with the routes of an item's packaged
-// renditions:
+// renditions, and its /info:
 //
 //	/api/play/{itemId}/extras/{extraId}/master.m3u8
+//	/api/play/{itemId}/extras/{extraId}/info
 //	/api/play/{itemId}/extras/{extraId}/{vN|aN|sN}/playlist.m3u8
 //	/api/play/{itemId}/extras/{extraId}/{vN|aN}/iframes.m3u8, init.mp4, seg-{n}.m4s
 //	/api/play/{itemId}/extras/{extraId}/{sN}/seg-{n}.vtt
@@ -45,6 +48,11 @@ import (
 //	/api/play/{itemId}/extras/{extraId}/{high|medium|low}/index.m3u8, init.mp4, {n}.m4s
 //	/api/play/{itemId}/extras/{extraId}/audio/{n}/index.m3u8, init.mp4, {n}.m4s
 //
+// Its /info is a title's /play/info of its package as the master serves it:
+// packaged, or for a client that decodes none of its rungs on the fly, by
+// the same ?caps= and ?q=, with the picture area katalog-api answers for the
+// extra.
+//
 // An extra is no item: katalog-api lists it in neither the packaged ids nor
 // answers it as an item, so it is not in the Zap pool, and
 // /api/play/{extraId}/… finds no package.
@@ -56,6 +64,7 @@ var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 // /api/play/{itemId}/extras/{extraId}.
 func (h *HLSHandler) extraRoutes(r chi.Router) {
 	r.Get("/master.m3u8", h.ExtraMaster)
+	r.Get("/info", h.ExtraInfo)
 	// The live path from the extra's package (requestSource reads extraId).
 	r.Get("/{quality:(high|medium|low)}/index.m3u8", h.Playlist)
 	r.Get("/{quality:(high|medium|low)}/init.mp4", h.InitSegment)
@@ -160,6 +169,40 @@ func (h *HLSHandler) ExtraMaster(w http.ResponseWriter, r *http.Request) {
 	servePlaylistCachedTransform(w, r, path, r.URL.RawQuery, retry, func(body string) string {
 		return nameVariants(serveLadder(body, caps, q, twinsOf(mf)).body, originalRungs(mf))
 	})
+}
+
+// ExtraInfo answers an extra's /info as Info answers a title's /play/info,
+// for the client the master serves (ExtraMaster): the packaged info of its
+// package (writePackagedInfo), or for a client that decodes none of its
+// rungs the on-the-fly master's (writePackageSourceInfo), by ?caps= and ?q=
+// alike; its pictureArea from katalog-api's answer for the extra. 404 and
+// 502 as the extra's other routes (servedExtra).
+func (h *HLSHandler) ExtraInfo(w http.ResponseWriter, r *http.Request) {
+	p := h.servedExtra(w, r)
+	if p == nil {
+		return
+	}
+	extraID := chi.URLParam(r, "extraId")
+	// The answer servedExtra was given, as it is cached.
+	var area *catalog.PictureArea
+	if x, err := h.Packages.extra(r.Context(), extraID, false); err == nil {
+		area = x.PictureArea
+	}
+	caps := ParseCaps(r.URL.Query().Get("caps"))
+	mf, err := readPkgManifest(p)
+	if err != nil {
+		// Its master is served as packaged then, and so it is described:
+		// by the master alone.
+		log.Printf("extra %s: its record cannot be read: %v", extraID, err)
+		mf = &pkgmanifest.Manifest{}
+	}
+	if len(mf.Renditions.Video) > 0 && !packagedPlayableBy(mf, caps) {
+		probe := packageProbe(mf)
+		src := &source{key: sourceKey("extra/"+extraID, p), pkg: p, mf: mf, probe: &probe}
+		h.writePackageSourceInfo(w, r, src, caps, area)
+		return
+	}
+	writePackagedInfo(w, p, mf, caps, r.URL.Query().Get("q"), area)
 }
 
 // ExtraRenditionPlaylist serves the media playlist of an extra's video,
