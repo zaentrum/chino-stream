@@ -48,7 +48,7 @@ func (h *HLSHandler) packagedFile(r *http.Request, rel ...string) (path string, 
 	}
 	return p.path(rel...), func() string {
 		h.Packages.forgetComplete(p.dir)
-		again, err := h.Packages.itemPackageAgain(r.Context(), itemID, pin, false)
+		again, _, err := h.Packages.itemPackageAgain(r.Context(), itemID, pin, false)
 		if err != nil || again == nil || again.dir == p.dir {
 			return ""
 		}
@@ -1048,7 +1048,9 @@ func readPkgManifest(p *pkgDir) (*pkgmanifest.Manifest, error) {
 // gate on, with pin) and its manifest: the item resolved once more when the
 // package's record is missing — its folder removed since katalog-api
 // answered (a version past its grace) — as a missing file of it is. mf is
-// nil when the record cannot be read.
+// nil when the record cannot be read. The answer is the one the package was
+// chosen from: the new one after it was resolved once more, whose picture
+// area is of the file it names.
 func (r *Resolver) itemPackageManifest(ctx context.Context, itemID, pin string) (*pkgDir, *pkgmanifest.Manifest, catalog.Playback, error) {
 	p, a, err := r.itemPackage(ctx, itemID, pin, true)
 	if err != nil || p == nil {
@@ -1057,9 +1059,11 @@ func (r *Resolver) itemPackageManifest(ctx context.Context, itemID, pin string) 
 	mf, err := readPkgManifest(p)
 	if errors.Is(err, fs.ErrNotExist) {
 		r.forgetComplete(p.dir)
-		if p, err = r.itemPackageAgain(ctx, itemID, pin, true); err != nil || p == nil {
+		var again catalog.Playback
+		if p, again, err = r.itemPackageAgain(ctx, itemID, pin, true); err != nil || p == nil {
 			return nil, nil, a, err
 		}
+		a = again
 		mf, err = readPkgManifest(p)
 	}
 	if err != nil {
@@ -1177,8 +1181,10 @@ func recordTitle(path string) (string, int) {
 // variant of the master it is served for caps and q. qualities is the
 // choice it may offer (packagedQualities) — null for a package with one
 // rendition, as before — and default_quality is "auto": the client's
-// ladder, adaptive. Clients put the name they pick in ?q=.
-func writePackagedInfo(w http.ResponseWriter, p *pkgDir, mf *pkgmanifest.Manifest, caps Caps, q string) {
+// ladder, adaptive. Clients put the name they pick in ?q=. pictureArea is
+// katalog-api's picture area of the title (area) as fractions of that
+// rung's frame (infoPictureArea), where it says one of it.
+func writePackagedInfo(w http.ResponseWriter, p *pkgDir, mf *pkgmanifest.Manifest, caps Caps, q string, area *catalog.PictureArea) {
 	video := pkgmanifest.VideoRendition{}
 	if len(mf.Renditions.Video) > 0 {
 		video = mf.Renditions.Video[0]
@@ -1210,8 +1216,7 @@ func writePackagedInfo(w http.ResponseWriter, p *pkgDir, mf *pkgmanifest.Manifes
 	if filename == "" && p.library() {
 		filename, _ = libraryTitle(p.dir)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	info := map[string]any{
 		"filename":        filename,
 		"container":       "cmaf",
 		"video_codec":     video.Codec,
@@ -1225,7 +1230,12 @@ func writePackagedInfo(w http.ResponseWriter, p *pkgDir, mf *pkgmanifest.Manifes
 		"default_quality": "auto",
 		"audio_tracks":    audioTracks,
 		"subtitle_tracks": packagedSubtitleTracks(mf.Subtitles),
-	})
+	}
+	if pa := infoPictureArea(area, video.Width, video.Height); pa != nil {
+		info["pictureArea"] = pa
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(info)
 }
 
 // packagedAudioTracks are /play/info's audio_tracks of a package, one per

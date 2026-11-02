@@ -232,7 +232,9 @@ stream copy (no quality menu, as before), `transcode` for the ladder (high,
 medium, low, each by its [name](#quality-names)); its `reason` says what
 happens and why, as the player shows it: "The video plays as it is in the
 file. The audio is converted to stereo AAC, because this device does not
-play E-AC-3."
+play E-AC-3." Its `pictureArea` is where the picture is in the original's
+frame, as a package's is in its rung's
+([below](#packaged-playback-what-a-client-is-served)).
 
 ## Quality names
 
@@ -489,6 +491,7 @@ starts on and what it may pick:
 {
   "mode": "packaged",
   "video_codec": "avc1.64001f", "width": 1280, "height": 720,
+  "pictureArea": {"left": 0, "top": 0.1278, "width": 1, "height": 0.7444},
   "default_quality": "auto",
   "qualities": [
     {"name": "auto", "label": "Auto"},
@@ -503,6 +506,22 @@ starts on and what it may pick:
 
 - `video_codec`, `width`, `height`: the rung the client starts on (its
   ladder's first variant, or the one `q` picked).
+- `pictureArea`: where the picture is in that frame when the video keeps
+  black bars in it - a wider picture letterboxed in a 16:9 frame (a 2.39:1
+  film's 1920x804 at y=138 of 1920x1080, above), a narrower one pillarboxed
+  (1440x1080 at x=240: `left` 0.125, `width` 0.75). `left`, `top`, `width`
+  and `height` are fractions (0-1) of the coded frame: each edge rounded to
+  four decimals, `width` and `height` the distances between the edges. It is
+  the union of the picture over the whole title, as the analyzer measured it
+  once (katalog-api's `pictureArea`, in pixels of the frame measured; a
+  covered episode's is its holder's); a player fits that rectangle to the
+  screen rather than the whole frame. The fractions hold for every rung and
+  size of the frame. It is left out when katalog-api has none, when it is
+  the whole frame, and when the frame served has another shape than the one
+  measured (their aspect ratios more than 1% apart: a frame cropped to the
+  picture, say), as a crop that cuts the picture is far worse than one
+  missed. On the fly it is there alike, of the frame transcoded or copied:
+  the original's, or the package's top rendition.
 - `qualities`: `Auto` first, then one entry per quality name the client
   decodes at its heights, `Original` first, then tallest first, across
   families (a pick loads that rung's own master). `label` is the rung's

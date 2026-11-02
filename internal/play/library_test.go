@@ -81,7 +81,7 @@ func (f *fakeLibrary) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // wirePlayback is a as katalog-api writes it: a version id "" is null, a
-// zero completedAt omitted.
+// zero completedAt omitted, and so is a picture area it has none of.
 func wirePlayback(a catalog.Playback) map[string]any {
 	ref := func(r catalog.PackageRef) map[string]any {
 		m := map[string]any{"versionId": nil, "dir": r.Dir, "record": r.Record}
@@ -111,6 +111,9 @@ func wirePlayback(a catalog.Playback) map[string]any {
 			o["sourceId"] = a.Original.SourceID
 		}
 		out["original"] = o
+	}
+	if a.PictureArea != nil {
+		out["pictureArea"] = a.PictureArea
 	}
 	return out
 }

@@ -809,6 +809,10 @@ func (h *Handler) noOriginal(w http.ResponseWriter, r *http.Request, itemID stri
 // the package's .complete) and runs first, before the original is looked
 // up, so a packaged item doesn't kick off an ffprobe just to be told
 // something it doesn't apply to, and plays once its original is retired.
+//
+// In every mode pictureArea says where the picture is in the frame the
+// client is served, where katalog-api's answer has its area and the frame
+// is of the shape measured (picturearea.go).
 func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 	itemID := chi.URLParam(r, "itemId")
 	if itemID == "" {
@@ -822,10 +826,11 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 	// would happily mount the static stream, and the user would stare at
 	// a black frame at 00:00.
 	infoCaps := ParseCaps(r.URL.Query().Get("caps"))
-	if p, mf, _, err := h.Packages.itemPackageManifest(r.Context(), itemID, ""); p != nil {
+	p, mf, answer, err := h.Packages.itemPackageManifest(r.Context(), itemID, "")
+	if p != nil {
 		if packagedPlayableBy(mf, infoCaps) {
 			if mf != nil {
-				writePackagedInfo(w, p, mf, infoCaps, r.URL.Query().Get("q"))
+				writePackagedInfo(w, p, mf, infoCaps, r.URL.Query().Get("q"), answer.PictureArea)
 				return
 			}
 			// Manifest unreadable — fall through to the source-side probe
@@ -836,6 +841,10 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 	} else if err != nil && !errors.Is(err, catalog.ErrNotFound) {
 		log.Printf("resolve %s: %v", itemID, err)
 	}
+	// On the fly the picture area is that answer's too - katalog-api's, as
+	// it is cached; none when it could not say - of the frame played there:
+	// the package's top rendition, or the original's.
+	area := answer.PictureArea
 
 	planner := h.HLS
 	if planner == nil {
@@ -866,7 +875,7 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		h.writeSourceInfo(w, title, src.probe, mode, reason, audio, infoCaps.MaxVideoHeight(), false)
+		h.writeSourceInfo(w, title, src.probe, mode, reason, audio, infoCaps.MaxVideoHeight(), false, area)
 	}
 	path, err := h.Catalog.PrimaryAssetPath(r.Context(), itemID, bearerFrom(r))
 	if err != nil {
@@ -916,7 +925,7 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 	// "Original" where it plays the original as it is, as its master names
 	// it - the stream copy a client steps down from and back up to.
 	highOriginal := q != "" && q != "high" && planner.playsOriginal(src, planner.planOnTheFly(r.Context(), src, infoCaps, "high"))
-	h.writeSourceInfo(w, filepath.Base(clean), &probe, plan.mode, plan.reason, nil, infoCaps.MaxVideoHeight(), highOriginal)
+	h.writeSourceInfo(w, filepath.Base(clean), &probe, plan.mode, plan.reason, nil, infoCaps.MaxVideoHeight(), highOriginal, area)
 }
 
 // writeSourceInfo answers /play/info for an on-the-fly source: its file
@@ -928,8 +937,10 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 // the master sends a new session there (a worker not ready sends it to
 // ffmpeg, which names the rungs alike but for a source of unknown size).
 // highOriginal names q=high "Original": it plays the original as it is
-// (playsOriginal), whatever rung was asked for.
-func (h *Handler) writeSourceInfo(w http.ResponseWriter, filename string, probe *Probe, mode, reason string, audio []map[string]any, maxHeight int, highOriginal bool) {
+// (playsOriginal), whatever rung was asked for. pictureArea is
+// katalog-api's picture area (area) as fractions of the source's frame,
+// whose shape every rung keeps (infoPictureArea).
+func (h *Handler) writeSourceInfo(w http.ResponseWriter, filename string, probe *Probe, mode, reason string, audio []map[string]any, maxHeight int, highOriginal bool, area *catalog.PictureArea) {
 	// Surface the available quality rungs so the client can render a
 	// picker, each named by the frame it encodes for this source and
 	// client (onTheFlyQualities), as its master names its variant.
@@ -958,8 +969,7 @@ func (h *Handler) writeSourceInfo(w http.ResponseWriter, filename string, probe 
 	} else {
 		audioCodec = startCodec(audio)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	info := map[string]any{
 		"filename":        filename,
 		"container":       probe.Container,
 		"video_codec":     probe.VideoCodec,
@@ -974,7 +984,12 @@ func (h *Handler) writeSourceInfo(w http.ResponseWriter, filename string, probe 
 		"audio_tracks":    audio,
 		"subtitle_tracks": infoTracks(probe.SubtitleTracks, subtitleNames(probe.SubtitleTracks)),
 		"encoder":         encoder,
-	})
+	}
+	if pa := infoPictureArea(area, probe.Width, probe.Height); pa != nil {
+		info["pictureArea"] = pa
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(info)
 }
 
 // infoTracks are a source's tracks as /play/info lists them: as ffprobe

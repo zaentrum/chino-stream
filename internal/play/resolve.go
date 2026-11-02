@@ -308,12 +308,13 @@ func (r *Resolver) itemPackage(ctx context.Context, itemID, pin string, gate boo
 
 // itemPackageAgain is itemPackage once more after a file was missing from
 // the folder it answered: katalog-api is asked again (at most once a second).
-func (r *Resolver) itemPackageAgain(ctx context.Context, itemID, pin string, gate bool) (*pkgDir, error) {
+// The answer comes with it.
+func (r *Resolver) itemPackageAgain(ctx context.Context, itemID, pin string, gate bool) (*pkgDir, catalog.Playback, error) {
 	a, err := r.item(ctx, itemID, true)
 	if err != nil {
-		return nil, err
+		return nil, a, err
 	}
-	return r.choose(a, pin, gate), nil
+	return r.choose(a, pin, gate), a, nil
 }
 
 // choose picks the package to serve of answer a (see itemPackage).

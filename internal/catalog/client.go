@@ -145,6 +145,25 @@ type Playback struct {
 	Package   *PackageRef  `json:"package"`
 	Previous  []PackageRef `json:"previous"`
 	Original  *Original    `json:"original"`
+	// PictureArea is where the item's picture is in its frame, as the
+	// analyzer measured it (a covered episode's is its holder's, as its
+	// package is); nil when katalog-api answers none: unknown, measured of
+	// another file, or the whole frame.
+	PictureArea *PictureArea `json:"pictureArea,omitempty"`
+}
+
+// PictureArea is the rectangle of a title's frame its picture fills where the
+// video keeps black bars in the frame - a wider picture letterboxed in a 16:9
+// frame (1920x804 at y=138 of 1920x1080), a narrower one pillarboxed - in
+// pixels of the frame the analyzer measured (FrameWidth x FrameHeight): the
+// union of the picture over the whole title.
+type PictureArea struct {
+	FrameWidth  int `json:"frameWidth"`
+	FrameHeight int `json:"frameHeight"`
+	X           int `json:"x"`
+	Y           int `json:"y"`
+	Width       int `json:"width"`
+	Height      int `json:"height"`
 }
 
 // PackageRef is one package folder and the record it is read by. VersionID
@@ -167,13 +186,15 @@ type Original struct {
 }
 
 // ExtraPlayback is katalog-api's /api/v1/extras/{extraId}/playback: where a
-// packaged extra's package is, and the title it belongs to (ItemID).
+// packaged extra's package is, the title it belongs to (ItemID), and where
+// its picture is in its frame (nil for none, as an item's).
 type ExtraPlayback struct {
-	ExtraID    string    `json:"extraId"`
-	ItemID     string    `json:"itemId"`
-	Dir        string    `json:"dir"`
-	Record     string    `json:"record"` // "package.json" | "manifest.json"
-	PackagedAt time.Time `json:"packagedAt"`
+	ExtraID     string       `json:"extraId"`
+	ItemID      string       `json:"itemId"`
+	Dir         string       `json:"dir"`
+	Record      string       `json:"record"` // "package.json" | "manifest.json"
+	PackagedAt  time.Time    `json:"packagedAt"`
+	PictureArea *PictureArea `json:"pictureArea,omitempty"`
 }
 
 // Playback asks katalog-api where the item itemID plays from. ErrNotFound:

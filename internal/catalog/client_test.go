@@ -37,13 +37,14 @@ func katalog(t *testing.T, answers map[string]string) (*Client, *[]*http.Request
 // An item's playback answer, in the library and before it, as katalog-api
 // writes it: a version's id, folder, record and completion time; superseded
 // versions newest first; a package from before the library with a null
-// version and no completion time; a retired original as null.
+// version and no completion time; a retired original as null; the picture
+// area where it answers one, none where the key is absent.
 func TestPlayback(t *testing.T) {
 	c, reqs := katalog(t, map[string]string{
 		"/api/v1/items/f001aeff-9c18-4183-b51b-51403af2515e/playback": `{"itemId":"f001aeff-9c18-4183-b51b-51403af2515e","type":"movie",` +
 			`"package":{"versionId":"9a2e0000-0000-4000-8000-000000000001","dir":"/var/lib/katalog/movies/f0/f001aeff-9c18-4183-b51b-51403af2515e/versions/9a2e0000-0000-4000-8000-000000000001","record":"package.json","completedAt":"2026-10-06T09:00:00.123456Z"},` +
 			`"previous":[{"versionId":"77c10000-0000-4000-8000-000000000002","dir":"/var/lib/katalog/movies/f0/f001aeff-9c18-4183-b51b-51403af2515e/versions/77c10000-0000-4000-8000-000000000002","record":"package.json"}],` +
-			`"original":null}`,
+			`"original":null,"pictureArea":{"frameWidth":1920,"frameHeight":1080,"x":0,"y":138,"width":1920,"height":804}}`,
 		"/api/v1/items/1e9ac700-0000-4000-8000-000000000005/playback": `{"itemId":"1e9ac700-0000-4000-8000-000000000005","type":"episode",` +
 			`"package":{"versionId":null,"dir":"/var/lib/katalog/packages/shows/1e/1e9ac700-0000-4000-8000-000000000005","record":"manifest.json"},` +
 			`"previous":[],"original":{"path":"/var/lib/katalog/media/Show/S01E01.mkv","sourceId":null}}`,
@@ -68,6 +69,7 @@ func TestPlayback(t *testing.T) {
 			Dir:       "/var/lib/katalog/movies/f0/f001aeff-9c18-4183-b51b-51403af2515e/versions/77c10000-0000-4000-8000-000000000002",
 			Record:    "package.json",
 		}},
+		PictureArea: &PictureArea{FrameWidth: 1920, FrameHeight: 1080, X: 0, Y: 138, Width: 1920, Height: 804},
 	}
 	if !reflect.DeepEqual(p, want) {
 		t.Errorf("library answer\n got %+v\nwant %+v", p, want)
@@ -79,7 +81,7 @@ func TestPlayback(t *testing.T) {
 	}
 	if p.Package == nil || p.Package.VersionID != "" || p.Package.Record != "manifest.json" || !p.Package.CompletedAt.IsZero() ||
 		p.Package.Dir != "/var/lib/katalog/packages/shows/1e/1e9ac700-0000-4000-8000-000000000005" || len(p.Previous) != 0 ||
-		p.Original == nil || p.Original.Path != "/var/lib/katalog/media/Show/S01E01.mkv" || p.Original.SourceID != "" {
+		p.Original == nil || p.Original.Path != "/var/lib/katalog/media/Show/S01E01.mkv" || p.Original.SourceID != "" || p.PictureArea != nil {
 		t.Errorf("legacy answer: %+v %+v %+v", p, p.Package, p.Original)
 	}
 
@@ -100,7 +102,8 @@ func TestExtraPlayback(t *testing.T) {
 	c, _ := katalog(t, map[string]string{
 		"/api/v1/extras/16aa63f3-0000-4000-8000-000000000009/playback": `{"extraId":"16aa63f3-0000-4000-8000-000000000009",` +
 			`"itemId":"ea886f9b-0d06-4f0f-babb-d2a1162f9b01","dir":"/var/lib/katalog/movies/ea/ea886f9b-0d06-4f0f-babb-d2a1162f9b01/extras/16aa63f3-0000-4000-8000-000000000009",` +
-			`"record":"package.json","packagedAt":"2026-10-06T08:00:00Z"}`,
+			`"record":"package.json","packagedAt":"2026-10-06T08:00:00Z",` +
+			`"pictureArea":{"frameWidth":1920,"frameHeight":1080,"x":240,"y":0,"width":1440,"height":1080}}`,
 	})
 	x, err := c.ExtraPlayback(context.Background(), "16aa63f3-0000-4000-8000-000000000009")
 	if err != nil {
@@ -109,6 +112,9 @@ func TestExtraPlayback(t *testing.T) {
 	if x.ItemID != "ea886f9b-0d06-4f0f-babb-d2a1162f9b01" || x.Record != "package.json" ||
 		!strings.HasSuffix(x.Dir, "/extras/16aa63f3-0000-4000-8000-000000000009") || !x.PackagedAt.Equal(time.Date(2026, 10, 6, 8, 0, 0, 0, time.UTC)) {
 		t.Errorf("%+v", x)
+	}
+	if want := (PictureArea{FrameWidth: 1920, FrameHeight: 1080, X: 240, Width: 1440, Height: 1080}); x.PictureArea == nil || *x.PictureArea != want {
+		t.Errorf("picture area %+v, want %+v", x.PictureArea, want)
 	}
 	if _, err := c.ExtraPlayback(context.Background(), "16aa63f3-0000-4000-8000-00000000000a"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("an extra not packaged: %v, want ErrNotFound", err)
