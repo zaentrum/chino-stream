@@ -131,3 +131,30 @@ func TestPackagedIDs(t *testing.T) {
 		t.Errorf("503: %v", err)
 	}
 }
+
+// A subtitle's asset names the styled original its package keeps beside its
+// file, and a font's asset its file and format; an id of no font is
+// ErrNotFound.
+func TestStyledSubtitleAndFontAssets(t *testing.T) {
+	c, got := katalog(t, map[string]string{
+		"/api/v1/subtitles/s1/asset": `{"itemId": "i1", "path": "/v/subs/0.vtt", "format": "webvtt", "lang": "en",
+			"styledPath": "/v/subs/0.ass", "styledFormat": "ass"}`,
+		"/api/v1/fonts/f1/asset": `{"itemId": "i1", "path": "/v/subs/fonts/0.ttf", "format": "ttf"}`,
+	})
+	ctx := context.Background()
+	s, err := c.SubtitleAssetByID(ctx, "s1", "tok")
+	if want := (SubtitleAsset{ItemID: "i1", Path: "/v/subs/0.vtt", Format: "webvtt", Lang: "en",
+		StyledPath: "/v/subs/0.ass", StyledFormat: "ass"}); err != nil || s != want {
+		t.Errorf("SubtitleAssetByID: %+v %v, want %+v", s, err, want)
+	}
+	f, err := c.FontAssetByID(ctx, "f1", "tok")
+	if want := (FontAsset{ItemID: "i1", Path: "/v/subs/fonts/0.ttf", Format: "ttf"}); err != nil || f != want {
+		t.Errorf("FontAssetByID: %+v %v, want %+v", f, err, want)
+	}
+	if _, err := c.FontAssetByID(ctx, "nope", ""); !errors.Is(err, ErrNotFound) {
+		t.Errorf("FontAssetByID of no font: %v", err)
+	}
+	if len(*got) != 3 || (*got)[1].Header.Get("Authorization") != "Bearer tok" {
+		t.Errorf("requests: %d, the font's Authorization %q", len(*got), (*got)[1].Header.Get("Authorization"))
+	}
+}

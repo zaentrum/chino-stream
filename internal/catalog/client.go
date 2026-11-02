@@ -50,6 +50,29 @@ type SubtitleAsset struct {
 	Path   string `json:"path"`
 	Format string `json:"format,omitempty"`
 	Lang   string `json:"lang,omitempty"`
+	// StyledPath and StyledFormat are the styled original the package keeps
+	// beside the subtitle's file (an ASS or an SSA script, format "ass"),
+	// for a player that draws styles; empty for a subtitle without one.
+	StyledPath   string `json:"styledPath,omitempty"`
+	StyledFormat string `json:"styledFormat,omitempty"`
+}
+
+// FontAsset mirrors katalog-api /api/v1/fonts/{id}/asset: a font file of the
+// package an item plays (from the item detail's fonts[]), which a player
+// that draws styled subtitles loads. Format is ttf, otf, ttc, woff or
+// woff2, empty for bytes that are none of them.
+type FontAsset struct {
+	ItemID string `json:"itemId"`
+	Path   string `json:"path"`
+	Format string `json:"format,omitempty"`
+}
+
+// FontAssetByID fetches a font's file by its id. Returns ErrNotFound for
+// unknown ids, and from a katalog-api without fonts.
+func (c *Client) FontAssetByID(ctx context.Context, fontID, bearer string) (FontAsset, error) {
+	var a FontAsset
+	err := c.getJSON(ctx, fmt.Sprintf("/api/v1/fonts/%s/asset", url.PathEscape(fontID)), bearer, &a)
+	return a, err
 }
 
 // SubtitleAssetByID fetches the subtitle metadata for a sidecar id.
