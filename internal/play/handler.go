@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"mime"
 	"net/http"
@@ -289,9 +290,10 @@ var styledSubtitleMIME = map[string]string{
 // StyledSubtitle serves a subtitle's styled original — the ASS or SSA script
 // its package keeps beside its WebVTT file — at /api/play/subs/{subID}.ass,
 // for a player that draws styles. The subtitle's own URL (.vtt) is
-// unchanged; a subtitle without a styled original is 404 here. The id and
-// the roots are those of SidecarSubtitle, and so are the caching headers: a
-// subtitle's id is new with every package.
+// unchanged; a subtitle without a styled original is 404 here. The script is
+// served only from the subs/ of a package of the subtitle's title
+// (packageFile), its links followed; a subtitle's id is new with every
+// package, so it is cached for good, by the browser alone (private).
 func (h *Handler) StyledSubtitle(w http.ResponseWriter, r *http.Request) {
 	subID := chi.URLParam(r, "subID")
 	if subID == "" {
@@ -311,26 +313,12 @@ func (h *Handler) StyledSubtitle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "the subtitle has no styled original", http.StatusNotFound)
 		return
 	}
-	mime, known := styledSubtitleMIME[a.StyledFormat]
+	ctype, known := styledSubtitleMIME[a.StyledFormat]
 	if !known {
 		http.Error(w, "unsupported styled subtitle format "+a.StyledFormat, http.StatusBadGateway)
 		return
 	}
-	clean := filepath.Clean(a.StyledPath)
-	if !h.servable(clean) {
-		http.Error(w, "subtitle path outside allowed roots", http.StatusForbidden)
-		return
-	}
-	st, err := os.Stat(clean)
-	if err != nil {
-		http.Error(w, "subtitle file missing", http.StatusNotFound)
-		return
-	}
-	w.Header().Set("Content-Type", mime)
-	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Last-Modified", st.ModTime().UTC().Format(http.TimeFormat))
-	http.ServeFile(w, r, clean)
+	h.servePackageFile(w, r, a.ItemID, a.StyledPath, "subs", ctype, "private, max-age=31536000, immutable")
 }
 
 // fontMIME is the wire MIME of a package's font file by the catalog's format
@@ -348,11 +336,12 @@ var fontMIME = map[string]string{
 // /api/play/fonts/{fontID}.{ext} (ext the font's format, bin for none of
 // them: advisory, as a subtitle's is), for a player that draws styled
 // subtitles. The id is resolved via katalog-api /api/v1/fonts/{id}/asset and
-// the file served under the roots a subtitle is. A font's id is the same for
-// the same place in the same package, also in a package store's package made
-// again, so a font is cached for a day and then asked for again — a 304
-// while it is unchanged, by its ETag (which chino-api's proxy passes on) or
-// its time — not for good as a subtitle is.
+// the file served only from the subs/fonts/ of a package of the font's title
+// (packageFile), its links followed. A font's id is the same for the same
+// place in the same package, also in a package store's package made again,
+// so a font is cached for a day, by the browser alone (private), and then
+// asked for again — a 304 while it is unchanged, by its ETag (which
+// chino-api's proxy passes on) or its time — not for good as a subtitle is.
 func (h *Handler) Font(w http.ResponseWriter, r *http.Request) {
 	fontID := chi.URLParam(r, "fontID")
 	if fontID == "" {
@@ -368,31 +357,102 @@ func (h *Handler) Font(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "catalog: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	mime, known := fontMIME[a.Format]
+	ctype, known := fontMIME[a.Format]
 	if !known {
 		http.Error(w, "unsupported font format "+a.Format, http.StatusBadGateway)
 		return
 	}
-	clean := filepath.Clean(a.Path)
-	if !h.servable(clean) {
-		http.Error(w, "font path outside allowed roots", http.StatusForbidden)
+	h.servePackageFile(w, r, a.ItemID, a.Path, filepath.Join("subs", "fonts"), ctype, "private, max-age=86400")
+}
+
+// servePackageFile serves path, a file of the folder sub of a package of the
+// item itemID (packageFile), as ctype, cached as cache says, its bytes taken
+// for nothing but ctype (nosniff), with a validator a browser's revalidation
+// is answered 304 by.
+func (h *Handler) servePackageFile(w http.ResponseWriter, r *http.Request, itemID, path, sub, ctype, cache string) {
+	real, err := h.packageFile(r.Context(), itemID, path, sub)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		http.Error(w, "file missing", http.StatusNotFound)
+		return
+	case errors.Is(err, errOutsidePackage):
+		http.Error(w, "the file is no file of its title's package", http.StatusForbidden)
+		return
+	case err != nil:
+		http.Error(w, "catalog: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	st, err := os.Stat(clean)
-	if err != nil {
-		http.Error(w, "font file missing", http.StatusNotFound)
+	st, err := os.Stat(real)
+	if err != nil || !st.Mode().IsRegular() {
+		http.Error(w, "file missing", http.StatusNotFound)
 		return
 	}
-	w.Header().Set("Content-Type", mime)
-	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Set("Content-Type", ctype)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", cache)
 	w.Header().Set("ETag", fmt.Sprintf(`"%x-%x"`, st.Size(), st.ModTime().UnixNano()))
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Last-Modified", st.ModTime().UTC().Format(http.TimeFormat))
-	http.ServeFile(w, r, clean)
+	http.ServeFile(w, r, real)
 }
 
-// servable reports whether a clean path is one a subtitle or a font of a
-// package is served from: under the media root, or in the package store.
+// errOutsidePackage is a file that is no file of its title's package.
+var errOutsidePackage = errors.New("outside the title's package")
+
+// packageFile is path, a styled original's or a font's file as the catalog
+// names it, every link of it followed, when it lies in the folder sub (subs,
+// subs/fonts) of a package of the item itemID — the one it plays, or one a
+// session may still finish on (katalog-api's playback, resolve.go) — and
+// under a root packages are served from: a stored path is served only from
+// the package it belongs to. The answer the resolver keeps is asked for
+// again when it names no such folder: the item may be packaged anew since.
+// It answers fs.ErrNotExist for a file that is not there, errOutsidePackage
+// for one anywhere else.
+func (h *Handler) packageFile(ctx context.Context, itemID, path, sub string) (string, error) {
+	real, err := filepath.EvalSymlinks(filepath.Clean(path))
+	if err != nil {
+		return "", err
+	}
+	if !h.servableResolved(real) {
+		return "", errOutsidePackage
+	}
+	for _, again := range []bool{false, true} {
+		pb, err := h.Packages.item(ctx, itemID, again)
+		if errors.Is(err, catalog.ErrNotFound) {
+			return "", errOutsidePackage
+		}
+		if err != nil {
+			return "", err
+		}
+		refs := append([]catalog.PackageRef{}, pb.Previous...)
+		if pb.Package != nil {
+			refs = append(refs, *pb.Package)
+		}
+		for _, ref := range refs {
+			if dir, err := filepath.EvalSymlinks(filepath.Join(ref.Dir, sub)); err == nil && underRoot(real, dir) {
+				return real, nil
+			}
+		}
+	}
+	return "", errOutsidePackage
+}
+
+// servableResolved is servable of a path whose links are followed, each root
+// with its own followed too.
+func (h *Handler) servableResolved(real string) bool {
+	for _, root := range []string{legacyPackageStore, h.MediaRoot} {
+		if root == "" {
+			continue
+		}
+		if r, err := filepath.EvalSymlinks(root); err == nil && underRoot(real, r) {
+			return true
+		}
+	}
+	return false
+}
+
+// servable reports whether a clean path is one a subtitle of a package is
+// served from: under the media root, or in the package store.
 func (h *Handler) servable(clean string) bool {
 	return underRoot(clean, legacyPackageStore) || (h.MediaRoot != "" && underRoot(clean, h.MediaRoot))
 }
