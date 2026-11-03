@@ -57,8 +57,8 @@ Dockerfile
 | GET    | `/api/play/zap-feed`                         | zap discovery feed                  |
 | GET    | `/api/play/{itemId}/subtitles/{idx}.vtt`     | embedded subtitle track             |
 | GET    | `/api/play/subs/{subID}.vtt` (and `.sup`…)   | sidecar subtitle files (a SubRip one as WebVTT) |
-| GET    | `/api/play/subs/{subID}.ass`                 | a subtitle's styled original, its ASS or SSA script (`text/x-ssa`); 404 for a subtitle without one |
-| GET    | `/api/play/fonts/{fontID}.{ttf\|otf\|ttc\|woff\|woff2\|bin}` | a font of the package, for a player that draws styled subtitles (its MIME by the catalog's format) |
+| GET    | `/api/play/subs/{subID}.ass`                 | a subtitle's styled original, its ASS or SSA script (`text/x-ssa`), from the `subs/` of its title's package alone; 404 for a subtitle without one |
+| GET    | `/api/play/fonts/{fontID}.{ttf\|otf\|ttc\|woff\|woff2\|bin}` | a font of the package, for a player that draws styled subtitles (its MIME by the catalog's format), from the `subs/fonts/` of its title's package alone |
 | GET    | `/api/play/{itemId}/master.m3u8`             | HLS master (packaged or on the fly) |
 | POST   | `/api/play/{itemId}/prewarm`                 | warm the start of a title (202)     |
 | GET    | `/api/play/{itemId}/{vN\|aN}/playlist.m3u8`   | packaged video / audio rendition    |
@@ -76,6 +76,14 @@ stream token). The URIs inside a playlist carry the request's query, so the
 token, `caps` and `q` ride along on every fetch — and `v`, the version a
 session is pinned to, and `lw=1` on a session of the live pipeline
 ([below](#the-live-worker)).
+
+A styled original and a font are served only from the `subs/` (a font
+`subs/fonts/`) of a package of their own title, as katalog-api's playback
+lookup names its packages — the one it plays, or one a session may finish
+on — with every link of the path followed first; anything else is 403. They
+are cached by the browser alone (`private`: a script for good, its id new
+with every package, a font for a day, then revalidated by its `ETag`), and
+sent with `X-Content-Type-Options: nosniff`.
 
 ## Where a title plays from
 
