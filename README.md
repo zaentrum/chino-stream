@@ -237,6 +237,15 @@ play E-AC-3." Its `pictureArea` is where the picture is in the original's
 frame, as a package's is in its rung's
 ([below](#packaged-playback-what-a-client-is-served)).
 
+### The on-the-fly cache
+
+What the on-the-fly pipelines make is written under `HLS_CACHE_DIR`, per title, rung and
+segment, and later requests are served from there. Requests for a segment that is still being
+made wait for that one run instead of starting another, so N players on the same moment cost
+one encode. Every 10 minutes a sweep deletes what is older than 2 hours; the stream copy's
+indexes in `copy-index/` stay until unused for 30 days. The chart gives the cache a 5 GiB
+`emptyDir`, so each replica has its own, and it starts empty after a restart.
+
 ## Quality names
 
 chino-stream names every quality step by one fixed table of heights, so a
@@ -422,7 +431,7 @@ A packaged title's master, `/info` and `/prewarm` read the same query:
   (HEVC based). Without `caps` the default set applies: H.264, VP9, AV1,
   AAC, MP3, Opus, Vorbis — no HEVC.
   `native` says the client plays the master with the platform's own HLS
-  player — AVPlayer (the iOS and tvOS app), Safari's native HLS (chino-web
+  player — AVPlayer (the iOS app), Safari's native HLS (chino-web
   without MSE) — which picks between audio groups itself; it changes only
   how audio groups are served (rule 4), never what the client decodes.
 - `q` — `auto` (the default) or a rung id from `/info`'s `qualities`. The
@@ -670,6 +679,7 @@ All config is environment-driven (defaults in parentheses):
 | `LIVE_WORKER_URL`      | (none) — the live worker, e.g. `http://live-worker`  |
 | `LIVE_WORKER_MODE`     | `off` — `off`, `shadow` or `on` ([above](#the-live-worker)) |
 | `LIVE_WORKER_TOKEN`    | (none) — the worker's bearer token                   |
+| `STREAM_SIGNING_KEY`   | (none) — chino-api's stream-token key, base64; unset, a key of this process's own, which matches no token chino-api mints |
 
 ## Local development
 
