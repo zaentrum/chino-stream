@@ -192,7 +192,7 @@ func packets(t *testing.T, file, stream string) []packet {
 }
 
 // checkTiling checks a track of a copy, its init and segments joined: decode
-// times rising, each packet lasting until the next one's (no gap and no
+// times rising, each sample lasting until the next one's (no gap and no
 // overlap at any segment's edge), the first packet a keyframe.
 func checkTiling(t *testing.T, joined, stream string) []packet {
 	t.Helper()
@@ -203,13 +203,79 @@ func checkTiling(t *testing.T, joined, stream string) []packet {
 	if !ps[0].Key {
 		t.Errorf("%s: the first packet is no keyframe", stream)
 	}
-	for i := 1; i < len(ps); i++ {
-		if ps[i].DTS != ps[i-1].DTS+ps[i-1].Dur {
-			t.Errorf("%s: packet %d at %d, the one before ends at %d", stream, i, ps[i].DTS, ps[i-1].DTS+ps[i-1].Dur)
-			break
+	boxTiling(t, joined, stream)
+	return ps
+}
+
+// boxTiling checks from the copy's own boxes that a track tiles its timeline:
+// each fragment decoding (tfdt) from where the samples before it end, and no
+// sample without a duration (trun, or the tfhd's or trex's default): what a
+// player reads. Not from ffprobe: ffmpeg 7.1's demuxer shows the first packet
+// of a fragmented track without a duration (N/A), whatever its trun says,
+// where ffmpeg 9.0's shows the trun's.
+func boxTiling(t *testing.T, joined, stream string) {
+	t.Helper()
+	b, err := os.ReadFile(joined)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := mp4.DecodeFile(bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	trex := streamTrex(t, f, stream)
+	var end uint64
+	n := 0
+	for _, s := range f.Segments {
+		for _, fr := range s.Fragments {
+			samples, err := fr.GetFullSamples(trex)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, smp := range samples {
+				if n > 0 && smp.DecodeTime != end {
+					t.Errorf("%s: sample %d decodes at %d, the one before ends at %d", stream, n, smp.DecodeTime, end)
+					return
+				}
+				if smp.Dur == 0 {
+					t.Errorf("%s: sample %d (at %d) has no duration", stream, n, smp.DecodeTime)
+					return
+				}
+				end = smp.DecodeTime + uint64(smp.Dur)
+				n++
+			}
 		}
 	}
-	return ps
+	if n == 0 {
+		t.Fatalf("%s: no samples in the boxes", stream)
+	}
+}
+
+// streamTrex is the trex of a track of f given as ffprobe's stream
+// specifier: "v:0" its first video track, "a:1" its second audio track.
+func streamTrex(t *testing.T, f *mp4.File, stream string) *mp4.TrexBox {
+	t.Helper()
+	handler := map[byte]string{'v': "vide", 'a': "soun"}[stream[0]]
+	want, err := strconv.Atoi(strings.TrimPrefix(stream[1:], ":"))
+	if handler == "" || err != nil || f.Init == nil || f.Init.Moov == nil || f.Init.Moov.Mvex == nil {
+		t.Fatalf("%s: no such fragmented track", stream)
+	}
+	k := 0
+	for _, trak := range f.Init.Moov.Traks {
+		if trak.Mdia == nil || trak.Mdia.Hdlr == nil || trak.Mdia.Hdlr.HandlerType != handler {
+			continue
+		}
+		if k == want {
+			trex, ok := f.Init.Moov.Mvex.GetTrex(trak.Tkhd.TrackID)
+			if !ok {
+				t.Fatalf("%s: track %d has no trex", stream, trak.Tkhd.TrackID)
+			}
+			return trex
+		}
+		k++
+	}
+	t.Fatalf("%s: no such track", stream)
+	return nil
 }
 
 // fragments are the decode times at which each fragment of a joined track

@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/Eyevinn/mp4ff/mp4"
 	"github.com/go-chi/chi/v5"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -168,32 +169,94 @@ func proxied(uri string) bool {
 }
 
 // tiles checks a track of a copy, its init and segments joined: its first
-// packet a keyframe, decode times rising, each packet lasting until the next
-// one's — no gap and no overlap at any segment's edge.
+// packet a keyframe (presented at firstPTS, as ffprobe shows it), decode times
+// rising, each sample lasting until the next one's — no gap and no overlap at
+// any segment's edge.
 func tiles(t *testing.T, ffprobe, file, stream string) (firstPTS float64) {
 	t.Helper()
-	out := run(t, ffprobe, "-v", "error", "-select_streams", stream, "-show_entries", "packet=pts_time,dts,duration,flags", "-of", "csv=p=0", file)
-	var prevEnd int64 = -1 << 62
-	for i, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		f := strings.Split(l, ",")
-		if len(f) < 4 {
-			t.Fatalf("%s: packet line %q", stream, l)
-		}
-		pts, _ := strconv.ParseFloat(f[0], 64)
-		dts, _ := strconv.ParseInt(f[1], 10, 64)
-		dur, _ := strconv.ParseInt(f[2], 10, 64)
-		if i == 0 {
-			firstPTS = pts
-			if !strings.HasPrefix(f[3], "K") {
-				t.Errorf("%s: the first packet is no keyframe", stream)
-			}
-		} else if dts != prevEnd {
-			t.Errorf("%s: packet %d decodes at %d, the one before ends at %d", stream, i, dts, prevEnd)
-			return firstPTS
-		}
-		prevEnd = dts + dur
+	out := run(t, ffprobe, "-v", "error", "-select_streams", stream, "-show_entries", "packet=pts_time,flags", "-of", "csv=p=0", file)
+	first, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
+	f := strings.Split(first, ",")
+	if len(f) < 2 {
+		t.Fatalf("%s: packet line %q", stream, first)
 	}
+	firstPTS, _ = strconv.ParseFloat(f[0], 64)
+	if !strings.HasPrefix(f[1], "K") {
+		t.Errorf("%s: the first packet is no keyframe", stream)
+	}
+	boxTiling(t, file, stream)
 	return firstPTS
+}
+
+// boxTiling checks from the copy's own boxes that a track tiles its timeline:
+// each fragment decoding (tfdt) from where the samples before it end, and no
+// sample without a duration (trun, or the tfhd's or trex's default): what a
+// player reads. Not from ffprobe: ffmpeg 7.1's demuxer shows the first packet
+// of a fragmented track without a duration (N/A), whatever its trun says,
+// where ffmpeg 9.0's shows the trun's.
+func boxTiling(t *testing.T, file, stream string) {
+	t.Helper()
+	b, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := mp4.DecodeFile(bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	trex := streamTrex(t, f, stream)
+	var end uint64
+	n := 0
+	for _, s := range f.Segments {
+		for _, fr := range s.Fragments {
+			samples, err := fr.GetFullSamples(trex)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, smp := range samples {
+				if n > 0 && smp.DecodeTime != end {
+					t.Errorf("%s: sample %d decodes at %d, the one before ends at %d", stream, n, smp.DecodeTime, end)
+					return
+				}
+				if smp.Dur == 0 {
+					t.Errorf("%s: sample %d (at %d) has no duration", stream, n, smp.DecodeTime)
+					return
+				}
+				end = smp.DecodeTime + uint64(smp.Dur)
+				n++
+			}
+		}
+	}
+	if n == 0 {
+		t.Fatalf("%s: no samples in the boxes", stream)
+	}
+}
+
+// streamTrex is the trex of a track of f given as ffprobe's stream
+// specifier: "v:0" its first video track, "a:1" its second audio track.
+func streamTrex(t *testing.T, f *mp4.File, stream string) *mp4.TrexBox {
+	t.Helper()
+	handler := map[byte]string{'v': "vide", 'a': "soun"}[stream[0]]
+	want, err := strconv.Atoi(strings.TrimPrefix(stream[1:], ":"))
+	if handler == "" || err != nil || f.Init == nil || f.Init.Moov == nil || f.Init.Moov.Mvex == nil {
+		t.Fatalf("%s: no such fragmented track", stream)
+	}
+	k := 0
+	for _, trak := range f.Init.Moov.Traks {
+		if trak.Mdia == nil || trak.Mdia.Hdlr == nil || trak.Mdia.Hdlr.HandlerType != handler {
+			continue
+		}
+		if k == want {
+			trex, ok := f.Init.Moov.Mvex.GetTrex(trak.Tkhd.TrackID)
+			if !ok {
+				t.Fatalf("%s: track %d has no trex", stream, trak.Tkhd.TrackID)
+			}
+			return trex
+		}
+		k++
+	}
+	t.Fatalf("%s: no such track", stream)
+	return nil
 }
 
 func writeTemp(t *testing.T, name string, b []byte) string {

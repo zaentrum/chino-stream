@@ -41,7 +41,13 @@ func copyOriginal(t *testing.T, ffmpeg string, fragmented bool) (root, file stri
 }
 
 // frameHashes are the hashes of the frames of the stream of input (v:0 or
-// a:0), in order: decoded, or with packets the packets as they are.
+// a:0), in order: decoded, or with packets the packets as they are. The hash
+// of the frame or packet itself (framemd5's sixth field), not of the side data
+// ffmpeg's demuxer gives a packet after it: an AAC track's skip samples, which
+// it reads from the container's edit list, not from the packet. (ffmpeg 9.0's
+// MP4 muxer trims an AAC track's end padding in its edit list, and its
+// demuxer puts that on the last packet; the remux keeps the packet, not the
+// trim.)
 func frameHashes(t *testing.T, ffmpeg, input, stream string, packets bool) []string {
 	t.Helper()
 	args := []string{"-nostdin", "-hide_banner", "-loglevel", "error", "-i", input, "-map", "0:" + stream}
@@ -55,7 +61,10 @@ func frameHashes(t *testing.T, ffmpeg, input, stream string, packets bool) []str
 			continue
 		}
 		f := strings.Split(l, ",")
-		hashes = append(hashes, strings.TrimSpace(f[len(f)-1]))
+		if len(f) < 6 {
+			t.Fatalf("framemd5 line %q", l)
+		}
+		hashes = append(hashes, strings.TrimSpace(f[5]))
 	}
 	return hashes
 }
