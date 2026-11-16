@@ -162,6 +162,14 @@ func servePlaylistCached(w http.ResponseWriter, r *http.Request, path string, re
 // serve the already-transformed body. It returns the body served (also on a
 // 304), nil when there is none.
 func servePlaylistCachedTransform(w http.ResponseWriter, r *http.Request, path, query string, retry func() string, transform func(string) string) []byte {
+	return servePlaylistCachedVariant(w, r, path, query, retry, "", transform)
+}
+
+// servePlaylistCachedVariant is servePlaylistCachedTransform, its cache entry
+// kept apart by variant as well: what else than the playlist's own bytes and
+// the query its transform's output depends on (serveRenditionPlaylist: the
+// version of the init segment it names).
+func servePlaylistCachedVariant(w http.ResponseWriter, r *http.Request, path, query string, retry func() string, variant string, transform func(string) string) []byte {
 	st, err := os.Stat(path)
 	if err != nil && retry != nil {
 		if again := retry(); again != "" {
@@ -177,6 +185,9 @@ func servePlaylistCachedTransform(w http.ResponseWriter, r *http.Request, path, 
 	// rewrites stay distinct. Cap at the lifetime of the file mtime
 	// — different mtime = different entry, so a repackage shows up.
 	cacheKey := path + "?" + query
+	if variant != "" {
+		cacheKey += "#" + variant
+	}
 	if v, ok := playlistCache.Load(cacheKey); ok {
 		if e := v.(*playlistCacheEntry); e.mtime.Equal(st.ModTime()) {
 			if match := r.Header.Get("If-None-Match"); match != "" && match == e.etag {
@@ -375,7 +386,53 @@ func (h *HLSHandler) PackagedRenditionPlaylist(w http.ResponseWriter, r *http.Re
 		packagedError(w, err)
 		return
 	}
-	servePlaylistCached(w, r, path, retry)
+	serveRenditionPlaylist(w, r, path, retry)
+}
+
+// serveRenditionPlaylist serves a packaged rendition's media playlist as
+// servePlaylistCached does, its init segment (#EXT-X-MAP) named with the
+// init's own version — its size and modification time, initVersion — so a
+// player asks for the init again once it changed in place, where the init's
+// immutable caching would keep the bytes from before: a mend changes boxes
+// of a package's init segment after it completed (package.json's mends) and
+// renames the new file into place. The segments' URIs are as before; a
+// playlist whose init is not there is served as it is.
+func serveRenditionPlaylist(w http.ResponseWriter, r *http.Request, path string, retry func() string) {
+	if _, err := os.Stat(path); err != nil && retry != nil {
+		if again := retry(); again != "" {
+			path = again
+		}
+	}
+	version := initVersion(filepath.Join(filepath.Dir(path), "init.mp4"))
+	if version == "" {
+		servePlaylistCached(w, r, path, nil)
+		return
+	}
+	servePlaylistCachedVariant(w, r, path, r.URL.RawQuery, nil, "init="+version, func(body string) string {
+		return withInitVersion(body, version)
+	})
+}
+
+// initVersion names the bytes of the init segment at path: its size and
+// modification time, which a file renamed into place changes; "" when it is
+// not there.
+func initVersion(path string) string {
+	st, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	return strconv.FormatInt(st.Size(), 10) + "-" + strconv.FormatInt(st.ModTime().UnixNano(), 36)
+}
+
+// withInitVersion is body with its #EXT-X-MAP URI carrying init=version.
+func withInitVersion(body, version string) string {
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "#EXT-X-MAP:") {
+			lines[i] = rewriteTagURIAttr(line, "init="+url.QueryEscape(version))
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // PackagedIframesPlaylist serves shaka's I-frame trick-play playlist.

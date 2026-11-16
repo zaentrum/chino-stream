@@ -209,7 +209,7 @@ func (h *HLSHandler) ExtraInfo(w http.ResponseWriter, r *http.Request) {
 // audio or WebVTT rendition, its URIs carrying the query.
 func (h *HLSHandler) ExtraRenditionPlaylist(w http.ResponseWriter, r *http.Request) {
 	if path, retry := h.extraFile(w, r, "hls", chi.URLParam(r, "rendId"), "playlist.m3u8"); path != "" {
-		servePlaylistCached(w, r, path, retry)
+		serveRenditionPlaylist(w, r, path, retry)
 	}
 }
 

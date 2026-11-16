@@ -104,7 +104,8 @@ func TestExtraRenditionsAreServed(t *testing.T) {
 		if w.Code != 200 || w.Header().Get("Content-Type") != "application/vnd.apple.mpegurl" {
 			t.Fatalf("%s playlist: %d %q %q", rend, w.Code, w.Header().Get("Content-Type"), w.Body)
 		}
-		for _, uri := range []string{`#EXT-X-MAP:URI="init.mp4` + query + `"`, "\nseg-00001.m4s" + query + "\n", "\nseg-00004.m4s" + query + "\n"} {
+		// the init named by its own version as well (serveRenditionPlaylist)
+		for _, uri := range []string{`#EXT-X-MAP:URI="init.mp4` + query + `&init=`, "\nseg-00001.m4s" + query + "\n", "\nseg-00004.m4s" + query + "\n"} {
 			if !strings.Contains(w.Body.String(), uri) {
 				t.Errorf("%s playlist lacks %q:\n%s", rend, uri, w.Body)
 			}

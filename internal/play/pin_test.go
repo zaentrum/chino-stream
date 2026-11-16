@@ -36,7 +36,7 @@ func TestASessionStaysOnItsVersionAcrossASupersede(t *testing.T) {
 		t.Fatalf("the master's URIs do not pin the version:\n%s", w.Body)
 	}
 	playlist := get(h, url("v0/playlist.m3u8"+pinOld)).Body.String()
-	if !strings.Contains(playlist, "\nseg-00001.m4s"+pinOld+"\n") || !strings.Contains(playlist, `#EXT-X-MAP:URI="init.mp4`+pinOld+`"`) {
+	if !strings.Contains(playlist, "\nseg-00001.m4s"+pinOld+"\n") || !strings.Contains(playlist, `#EXT-X-MAP:URI="init.mp4`+pinOld+`&init=`) {
 		t.Fatalf("the media playlist's URIs do not carry the pin on:\n%s", playlist)
 	}
 
