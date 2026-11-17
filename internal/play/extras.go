@@ -224,7 +224,7 @@ func (h *HLSHandler) ExtraIframesPlaylist(w http.ResponseWriter, r *http.Request
 // rendition.
 func (h *HLSHandler) ExtraInitSegment(w http.ResponseWriter, r *http.Request) {
 	if path, retry := h.extraFile(w, r, "hls", chi.URLParam(r, "rendId"), "init.mp4"); path != "" {
-		servePackagedStaticRetry(w, r, path, retry, "video/mp4", "init not found")
+		serveInitSegment(w, r, path, retry)
 	}
 }
 

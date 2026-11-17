@@ -76,14 +76,16 @@ Every `/api/play` route takes a bearer or `?stream=<token>` (chino-api's
 stream token). The URIs inside a playlist carry the request's query, so the
 token, `caps` and `q` ride along on every fetch — and `v`, the version a
 session is pinned to, and `lw=1` on a session of the live pipeline
-([below](#the-live-worker)). A packaged rendition's playlist (a title's and an extra's) names its init
-segment with the init's own version as well, `init=<size>-<mtime>`: init
-segments are served `immutable` for a day, and a mend changes the boxes of
-one in place after its package completed (the library's `package.json`
-`mends`), so a player asks for the new one once its playlist (cached for a
-minute) names the new version. The server's own cache of packaged files is
-checked against each file's modification time on every request, so it serves
-a file renamed into place from the next request on.
+([below](#the-live-worker)). A packaged rendition's playlist and its I-frame playlist (a title's
+and an extra's) name each init segment their `#EXT-X-MAP` names with the
+init's own version as well, `init=<16 hex digits of the sha256 of its
+bytes>`: init segments are served `immutable` for a day, and a mend changes
+the boxes of one in place after its package completed (the library's
+`package.json` `mends`), its size and possibly its modification time as they
+were, so a player asks for the new one once its playlist (cached for a
+minute) names the new version. An init asked for by a version is read anew,
+and served `no-store` when it is no longer that version, so no cache keeps
+its new bytes under the old name.
 
 A styled original and a font are served only from the `subs/` (a font
 `subs/fonts/`) of a package of their own title, as katalog-api's playback

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -390,49 +391,147 @@ func (h *HLSHandler) PackagedRenditionPlaylist(w http.ResponseWriter, r *http.Re
 }
 
 // serveRenditionPlaylist serves a packaged rendition's media playlist as
-// servePlaylistCached does, its init segment (#EXT-X-MAP) named with the
-// init's own version — its size and modification time, initVersion — so a
+// servePlaylistCached does, each init segment it names (#EXT-X-MAP) named
+// with the init's own version — a hash of its bytes, initVersions — so a
 // player asks for the init again once it changed in place, where the init's
 // immutable caching would keep the bytes from before: a mend changes boxes
 // of a package's init segment after it completed (package.json's mends) and
-// renames the new file into place. The segments' URIs are as before; a
-// playlist whose init is not there is served as it is.
+// renames the new file into place, its size and, on a store whose times are
+// coarse, its modification time as they were. The segments' URIs are as
+// before; a playlist none of whose inits is there is served as it is.
 func serveRenditionPlaylist(w http.ResponseWriter, r *http.Request, path string, retry func() string) {
-	if _, err := os.Stat(path); err != nil && retry != nil {
+	st, err := os.Stat(path)
+	if err != nil && retry != nil {
 		if again := retry(); again != "" {
 			path = again
+			st, err = os.Stat(path)
 		}
 	}
-	version := initVersion(filepath.Join(filepath.Dir(path), "init.mp4"))
-	if version == "" {
+	var versions map[string]string
+	if err == nil {
+		if raw, err := readPackagedBytes(path, st.ModTime()); err == nil {
+			versions = initVersions(filepath.Dir(path), string(raw))
+		}
+	}
+	if len(versions) == 0 {
 		servePlaylistCached(w, r, path, nil)
 		return
 	}
-	servePlaylistCachedVariant(w, r, path, r.URL.RawQuery, nil, "init="+version, func(body string) string {
-		return withInitVersion(body, version)
+	uris := make([]string, 0, len(versions))
+	for uri := range versions {
+		uris = append(uris, uri)
+	}
+	sort.Strings(uris)
+	variant := ""
+	for _, uri := range uris {
+		variant += uri + "=" + versions[uri] + ";"
+	}
+	servePlaylistCachedVariant(w, r, path, r.URL.RawQuery, nil, "init="+variant, func(body string) string {
+		return withInitVersions(body, versions)
 	})
 }
 
-// initVersion names the bytes of the init segment at path: its size and
-// modification time, which a file renamed into place changes; "" when it is
-// not there.
-func initVersion(path string) string {
-	st, err := os.Stat(path)
-	if err != nil {
-		return ""
+// initVersions is the version of each init segment the playlist body names
+// in an #EXT-X-MAP line, by the URI it names it with (its query left out):
+// the first 16 hex digits of the sha256 of its bytes, read now from the
+// folder dir the playlist is in. An init that is not there, or a URI that is
+// no file beside the playlist, has none.
+func initVersions(dir, body string) map[string]string {
+	out := map[string]string{}
+	for _, line := range strings.Split(body, "\n") {
+		uri, ok := mapURI(line)
+		if !ok {
+			continue
+		}
+		if _, seen := out[uri]; seen || strings.Contains(uri, ":") || strings.HasPrefix(uri, "/") ||
+			strings.Contains(uri, "..") || strings.Contains(uri, "\\") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(uri)))
+		if err != nil {
+			continue
+		}
+		out[uri] = initVersionOf(data)
 	}
-	return strconv.FormatInt(st.Size(), 10) + "-" + strconv.FormatInt(st.ModTime().UnixNano(), 36)
+	return out
 }
 
-// withInitVersion is body with its #EXT-X-MAP URI carrying init=version.
-func withInitVersion(body, version string) string {
+// initVersionOf is the version of an init segment's bytes.
+func initVersionOf(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:8])
+}
+
+// mapURI is the URI of an #EXT-X-MAP line, its query left out.
+func mapURI(line string) (string, bool) {
+	if !strings.HasPrefix(line, "#EXT-X-MAP:") {
+		return "", false
+	}
+	const marker = `URI="`
+	i := strings.Index(line, marker)
+	if i < 0 {
+		return "", false
+	}
+	uri := line[i+len(marker):]
+	if end := strings.IndexByte(uri, '"'); end >= 0 {
+		uri = uri[:end]
+	} else {
+		return "", false
+	}
+	if q := strings.IndexByte(uri, '?'); q >= 0 {
+		uri = uri[:q]
+	}
+	return uri, uri != ""
+}
+
+// withInitVersions is body with each #EXT-X-MAP URI that versions has a
+// version for carrying init=<version>.
+func withInitVersions(body string, versions map[string]string) string {
 	lines := strings.Split(body, "\n")
 	for i, line := range lines {
-		if strings.HasPrefix(line, "#EXT-X-MAP:") {
-			lines[i] = rewriteTagURIAttr(line, "init="+url.QueryEscape(version))
+		if uri, ok := mapURI(line); ok && versions[uri] != "" {
+			lines[i] = rewriteTagURIAttr(line, "init="+url.QueryEscape(versions[uri]))
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// serveInitSegment serves the init segment at path as servePackagedStaticRetry
+// does; asked for by a version (init=, as serveRenditionPlaylist names it), it
+// is read anew, and served immutable while it is that version, under
+// "no-store" when it is another — a player holding a playlist from before a
+// mend gets the bytes the init has now, which no cache keeps under the old
+// name.
+func serveInitSegment(w http.ResponseWriter, r *http.Request, path string, retry func() string) {
+	asked := r.URL.Query().Get("init")
+	if asked == "" {
+		servePackagedStaticRetry(w, r, path, retry, "video/mp4", "init not found")
+		return
+	}
+	st, err := os.Stat(path)
+	if err != nil && retry != nil {
+		if again := retry(); again != "" {
+			path = again
+			st, err = os.Stat(path)
+		}
+	}
+	if err != nil {
+		http.Error(w, "init not found", http.StatusNotFound)
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		http.Error(w, "read failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "video/mp4")
+	if initVersionOf(data) == asked {
+		storePackaged(path, data, st.ModTime())
+		w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
+	} else {
+		w.Header().Set("Cache-Control", "no-store")
+	}
+	http.ServeContent(w, r, filepath.Base(path), st.ModTime(), bytes.NewReader(data))
 }
 
 // PackagedIframesPlaylist serves shaka's I-frame trick-play playlist.
@@ -454,6 +553,7 @@ func serveIframesPlaylist(w http.ResponseWriter, r *http.Request, path string, r
 	body, err := os.ReadFile(path)
 	if err != nil && retry != nil {
 		if again := retry(); again != "" {
+			path = again
 			body, err = os.ReadFile(again)
 		}
 	}
@@ -461,7 +561,8 @@ func serveIframesPlaylist(w http.ResponseWriter, r *http.Request, path string, r
 		http.Error(w, "iframes not found", http.StatusNotFound)
 		return
 	}
-	out := rewriteM3U8URIs(string(body), r.URL.RawQuery)
+	// its init named by its version, as the rendition playlist names it
+	out := withInitVersions(rewriteM3U8URIs(string(body), r.URL.RawQuery), initVersions(filepath.Dir(path), string(body)))
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write([]byte(out))
@@ -472,7 +573,12 @@ func serveIframesPlaylist(w http.ResponseWriter, r *http.Request, path string, r
 // subsequent Range requests from the buffer — see servePackagedStatic
 // for the rationale (NFS Range-read contention).
 func (h *HLSHandler) PackagedInitSegment(w http.ResponseWriter, r *http.Request) {
-	h.servePackaged(w, r, "video/mp4", "init not found", "hls", chi.URLParam(r, "rendId"), "init.mp4")
+	path, retry, err := h.packagedFile(r, "hls", chi.URLParam(r, "rendId"), "init.mp4")
+	if err != nil {
+		packagedError(w, err)
+		return
+	}
+	serveInitSegment(w, r, path, retry)
 }
 
 // PackagedSegment serves one CMAF media segment from the packages
