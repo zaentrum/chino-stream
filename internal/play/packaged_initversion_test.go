@@ -191,7 +191,11 @@ func TestAnInitsVersionIsKeptWhileItIsTheSameFile(t *testing.T) {
 	if got := serve(); !strings.Contains(got, "init="+second+`"`) {
 		t.Errorf("the playlist once the init was renamed into place: %q", got)
 	}
-	if _, ok := playlistCache.Load(pl + "?stream=tok#init=init.mp4=" + first + ";"); ok {
+	marked, _, _ := templateQuery("stream=tok")
+	if _, ok := playlistCache.Load(playlistKey{pl, marked, "init=init.mp4=" + second + ";"}); !ok {
+		t.Errorf("the playlist cache keeps no entry of the version now")
+	}
+	if _, ok := playlistCache.Load(playlistKey{pl, marked, "init=init.mp4=" + first + ";"}); ok {
 		t.Errorf("the playlist cache keeps the entry of the version before")
 	}
 	if code, body, cc := get(first); code != 200 || body != "an INIT" || cc != "no-store" {

@@ -140,18 +140,37 @@ func codecFamily(c string) string {
 // variable is the query string (used by rewriteM3U8URIs). Cache by
 // (path, query) keyed on file mtime so repackages still get fresh
 // content without a pod restart.
+//
+// The key holds no per-session part: the values of the session's
+// parameters (sessionParams — its stream token, its start time) are marks
+// in the key and in the cached body, filled in on every serve, so one entry
+// serves every session of a playlist and the cache grows with the playlists
+// played, not with the sessions. It holds playlistCacheBudget bytes at most,
+// the least recently served dropped first, and the sweeper drops what was
+// not served for its maxAge (pruneServeCaches).
 type playlistCacheEntry struct {
-	body  []byte
-	etag  string
-	mtime time.Time
+	body      []byte // its URIs carrying the query with the session's values marked
+	etag      string // of body as cached; the one served is sessionETag's
+	mtime     time.Time
+	lastTouch atomic.Int64 // unix nanos
 }
 
-var playlistCache sync.Map // map[string]*playlistCacheEntry (cacheKey -> entry)
+var playlistCache sync.Map // map[playlistKey]*playlistCacheEntry
+
+// playlistCacheBudget caps the bytes of the bodies playlistCache holds: a
+// rendition playlist of a two-hour title is some 280 KB, so a few hundred
+// of them. (A variable for the tests.)
+var playlistCacheBudget int64 = 128 << 20
+
+var (
+	playlistCacheBytes atomic.Int64
+	playlistCacheMu    sync.Mutex
+)
 
 // playlistVariants is, by path and query, the variant of the playlist
 // cached last (servePlaylistCachedVariant), whose entry the next variant's
 // replaces.
-var playlistVariants sync.Map // map[string]string
+var playlistVariants sync.Map // map[variantBase]string
 
 // servePlaylistCached reads + rewrites + caches an m3u8 file, its URIs
 // carrying the request's query, then serves it with an ETag and a short
@@ -188,24 +207,31 @@ func servePlaylistCachedVariant(w http.ResponseWriter, r *http.Request, path, qu
 		http.Error(w, "playlist not found", http.StatusNotFound)
 		return nil
 	}
-	// Cache key includes the query so different ?stream=…/?caps=…
-	// rewrites stay distinct. Cap at the lifetime of the file mtime
-	// — different mtime = different entry, so a repackage shows up.
-	cacheKey := path + "?" + query
-	if variant != "" {
-		cacheKey += "#" + variant
+	// The key holds the query so different ?caps=…/?q=… rewrites stay
+	// distinct, its session's values marked (templateQuery) so every session
+	// shares the entry. Cap at the lifetime of the file mtime — different
+	// mtime = different entry, so a repackage shows up.
+	marked, values, keep := templateQuery(query)
+	if !keep {
+		// served as before, rewritten whole, and kept by no cache
+		raw, err := readPackagedBytes(path, st.ModTime())
+		if err != nil {
+			http.Error(w, "playlist not found", http.StatusNotFound)
+			return nil
+		}
+		body := rewriteM3U8URIs(string(raw), query)
+		if transform != nil {
+			body = transform(body)
+		}
+		out := []byte(body)
+		sum := sha1.Sum(out)
+		return servePlaylistBody(w, r, out, nil, `"`+hex.EncodeToString(sum[:])+`"`)
 	}
+	cacheKey := playlistKey{path, marked, variant}
 	if v, ok := playlistCache.Load(cacheKey); ok {
 		if e := v.(*playlistCacheEntry); e.mtime.Equal(st.ModTime()) {
-			if match := r.Header.Get("If-None-Match"); match != "" && match == e.etag {
-				w.WriteHeader(http.StatusNotModified)
-				return e.body
-			}
-			w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
-			w.Header().Set("Cache-Control", "private, max-age=60")
-			w.Header().Set("ETag", e.etag)
-			_, _ = w.Write(e.body)
-			return e.body
+			e.lastTouch.Store(time.Now().UnixNano())
+			return servePlaylistBody(w, r, e.body, values, e.etag)
 		}
 	}
 	// Route the raw read through packagedCache so a Zap warm
@@ -220,31 +246,52 @@ func servePlaylistCachedVariant(w http.ResponseWriter, r *http.Request, path, qu
 		http.Error(w, "playlist not found", http.StatusNotFound)
 		return nil
 	}
-	body := rewriteM3U8URIs(string(raw), query)
+	body := rewriteM3U8URIs(string(raw), marked)
 	if transform != nil {
 		body = transform(body)
 	}
 	out := []byte(body)
 	sum := sha1.Sum(out)
 	etag := `"` + hex.EncodeToString(sum[:]) + `"`
-	playlistCache.Store(cacheKey, &playlistCacheEntry{body: out, etag: etag, mtime: st.ModTime()})
+	storePlaylist(cacheKey, &playlistCacheEntry{body: out, etag: etag, mtime: st.ModTime()})
 	if variant != "" {
-		// the entry of the variant before (an init's version before it
-		// changed) is never asked for again: drop it
-		base := path + "?" + query
+		// the entry of the variant before (an init's version, a record,
+		// before it changed) is never asked for again: drop it
+		base := variantBase{path, marked}
 		if prev, loaded := playlistVariants.Swap(base, variant); loaded && prev.(string) != variant {
-			playlistCache.Delete(base + "#" + prev.(string))
+			dropPlaylist(playlistKey{path, marked, prev.(string)})
 		}
 	}
+	return servePlaylistBody(w, r, out, values, etag)
+}
+
+// servePlaylistBody serves a playlist's cached body filled with its
+// session's values, with the session's ETag (sessionETag of etag, the cached
+// body's), a 304 to a request that holds it already, decided before the body
+// is filled. It returns the body served; on a 304, the cached body, whose
+// URIs name the same paths.
+func servePlaylistBody(w http.ResponseWriter, r *http.Request, cached []byte, values []string, etag string) []byte {
+	etag = sessionETag(etag, values)
 	if match := r.Header.Get("If-None-Match"); match != "" && match == etag {
 		w.WriteHeader(http.StatusNotModified)
-		return out
+		return cached
 	}
+	body := fillQuery(cached, values)
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Cache-Control", "private, max-age=60")
 	w.Header().Set("ETag", etag)
-	_, _ = w.Write(out)
-	return out
+	_, _ = w.Write(body)
+	return body
+}
+
+// recordVariant is the variant of a master's entry: the identity of the
+// package's record its body was built from (its modification time and a
+// hash of its bytes, as read), "none" when there was none to read.
+func recordVariant(mf *pkgmanifest.Manifest) string {
+	if mf == nil || mf.Stamp == "" {
+		return "record=none"
+	}
+	return "record=" + mf.Stamp
 }
 
 // servePackagedMaster serves the master of the package p as the client may
@@ -282,7 +329,8 @@ func (h *HLSHandler) servePackagedMaster(w http.ResponseWriter, r *http.Request,
 	if manifestHasHDR(mf) {
 		videoRange = injectVideoRangeTransform(mf)
 	}
-	served := servePlaylistCachedTransform(w, r, p.path("hls", "master.m3u8"), pinnedQuery(r.URL.RawQuery, p.versionID), nil, func(body string) string {
+	// the body is built from the record too: its identity is the variant
+	served := servePlaylistCachedVariant(w, r, p.path("hls", "master.m3u8"), pinnedQuery(r.URL.RawQuery, p.versionID), nil, recordVariant(mf), func(body string) string {
 		if videoRange != nil {
 			body = videoRange(body)
 		}
@@ -474,11 +522,13 @@ var (
 type mapURIsEntry struct {
 	id   fileID
 	uris []string
+	used atomic.Int64 // unix nanos: pruneServeCaches drops what is not used
 }
 
 type initVersionEntry struct {
 	id      fileID
 	version string
+	used    atomic.Int64 // unix nanos
 }
 
 // mapURIsOf is the URIs the #EXT-X-MAP lines of the playlist at path name
@@ -486,15 +536,18 @@ type initVersionEntry struct {
 // is another file than it was.
 func mapURIsOf(path string, st os.FileInfo) []string {
 	id := fileIDOf(st)
-	if v, ok := mapURIsCache.Load(path); ok && v.(mapURIsEntry).id == id {
-		return v.(mapURIsEntry).uris
+	if v, ok := mapURIsCache.Load(path); ok && v.(*mapURIsEntry).id == id {
+		v.(*mapURIsEntry).used.Store(time.Now().UnixNano())
+		return v.(*mapURIsEntry).uris
 	}
 	raw, err := readPackagedBytes(path, st.ModTime())
 	if err != nil {
 		return nil
 	}
 	uris := mapURIsIn(string(raw))
-	mapURIsCache.Store(path, mapURIsEntry{id, uris})
+	e := &mapURIsEntry{id: id, uris: uris}
+	e.used.Store(time.Now().UnixNano())
+	mapURIsCache.Store(path, e)
 	return uris
 }
 
@@ -537,8 +590,9 @@ func initVersionAt(path string) string {
 		return ""
 	}
 	id := fileIDOf(st)
-	if v, ok := initVersionCache.Load(path); ok && v.(initVersionEntry).id == id {
-		return v.(initVersionEntry).version
+	if v, ok := initVersionCache.Load(path); ok && v.(*initVersionEntry).id == id {
+		v.(*initVersionEntry).used.Store(time.Now().UnixNano())
+		return v.(*initVersionEntry).version
 	}
 	mu := packagedLoadLock(path)
 	mu.Lock()
@@ -552,7 +606,9 @@ func initVersionAt(path string) string {
 	// kept only while the file read is the one stat'ed: one renamed into
 	// place meanwhile is read again by the next request
 	if after, err := os.Stat(path); err == nil && fileIDOf(after) == id {
-		initVersionCache.Store(path, initVersionEntry{id, version})
+		e := &initVersionEntry{id: id, version: version}
+		e.used.Store(time.Now().UnixNano())
+		initVersionCache.Store(path, e)
 	}
 	return version
 }
@@ -1308,6 +1364,7 @@ func appendQuery(uri, query string) string {
 type manifestCacheEntry struct {
 	mf    *pkgmanifest.Manifest
 	mtime time.Time
+	used  atomic.Int64 // unix nanos: pruneServeCaches drops what is not used
 }
 
 // manifestCache is keyed by the record's path: a version's package.json, a
@@ -1380,6 +1437,7 @@ func readManifest(path string, decode func([]byte) (*pkgmanifest.Manifest, error
 	}
 	if v, ok := manifestCache.Load(path); ok {
 		if e := v.(*manifestCacheEntry); e.mtime.Equal(st.ModTime()) {
+			e.used.Store(time.Now().UnixNano())
 			return e.mf, nil
 		}
 	}
@@ -1391,7 +1449,12 @@ func readManifest(path string, decode func([]byte) (*pkgmanifest.Manifest, error
 	if err != nil {
 		return nil, err
 	}
-	manifestCache.Store(path, &manifestCacheEntry{mf: m, mtime: st.ModTime()})
+	// the record's identity as read, which a master built from it is kept by
+	sum := sha256.Sum256(raw)
+	m.Stamp = strconv.FormatInt(st.ModTime().UnixNano(), 10) + "-" + hex.EncodeToString(sum[:8])
+	e := &manifestCacheEntry{mf: m, mtime: st.ModTime()}
+	e.used.Store(time.Now().UnixNano())
+	manifestCache.Store(path, e)
 	return m, nil
 }
 

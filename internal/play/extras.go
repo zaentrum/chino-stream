@@ -166,7 +166,8 @@ func (h *HLSHandler) ExtraMaster(w http.ResponseWriter, r *http.Request) {
 	}
 	path, retry := h.extraRetry(r, p, "hls", "master.m3u8")
 	q := r.URL.Query().Get("q")
-	servePlaylistCachedTransform(w, r, path, r.URL.RawQuery, retry, func(body string) string {
+	// the body is built from the record too: its identity is the variant
+	servePlaylistCachedVariant(w, r, path, r.URL.RawQuery, retry, recordVariant(mf), func(body string) string {
 		return nameVariants(serveLadder(body, caps, q, twinsOf(mf)).body, originalRungs(mf))
 	})
 }

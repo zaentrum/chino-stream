@@ -38,6 +38,10 @@ const CurrentVersion = 2
 // optional for backwards compatibility with v1 packages still on
 // disk from before the rewrite.
 type Manifest struct {
+	// Stamp is the identity of the record as it was read (its modification
+	// time and a hash of its bytes), set by its reader; no field of the file.
+	Stamp string `json:"-"`
+
 	Version    int       `json:"version"`
 	ItemID     string    `json:"itemId"`
 	PackagedAt time.Time `json:"packagedAt"`

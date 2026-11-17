@@ -91,6 +91,19 @@ served `no-store` when it is no longer that version, so no cache keeps its new
 bytes under the old name. What an `#EXT-X-MAP` names that is larger than
 4 MiB is named as it is.
 
+The server keeps each packaged master and rendition playlist it rewrote in
+memory, once for every session: the values of a session's `stream`, `token`
+and `t` (by their names as the query decodes them) are no part of the key and
+are filled in on every request, so the cache grows with the playlists played,
+not with the sessions, and a master is kept by the package's record it was
+built from as well. A request whose session values hold other bytes than a
+token's or a time's is served as before, rewritten whole, and not kept. The
+cache's keys and bodies hold 128 MiB at most, the least recently served
+dropped first. An I-frame playlist is not kept: it is rewritten on every
+request and served `no-store`. The cache sweeper drops every playlist, init
+version, `#EXT-X-MAP` list and package record not used for two hours, and the
+read lock of every file the packaged-file cache no longer holds.
+
 A styled original and a font are served only from the `subs/` (a font
 `subs/fonts/`) of a package of their own title, as katalog-api's playback
 lookup names its packages — the one it plays, or one a session may finish

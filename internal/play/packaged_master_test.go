@@ -60,10 +60,11 @@ func resetPackageCaches() {
 	for _, m := range []interface {
 		Range(func(k, v any) bool)
 		Delete(k any)
-	}{&manifestCache, &playlistCache, &packagedCache, &zapPinnedPaths} {
+	}{&manifestCache, &playlistCache, &playlistVariants, &mapURIsCache, &initVersionCache, &packagedCache, &zapPinnedPaths} {
 		m.Range(func(k, _ any) bool { m.Delete(k); return true })
 	}
 	packagedCacheBytes.Store(0)
+	playlistCacheBytes.Store(0)
 }
 
 // golden compares got with testdata/golden/name, or writes it with -update.

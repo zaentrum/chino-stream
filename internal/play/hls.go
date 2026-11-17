@@ -2007,6 +2007,7 @@ func (h *HLSHandler) sweep(maxAge time.Duration) {
 	h.Packages.prune()
 	h.sweepIndexes()
 	cutoff := time.Now().Add(-maxAge)
+	pruneServeCaches(cutoff)
 	indexes := h.indexDir()
 	_ = filepath.Walk(h.CacheDir, func(path string, info os.FileInfo, err error) error {
 		if err == nil && info.IsDir() && path == indexes {
