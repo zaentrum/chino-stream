@@ -83,9 +83,13 @@ bytes>`: init segments are served `immutable` for a day, and a mend changes
 the boxes of one in place after its package completed (the library's
 `package.json` `mends`), its size and possibly its modification time as they
 were, so a player asks for the new one once its playlist (cached for a
-minute) names the new version. An init asked for by a version is read anew,
-and served `no-store` when it is no longer that version, so no cache keeps
-its new bytes under the old name.
+minute) names the new version. The version is kept while the init is the
+file it was (its size, modification time, inode and change time: a file
+renamed into place is another), and an init asked for by a version is served
+from memory while the bytes held there are that version, else read anew and
+served `no-store` when it is no longer that version, so no cache keeps its new
+bytes under the old name. What an `#EXT-X-MAP` names that is larger than
+4 MiB is named as it is.
 
 A styled original and a font are served only from the `subs/` (a font
 `subs/fonts/`) of a package of their own title, as katalog-api's playback

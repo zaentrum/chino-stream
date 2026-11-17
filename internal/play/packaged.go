@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -147,6 +148,11 @@ type playlistCacheEntry struct {
 
 var playlistCache sync.Map // map[string]*playlistCacheEntry (cacheKey -> entry)
 
+// playlistVariants is, by path and query, the variant of the playlist
+// cached last (servePlaylistCachedVariant), whose entry the next variant's
+// replaces.
+var playlistVariants sync.Map // map[string]string
+
 // servePlaylistCached reads + rewrites + caches an m3u8 file, its URIs
 // carrying the request's query, then serves it with an ETag and a short
 // max-age so browser revisits short-circuit at the cache layer. retry, when
@@ -222,6 +228,14 @@ func servePlaylistCachedVariant(w http.ResponseWriter, r *http.Request, path, qu
 	sum := sha1.Sum(out)
 	etag := `"` + hex.EncodeToString(sum[:]) + `"`
 	playlistCache.Store(cacheKey, &playlistCacheEntry{body: out, etag: etag, mtime: st.ModTime()})
+	if variant != "" {
+		// the entry of the variant before (an init's version before it
+		// changed) is never asked for again: drop it
+		base := path + "?" + query
+		if prev, loaded := playlistVariants.Swap(base, variant); loaded && prev.(string) != variant {
+			playlistCache.Delete(base + "#" + prev.(string))
+		}
+	}
 	if match := r.Header.Get("If-None-Match"); match != "" && match == etag {
 		w.WriteHeader(http.StatusNotModified)
 		return out
@@ -409,9 +423,7 @@ func serveRenditionPlaylist(w http.ResponseWriter, r *http.Request, path string,
 	}
 	var versions map[string]string
 	if err == nil {
-		if raw, err := readPackagedBytes(path, st.ModTime()); err == nil {
-			versions = initVersions(filepath.Dir(path), string(raw))
-		}
+		versions = initVersions(filepath.Dir(path), mapURIsOf(path, st))
 	}
 	if len(versions) == 0 {
 		servePlaylistCached(w, r, path, nil)
@@ -431,29 +443,118 @@ func serveRenditionPlaylist(w http.ResponseWriter, r *http.Request, path string,
 	})
 }
 
-// initVersions is the version of each init segment the playlist body names
-// in an #EXT-X-MAP line, by the URI it names it with (its query left out):
-// the first 16 hex digits of the sha256 of its bytes, read now from the
-// folder dir the playlist is in. An init that is not there, or a URI that is
-// no file beside the playlist, has none.
-func initVersions(dir, body string) map[string]string {
-	out := map[string]string{}
+// readInit reads an init segment from the store (a test counts its reads).
+var readInit = os.ReadFile
+
+// maxInitBytes caps what an #EXT-X-MAP names that is read to name its
+// version: an init segment is a few kilobytes, the schemas' validator reads
+// one up to 4 MiB, and a file larger is named as it is.
+const maxInitBytes = 4 << 20
+
+// fileID tells one file's bytes at a path from another's without reading
+// them: its size and modification time, and where the system says, its
+// inode and change time — a file renamed into place is another inode, so a
+// mend that keeps the size and, on a store with coarse times, the
+// modification time is told apart all the same.
+type fileID struct{ size, mtime, ino, ctime int64 }
+
+func fileIDOf(st os.FileInfo) fileID {
+	ino, ctime := sysFileID(st)
+	return fileID{st.Size(), st.ModTime().UnixNano(), ino, ctime}
+}
+
+// mapURIsCache and initVersionCache keep, by path, what a file's bytes gave
+// while it is the file it was (fileID): a playlist's #EXT-X-MAP URIs, an
+// init's version.
+var (
+	mapURIsCache     sync.Map // path -> mapURIsEntry
+	initVersionCache sync.Map // path -> initVersionEntry
+)
+
+type mapURIsEntry struct {
+	id   fileID
+	uris []string
+}
+
+type initVersionEntry struct {
+	id      fileID
+	version string
+}
+
+// mapURIsOf is the URIs the #EXT-X-MAP lines of the playlist at path name
+// (their queries left out), each once, read again only once the playlist
+// is another file than it was.
+func mapURIsOf(path string, st os.FileInfo) []string {
+	id := fileIDOf(st)
+	if v, ok := mapURIsCache.Load(path); ok && v.(mapURIsEntry).id == id {
+		return v.(mapURIsEntry).uris
+	}
+	raw, err := readPackagedBytes(path, st.ModTime())
+	if err != nil {
+		return nil
+	}
+	uris := mapURIsIn(string(raw))
+	mapURIsCache.Store(path, mapURIsEntry{id, uris})
+	return uris
+}
+
+// mapURIsIn is the URIs the #EXT-X-MAP lines of body name, each once: those
+// of a file beside the playlist (no scheme, no absolute path, no ..).
+func mapURIsIn(body string) []string {
+	var out []string
 	for _, line := range strings.Split(body, "\n") {
 		uri, ok := mapURI(line)
-		if !ok {
-			continue
-		}
-		if _, seen := out[uri]; seen || strings.Contains(uri, ":") || strings.HasPrefix(uri, "/") ||
+		if !ok || slices.Contains(out, uri) || strings.Contains(uri, ":") || strings.HasPrefix(uri, "/") ||
 			strings.Contains(uri, "..") || strings.Contains(uri, "\\") {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(uri)))
-		if err != nil {
-			continue
-		}
-		out[uri] = initVersionOf(data)
+		out = append(out, uri)
 	}
 	return out
+}
+
+// initVersions is the version of each init segment uris names, beside the
+// playlist in the folder dir, by its URI (initVersionAt). An init that is
+// not there, or too large to be one, has none.
+func initVersions(dir string, uris []string) map[string]string {
+	out := map[string]string{}
+	for _, uri := range uris {
+		if v := initVersionAt(filepath.Join(dir, filepath.FromSlash(uri))); v != "" {
+			out[uri] = v
+		}
+	}
+	return out
+}
+
+// initVersionAt is the version of the init segment at path: the first 16
+// hex digits of the sha256 of its bytes, kept while the file is the one it
+// was (fileID) and read again — the read put in packagedCache as well, under
+// the path's load lock — once it is another; "" when there is none, or it is
+// no file of at most maxInitBytes.
+func initVersionAt(path string) string {
+	st, err := os.Stat(path)
+	if err != nil || !st.Mode().IsRegular() || st.Size() > maxInitBytes {
+		return ""
+	}
+	id := fileIDOf(st)
+	if v, ok := initVersionCache.Load(path); ok && v.(initVersionEntry).id == id {
+		return v.(initVersionEntry).version
+	}
+	mu := packagedLoadLock(path)
+	mu.Lock()
+	defer mu.Unlock()
+	data, err := readInit(path)
+	if err != nil || int64(len(data)) > maxInitBytes {
+		return ""
+	}
+	version := initVersionOf(data)
+	storePackaged(path, data, st.ModTime())
+	// kept only while the file read is the one stat'ed: one renamed into
+	// place meanwhile is read again by the next request
+	if after, err := os.Stat(path); err == nil && fileIDOf(after) == id {
+		initVersionCache.Store(path, initVersionEntry{id, version})
+	}
+	return version
 }
 
 // initVersionOf is the version of an init segment's bytes.
@@ -497,11 +598,13 @@ func withInitVersions(body string, versions map[string]string) string {
 }
 
 // serveInitSegment serves the init segment at path as servePackagedStaticRetry
-// does; asked for by a version (init=, as serveRenditionPlaylist names it), it
-// is read anew, and served immutable while it is that version, under
-// "no-store" when it is another — a player holding a playlist from before a
-// mend gets the bytes the init has now, which no cache keeps under the old
-// name.
+// does; asked for by a version (init=, as serveRenditionPlaylist names it),
+// it is served immutable from memory when the bytes packagedCache holds of
+// it are that version — the version is a hash of the bytes, so they are the
+// ones the name stands for — and else read anew, under the path's load lock:
+// immutable while the file is that version, "no-store" when it is another (a
+// player holding a playlist from before a mend gets the bytes the init has
+// now, which no cache keeps under the old name).
 func serveInitSegment(w http.ResponseWriter, r *http.Request, path string, retry func() string) {
 	asked := r.URL.Query().Get("init")
 	if asked == "" {
@@ -519,14 +622,27 @@ func serveInitSegment(w http.ResponseWriter, r *http.Request, path string, retry
 		http.Error(w, "init not found", http.StatusNotFound)
 		return
 	}
-	data, err := os.ReadFile(path)
+	w.Header().Set("Content-Type", "video/mp4")
+	if v, ok := packagedCache.Load(path); ok {
+		if entry := v.(*packagedCacheEntry); entry.version() == asked {
+			entry.lastTouch.Store(time.Now().UnixNano())
+			w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
+			http.ServeContent(w, r, filepath.Base(path), entry.mtime, bytes.NewReader(entry.bytes))
+			return
+		}
+	}
+	mu := packagedLoadLock(path)
+	mu.Lock()
+	data, err := readInit(path)
+	if err == nil {
+		storePackaged(path, data, st.ModTime())
+	}
+	mu.Unlock()
 	if err != nil {
 		http.Error(w, "read failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "video/mp4")
 	if initVersionOf(data) == asked {
-		storePackaged(path, data, st.ModTime())
 		w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
 	} else {
 		w.Header().Set("Cache-Control", "no-store")
@@ -562,7 +678,7 @@ func serveIframesPlaylist(w http.ResponseWriter, r *http.Request, path string, r
 		return
 	}
 	// its init named by its version, as the rendition playlist names it
-	out := withInitVersions(rewriteM3U8URIs(string(body), r.URL.RawQuery), initVersions(filepath.Dir(path), string(body)))
+	out := withInitVersions(rewriteM3U8URIs(string(body), r.URL.RawQuery), initVersions(filepath.Dir(path), mapURIsIn(string(body))))
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write([]byte(out))
@@ -656,7 +772,18 @@ const packagedCacheBudgetBytes = 512 * 1024 * 1024
 type packagedCacheEntry struct {
 	bytes     []byte
 	mtime     time.Time
-	lastTouch atomic.Int64 // unix nanos
+	lastTouch atomic.Int64           // unix nanos
+	sum       atomic.Pointer[string] // initVersionOf(bytes), once asked
+}
+
+// version is initVersionOf the entry's bytes, hashed once.
+func (e *packagedCacheEntry) version() string {
+	if v := e.sum.Load(); v != nil {
+		return *v
+	}
+	v := initVersionOf(e.bytes)
+	e.sum.Store(&v)
+	return v
 }
 
 var (
